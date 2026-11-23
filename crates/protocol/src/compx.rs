@@ -118,6 +118,14 @@ mod tests {
     }
 
     #[test]
+    fn compx_echoed_query_is_not_a_reading() {
+        assert_eq!(
+            decode(battery_query(Family::Compx)),
+            Decoded::Invalid("percent 0: no data")
+        );
+    }
+
+    #[test]
     fn compx_short() {
         assert_eq!(decode(&REPLY[..16]), Decoded::NotTheReply);
     }

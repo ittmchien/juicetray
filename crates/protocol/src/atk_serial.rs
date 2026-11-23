@@ -64,6 +64,13 @@ mod tests {
     }
 
     #[test]
+    fn atk_echoed_request_is_not_a_reading() {
+        let echoed = decode(battery_query(Family::AtkSerial));
+        assert!(!matches!(echoed, Decoded::Reading(_)));
+        assert_eq!(echoed, Decoded::Invalid("percent 0: no data"));
+    }
+
+    #[test]
     fn atk_serial_percent_101() {
         assert_eq!(
             decode(&frame([0x00, 0x03], 101)),

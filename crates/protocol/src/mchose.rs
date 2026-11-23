@@ -28,13 +28,16 @@ pub(crate) fn decode(bytes: &[u8]) -> Decoded {
     let Some(header) = frame.get(..FRAME_HEADER_LEN) else {
         return Decoded::NotTheReply;
     };
-    if header[4..]
-        != [
-            CMD_TYPE_REQUEST[0],
-            CMD_TYPE_REQUEST[1],
-            CMD_GET_BATTERY_SLEEP,
-        ]
-    {
+    // Replies start with 0xAA; flags-0 replies carry no checksum to catch anything else.
+    if header[0] != FRAME_START {
+        return Decoded::NotTheReply;
+    }
+    let cmd_match = [
+        CMD_TYPE_REQUEST[0],
+        CMD_TYPE_REQUEST[1],
+        CMD_GET_BATTERY_SLEEP,
+    ];
+    if header[4..] != cmd_match {
         return Decoded::NotTheReply;
     }
     let (flags, len) = (header[2], usize::from(header[3]));
@@ -146,6 +149,26 @@ mod tests {
     fn mchose_short_payload() {
         let bytes = [0x55, 0xaa, 0x01, 0x00, 0x02, 0x00, 0x01, 0x0b, 0x01, 0x54];
         assert_eq!(decode(&bytes), Decoded::Invalid("short payload"));
+    }
+
+    #[test]
+    fn mchose_level_zero_is_no_data() {
+        let awake = [
+            0x55, 0xaa, 0x01, 0x00, 0x03, 0x00, 0x01, 0x0b, 0x01, 0x00, 0x00,
+        ];
+        assert_eq!(decode(&awake), Decoded::Invalid("percent 0: no data"));
+        let asleep = [
+            0x55, 0xaa, 0x01, 0x00, 0x03, 0x00, 0x01, 0x0b, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(decode(&asleep), Decoded::Invalid("percent 0: no data"));
+    }
+
+    #[test]
+    fn mchose_wrong_start_byte_is_not_the_reply() {
+        let bytes = [
+            0x55, 0xab, 0x01, 0x00, 0x03, 0x00, 0x01, 0x0b, 0x01, 0x54, 0x00,
+        ];
+        assert_eq!(decode(&bytes), Decoded::NotTheReply);
     }
 
     #[test]

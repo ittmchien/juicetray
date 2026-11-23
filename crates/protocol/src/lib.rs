@@ -107,8 +107,12 @@ const fn padded<const N: usize>(head: &[u8]) -> [u8; N] {
     frame
 }
 
-/// Builds a reading, rejecting a percent above 100 (a reported 0 is valid).
+/// Builds a reading. A raw 0 means "no data" (a zeroed or echoed frame decodes to it) and a
+/// percent above 100 is out of range; neither is ever shown as a level.
 fn reading(percent: u8, charging: bool, asleep: bool) -> Decoded {
+    if percent == 0 {
+        return Decoded::Invalid("percent 0: no data");
+    }
     if percent > 100 {
         return Decoded::Invalid("percent out of range");
     }
