@@ -108,7 +108,7 @@ fn serial_line(entry: &SerialEntry) -> String {
 }
 
 /// The port name with a non-empty USB serial string inside it replaced by `<serial>`.
-fn mask_serial(port_name: &str, serial: Option<&str>) -> String {
+pub(crate) fn mask_serial(port_name: &str, serial: Option<&str>) -> String {
     match serial {
         Some(text) if !text.is_empty() => port_name.replace(text, "<serial>"),
         _ => port_name.to_owned(),
@@ -142,8 +142,7 @@ fn hid_lines(collection: &HidCollection) -> Vec<String> {
     }
     let mut lines = vec![format!("{head} · {} · {status}", collection.bus)];
     if let Some(bytes) = descriptor {
-        let hex: String = bytes.iter().map(|byte| format!(" {byte:02x}")).collect();
-        lines.push(format!("    descriptor ({} B):{hex}", bytes.len()));
+        lines.push(format!("    {}", bytes_line("descriptor", bytes)));
     }
     lines.push(format!("    path {}", redact_path(&collection.path)));
     lines
@@ -169,6 +168,12 @@ fn reports_text(reports: &[ReportSize], parse_error: Option<&str>) -> String {
         })
         .collect();
     sizes.join(" ")
+}
+
+/// `<label> (<n> B): <bytes>`: every byte, lower-case hex, never truncated.
+pub(crate) fn bytes_line(label: &str, bytes: &[u8]) -> String {
+    let hex: String = bytes.iter().map(|byte| format!(" {byte:02x}")).collect();
+    format!("{label} ({} B):{hex}", bytes.len())
 }
 
 /// Windows HID paths are `#`-separated; part 2 is the machine-local device instance id.

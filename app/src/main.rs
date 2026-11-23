@@ -8,6 +8,8 @@ mod instance;
 mod interval;
 mod login;
 mod menu;
+mod probe;
+mod query_log;
 mod refresh;
 mod scan;
 mod svg_cache;
@@ -21,6 +23,10 @@ use std::time::SystemTime;
 fn main() -> ExitCode {
     match std::env::args().nth(1).as_deref() {
         Some("scan") => run_scan(),
+        Some("probe") => {
+            attach_parent_console();
+            probe::run_probe(std::env::args().nth(2))
+        }
         _ => app::run(),
     }
 }

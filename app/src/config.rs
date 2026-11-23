@@ -156,14 +156,21 @@ impl Config {
         self.save_to(&path)
     }
 
-    /// Writes a temp file then renames it, so a crash never leaves a half-written config.
     fn save_to(&self, path: &Path) -> Result<()> {
-        let dir = path.parent().context("config path has no parent folder")?;
-        fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-        let tmp = path.with_extension("toml.tmp");
-        fs::write(&tmp, self.to_toml()).with_context(|| format!("write {}", tmp.display()))?;
-        fs::rename(&tmp, path).with_context(|| format!("rename to {}", path.display()))
+        write_atomically(path, &self.to_toml())
     }
+}
+
+/// Writes `<path>.tmp` then renames it over `path`, so a crash never leaves a half-written file.
+/// Creates the parent folder when it is missing.
+pub(crate) fn write_atomically(path: &Path, text: &str) -> Result<()> {
+    let dir = path.parent().context("path has no parent folder")?;
+    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    fs::write(&tmp, text).with_context(|| format!("write {}", tmp.display()))?;
+    fs::rename(&tmp, path).with_context(|| format!("rename to {}", path.display()))
 }
 
 pub fn path() -> Option<PathBuf> {
