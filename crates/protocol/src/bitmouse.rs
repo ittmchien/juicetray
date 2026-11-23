@@ -47,12 +47,13 @@ pub(crate) fn decode(bytes: &[u8]) -> Decoded {
     if bytes.len() < MIN_REPLY_LEN || bytes[0] != REPORT_ID {
         return Decoded::NotTheReply;
     }
+    // An error frame may lack the command echo, so the status is read before the command.
+    if bytes[2] == STATUS_ERROR {
+        return Decoded::Invalid("device returned an error");
+    }
     // Our own request echoed back has 0x01 here, so it never matches.
     if bytes[2] == PUSH_HEADER || bytes[5] != CMD_BATTERY {
         return Decoded::NotTheReply;
-    }
-    if bytes[2] == STATUS_ERROR {
-        return Decoded::Invalid("device returned an error");
     }
     // Charging needs a second command that is not sent.
     reading(bytes[7], false, false)
@@ -101,6 +102,17 @@ mod tests {
         let mut frame = reply();
         frame[2] = 0xFF;
         assert_eq!(decode(&frame), Decoded::Invalid("device returned an error"));
+    }
+
+    #[test]
+    fn bitmouse_error_status_without_command_echo() {
+        let mut frame = reply();
+        frame[2] = 0xFF;
+        frame[5] = 0x00;
+        assert_eq!(decode(&frame), Decoded::Invalid("device returned an error"));
+        // Another report id is still not the reply.
+        frame[0] = 0x09;
+        assert_eq!(decode(&frame), Decoded::NotTheReply);
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::device::{DeviceView, Level};
 
-pub const EMPTY_MENU_TEXT: &str = "No Bluetooth devices with battery info";
+pub const EMPTY_MENU_TEXT: &str = "No devices with battery info";
 
 const NO_BATTERY_TEXT: &str = "no battery info";
 

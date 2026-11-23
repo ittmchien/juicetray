@@ -41,7 +41,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Decoded {
     }
     match report[6] {
         STATE_DISCHARGING => reading(report[5], false, false),
-        STATE_ON_CABLE => Decoded::Invalid("on cable: no level reported"),
+        STATE_ON_CABLE => Decoded::Invalid("on cable: level not trustworthy"),
         _ => Decoded::Invalid("unknown power state"),
     }
 }
@@ -97,7 +97,7 @@ mod tests {
         assert_eq!(decode(&ON_BATTERY_97), battery(97));
         assert_eq!(
             decode(&ON_CABLE),
-            Decoded::Invalid("on cable: no level reported")
+            Decoded::Invalid("on cable: level not trustworthy")
         );
     }
 

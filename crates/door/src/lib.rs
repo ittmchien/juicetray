@@ -1,11 +1,12 @@
-//! Device I/O for HID and serial: read-only enumeration, the transports, and the one write door.
+//! Device I/O for HID and serial: read-only enumeration (`present` opens nothing), the
+//! transports, and the one write door.
 //! Only `write.rs` sends bytes to a device, through targets opened from an `Inventory`.
 
 mod enumerate;
 mod transport;
 mod write;
 
-pub use enumerate::{Access, HidCollection, Inventory, SerialEntry, inventory};
+pub use enumerate::{Access, HidCollection, Inventory, SerialEntry, inventory, present};
 pub use transport::Target;
 pub use write::{Door, Exchange, MAX_KEPT_UNRELATED};
 

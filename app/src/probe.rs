@@ -33,12 +33,16 @@ pub fn run_probe(arg: Option<String>) -> ExitCode {
     }
 }
 
-/// The whole probe flow in its fixed safety order: parse, known device, floor check (no device
-/// touched), list, pick, open, claim the query time, then the one write.
+/// The whole probe flow in its fixed safety order: parse, known device, needs-capture refusal,
+/// floor check (no device touched), list, pick, open, claim the query time, then the one write.
 fn probe(arg: Option<&str>) -> Result<(String, bool), String> {
     let (vid, pid) = parse_vid_pid(arg.unwrap_or_default())?;
     let device = known(vid, pid).ok_or_else(|| unknown_device(vid, pid))?;
     let family = device.family;
+    // A device with no known working command is refused before the log or any device is touched.
+    if device.needs_capture {
+        return Err(refusal(vid, pid, "not supported yet: needs a capture"));
+    }
 
     let log_path = query_log::path()
         .ok_or_else(|| refusal(vid, pid, "no data directory to record the query time"))?;
@@ -243,6 +247,18 @@ mod tests {
 
         let usage = probe(None).expect_err("missing argument");
         assert_eq!(usage, USAGE);
+    }
+
+    #[test]
+    fn probe_refuses_devices_that_need_a_capture() {
+        for arg in ["3554:FA09", "391D:1A05"] {
+            let text = probe(Some(arg)).expect_err(arg);
+            assert!(
+                text.contains("not supported yet: needs a capture"),
+                "{text}"
+            );
+            assert!(text.ends_with("nothing was sent"), "{text}");
+        }
     }
 
     #[test]

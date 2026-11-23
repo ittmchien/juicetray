@@ -90,6 +90,36 @@ pub fn inventory(filter: &[(u16, u16)]) -> Inventory {
     }
 }
 
+/// The `ids` that are plugged in, in `ids` order, from the device lists alone: nothing is opened,
+/// so a device that must stay untouched can be checked. A source that cannot be listed counts
+/// as having none of them.
+pub fn present(ids: &[(u16, u16)]) -> Vec<(u16, u16)> {
+    let mut seen = Vec::new();
+    match HidApi::new() {
+        Ok(api) => seen.extend(
+            api.device_list()
+                .map(|info| (info.vendor_id(), info.product_id())),
+        ),
+        Err(error) => eprintln!("HID devices could not be listed: {error}"),
+    }
+    match serialport::available_ports() {
+        Ok(ports) => seen.extend(serial_entries(ports, ids).iter().map(|e| (e.vid, e.pid))),
+        Err(error) => eprintln!("serial ports could not be listed: {error}"),
+    }
+    listed_ids(ids, &seen)
+}
+
+/// The `ids` that appear in `seen`, once each, in `ids` order.
+fn listed_ids(ids: &[(u16, u16)], seen: &[(u16, u16)]) -> Vec<(u16, u16)> {
+    let mut found: Vec<(u16, u16)> = Vec::new();
+    for id in ids {
+        if seen.contains(id) && !found.contains(id) {
+            found.push(*id);
+        }
+    }
+    found
+}
+
 /// An empty filter keeps every device; the open rule still ran over the full list.
 fn wanted(filter: &[(u16, u16)], vid: u16, pid: u16) -> bool {
     filter.is_empty() || filter.contains(&(vid, pid))
@@ -222,7 +252,24 @@ fn serial_entries(ports: Vec<SerialPortInfo>, filter: &[(u16, u16)]) -> Vec<Seri
 
 #[cfg(test)]
 mod tests {
-    use super::wanted;
+    use super::{listed_ids, wanted};
+
+    #[test]
+    fn listed_ids_keeps_ids_order_and_drops_duplicates() {
+        let ids = [(0x3837, 0x6011), (0x3554, 0xFA09), (0x373B, 0x1204)];
+        let seen = [
+            (0x373B, 0x1204),
+            (0x046D, 0xC52B),
+            (0x3837, 0x6011),
+            (0x373B, 0x1204),
+        ];
+        assert_eq!(
+            listed_ids(&ids, &seen),
+            [(0x3837, 0x6011), (0x373B, 0x1204)]
+        );
+        assert!(listed_ids(&ids, &[]).is_empty());
+        assert!(listed_ids(&[], &seen).is_empty());
+    }
 
     #[test]
     fn wanted_keeps_only_listed_ids() {

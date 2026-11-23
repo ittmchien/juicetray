@@ -1,4 +1,4 @@
-//! Last battery-query time and last reading per device (R21), so the per-family query floor
+//! Last battery-query time and last reading per device, so the per-family query floor
 //! holds across runs and processes.
 
 use std::collections::BTreeMap;

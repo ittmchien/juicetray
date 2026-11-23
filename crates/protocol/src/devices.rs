@@ -12,6 +12,8 @@ pub struct KnownDevice {
     pub confirmed: bool,
     /// Wired to the PC (cable), not a receiver.
     pub cable: bool,
+    /// No reply to the known commands: never opened or queried until a capture shows the frame.
+    pub needs_capture: bool,
 }
 
 const fn device(
@@ -21,6 +23,7 @@ const fn device(
     family: Family,
     confirmed: bool,
     cable: bool,
+    needs_capture: bool,
 ) -> KnownDevice {
     KnownDevice {
         vid,
@@ -29,10 +32,11 @@ const fn device(
         family,
         confirmed,
         cable,
+        needs_capture,
     }
 }
 
-// Columns: vid, pid, name, family, confirmed, cable.
+// Columns: vid, pid, name, family, confirmed, cable, needs_capture.
 // 0x373B:0x1204 is serial-only: it must never receive a Compx frame.
 pub const KNOWN: &[KnownDevice] = &[
     device(
@@ -42,6 +46,7 @@ pub const KNOWN: &[KnownDevice] = &[
         Family::Mchose,
         true,
         false,
+        false,
     ),
     device(
         0x3837,
@@ -50,8 +55,17 @@ pub const KNOWN: &[KnownDevice] = &[
         Family::Mchose,
         false,
         true,
+        false,
     ),
-    device(0x373B, 0x1107, "ATK X1 SE NK", Family::Compx, false, false),
+    device(
+        0x373B,
+        0x1107,
+        "ATK X1 SE NK",
+        Family::Compx,
+        false,
+        false,
+        false,
+    ),
     device(
         0x373B,
         0x1299,
@@ -59,13 +73,23 @@ pub const KNOWN: &[KnownDevice] = &[
         Family::Compx,
         false,
         false,
+        false,
     ),
-    device(0x373B, 0x130E, "ATK X1 SE NK", Family::Compx, false, false),
+    device(
+        0x373B,
+        0x130E,
+        "ATK X1 SE NK",
+        Family::Compx,
+        false,
+        false,
+        false,
+    ),
     device(
         0x373B,
         0x1216,
         "ATK X1 SE (dongle)",
         Family::AtkBitmouse,
+        false,
         false,
         false,
     ),
@@ -76,6 +100,7 @@ pub const KNOWN: &[KnownDevice] = &[
         Family::Report13,
         false,
         false,
+        true,
     ),
     device(
         0x391D,
@@ -84,12 +109,14 @@ pub const KNOWN: &[KnownDevice] = &[
         Family::Compx,
         false,
         true,
+        true,
     ),
     device(
         0x373B,
         0x11CB,
         "ATK N9 Pro (dongle)",
         Family::AtkSerial,
+        false,
         false,
         false,
     ),
@@ -100,12 +127,14 @@ pub const KNOWN: &[KnownDevice] = &[
         Family::AtkSerial,
         false,
         true,
+        false,
     ),
     device(
         0x373B,
         0x1204,
         "ATK N9 Ultra (dongle)",
         Family::AtkSerial,
+        false,
         false,
         false,
     ),
@@ -158,6 +187,17 @@ mod tests {
             ids(|d| d.cable),
             [(0x3837, 0x6010), (0x391D, 0x1A05), (0x373B, 0x11CA)]
         );
+    }
+
+    #[test]
+    fn needs_capture_flags() {
+        let ids: Vec<(u16, u16)> = KNOWN
+            .iter()
+            .filter(|d| d.needs_capture)
+            .map(|d| (d.vid, d.pid))
+            .collect();
+        assert_eq!(ids, [(0x3554, 0xFA09), (0x391D, 0x1A05)]);
+        assert!(KNOWN.iter().all(|d| !(d.needs_capture && d.confirmed)));
     }
 
     #[test]

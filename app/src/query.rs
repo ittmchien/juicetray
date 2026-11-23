@@ -135,7 +135,7 @@ fn indented(lines: &[String]) -> String {
     lines.iter().map(|line| format!("\n  {line}")).collect()
 }
 
-pub(crate) fn usage_pair(shape: &HidShape) -> String {
+fn usage_pair(shape: &HidShape) -> String {
     format!("{:04X}:{:04X}", shape.usage_page, shape.usage)
 }
 
@@ -630,19 +630,14 @@ mod tests {
 
     #[test]
     fn floor_check_passes_after_the_floor_without_stamping() {
-        let root = temp_root("after");
-        let path = root.join("query-log.toml");
         let (vid, pid) = (0x3554, 0xFA09);
         let mut log = QueryLog::default();
         log.stamp(vid, pid, whole(NOW - 10));
 
         let result = floor_check(&log, Family::Compx, vid, pid, whole(NOW));
-        let written = path.exists();
-        fs::remove_dir_all(&root).unwrap();
 
         assert_eq!(result, Ok(()));
         assert_eq!(log.last(vid, pid), Some(whole(NOW - 10)));
-        assert!(!written);
     }
 
     #[test]
