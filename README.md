@@ -49,6 +49,10 @@ query reaches those devices. A receiver or cable device is queried at most once 
   numbers.
 - `juicetray probe <VID:PID>` sends one read-only battery query to a supported device and
   prints the raw reply. Close the vendor app first; probe refuses within the device's floor.
+- `juicetray probe --online <VID:PID>` sends the read-only Compx online-status query instead
+  (Compx devices only, same floor) and prints `online: yes/no/unsupported`.
+- `juicetray listen <VID:PID> [seconds]` only reads (1-60 s, default 10) and prints each
+  report with its time in ms, to see what a vendor app's own polling gets back; nothing is sent.
 
 ## Contributing
 

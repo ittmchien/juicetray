@@ -83,16 +83,19 @@ pub fn read_receivers(allow: &[(u16, u16)], now: SystemTime) -> Vec<DeviceView> 
         .filter(|device| present.contains(&(device.vid, device.pid)))
         .map(|device| {
             let (vid, pid) = (device.vid, device.pid);
-            let gate = gate(device, allow);
+            let gate_result = gate(device, allow);
             let pick = match &inventory {
-                Some(inv) if gate.is_ok() => {
+                Some(inv) if gate_result.is_ok() => {
                     pick_channel(&inv.hid, &inv.serial, &inv.errors, device)
                         .map_err(|error| target_outcome(&error))
                 }
                 _ => Ok(()),
             };
             let floor = floor_check(&log, device.family, vid, pid, now);
-            let outcome = match (plan(gate, pick, floor, door.writes_left() > 0), &inventory) {
+            let outcome = match (
+                plan(gate_result, pick, floor, door.writes_left() > 0),
+                &inventory,
+            ) {
                 (Step::Show(outcome), _) => outcome,
                 (Step::Query, Some(inv)) => query(inv, device, &mut door, log_path.as_deref()),
                 // `Query` is planned only for an openable device, which is in the inventory.
@@ -223,8 +226,8 @@ fn query(
         None => Outcome::NoReply,
         Some((_, Decoded::Reading(reading))) => Outcome::Reading(reading, read_at),
         Some((_, Decoded::Invalid(why))) => Outcome::Invalid(why),
-        // The door never keeps a non-reply as the reply.
-        Some((_, Decoded::NotTheReply)) => Outcome::Invalid("not the reply"),
+        // The door never keeps a non-reply as the reply, and only `send_online` yields `Online`.
+        Some((_, Decoded::NotTheReply | Decoded::Online(_))) => Outcome::Invalid("not the reply"),
     };
     if let (Outcome::Reading(reading, _), Some(path)) = (outcome, log_path) {
         let recorded = QueryLog::update(path, |log| {
@@ -307,8 +310,12 @@ fn view(
     let Some(reading) = shown else {
         return row;
     };
+    // An asleep reading whose last query went unanswered keeps both notes.
     let note = if failed {
         Some(match outcome {
+            Outcome::Waiting if reading.asleep => {
+                format!("{ASLEEP_TEXT}; {LAST_QUERY_FAILED_TEXT}")
+            }
             Outcome::Waiting => LAST_QUERY_FAILED_TEXT.to_owned(),
             _ => reason(device, outcome),
         })
@@ -536,6 +543,20 @@ mod tests {
         assert_eq!(row.updated_at, at(NOW - 600));
         assert!(row.stale);
         assert_eq!(row.note.as_deref(), Some("no reply at the last query"));
+
+        // An asleep stored reading keeps its own note next to the unanswered-query one.
+        let asleep = view(
+            mchose(),
+            Outcome::Waiting,
+            Some((reading(70, true, true), at(NOW - 600))),
+            Some(at(NOW - 120)),
+            at(NOW),
+        );
+        assert!(asleep.stale);
+        assert_eq!(
+            asleep.note.as_deref(),
+            Some("asleep or off; no reply at the last query")
+        );
 
         // A reading recorded at the stamp's second is the answer to that query.
         let answered = view(

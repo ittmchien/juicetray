@@ -42,11 +42,22 @@ pub struct Reading {
     pub asleep: bool,
 }
 
+/// What a Compx online-status reply says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Online {
+    Yes,
+    No,
+    /// The device reports the command as unsupported.
+    Unsupported,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decoded {
     /// A report or frame that answers some other command.
     NotTheReply,
     Reading(Reading),
+    /// The reply to the online-status query (never produced by `decode`).
+    Online(Online),
     /// The reply to our query, but its content cannot be trusted.
     Invalid(&'static str),
 }
@@ -96,6 +107,25 @@ pub fn battery_query(family: Family) -> &'static [u8] {
         Family::Mchose => &mchose::QUERY,
         Family::AtkSerial => &atk_serial::QUERY,
         Family::AtkBitmouse => &bitmouse::QUERY,
+    }
+}
+
+/// The only non-battery frame the door may send: Compx online status (a read-only getter in
+/// both vendor apps). Every other family has none.
+pub fn online_query(family: Family) -> Option<&'static [u8]> {
+    match family {
+        Family::Compx => Some(&compx::ONLINE_QUERY),
+        Family::Report13 | Family::Mchose | Family::AtkSerial | Family::AtkBitmouse => None,
+    }
+}
+
+/// Decodes the reply to `online_query`; a family without that query has no such reply.
+pub fn decode_online(family: Family, bytes: &[u8]) -> Decoded {
+    match family {
+        Family::Compx => compx::decode_online(bytes),
+        Family::Report13 | Family::Mchose | Family::AtkSerial | Family::AtkBitmouse => {
+            Decoded::NotTheReply
+        }
     }
 }
 

@@ -1,8 +1,10 @@
 //! Device I/O for HID and serial: read-only enumeration (`present` opens nothing), the
 //! transports, and the one write door.
-//! Only `write.rs` sends bytes to a device, through targets opened from an `Inventory`.
+//! Only `write.rs` sends bytes to a device, through targets opened from an `Inventory`;
+//! `listen.rs` only reads.
 
 mod enumerate;
+mod listen;
 mod transport;
 mod write;
 

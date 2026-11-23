@@ -9,7 +9,8 @@ use protocol::{Family, HidShape, Link, PickError, floor_wait, pick_target};
 use crate::query_log::QueryLog;
 use crate::scan::{mask_serial, redact_path};
 
-pub(crate) const USAGE: &str = "usage: juicetray probe <VID:PID>, e.g. juicetray probe 3837:6011";
+pub(crate) const USAGE: &str =
+    "usage: juicetray probe [--online] <VID:PID>, e.g. juicetray probe 3837:6011";
 
 /// Exactly `hhhh:hhhh` hex, any case.
 pub(crate) fn parse_vid_pid(arg: &str) -> Result<(u16, u16), String> {
@@ -26,10 +27,15 @@ pub(crate) fn parse_vid_pid(arg: &str) -> Result<(u16, u16), String> {
     }
 }
 
-/// A refusal; detail lines in `why` push the closing sentence onto its own line.
+/// A probe refusal; detail lines in `why` push the closing sentence onto its own line.
 pub(crate) fn refusal(vid: u16, pid: u16, why: &str) -> String {
+    refusal_for("probe", vid, pid, why)
+}
+
+/// `refusal` for another subcommand (`listen` shares the device checks).
+pub(crate) fn refusal_for(command: &str, vid: u16, pid: u16, why: &str) -> String {
     let close = if why.contains('\n') { "\n" } else { "; " };
-    format!("probe {vid:04X}:{pid:04X}: {why}{close}nothing was sent")
+    format!("{command} {vid:04X}:{pid:04X}: {why}{close}nothing was sent")
 }
 
 /// `wait <n> s`, rounded up so it never reads `wait 0 s`.
@@ -158,9 +164,14 @@ pub(crate) enum TargetError {
     Ambiguous(Vec<String>),
 }
 
-/// The refusal text for a target that could not be picked or opened.
+/// The probe refusal text for a target that could not be picked or opened.
 pub(crate) fn target_refusal(vid: u16, pid: u16, family: Family, error: TargetError) -> String {
-    let why = match error {
+    refusal(vid, pid, &target_why(family, error))
+}
+
+/// The reason text of a target error, without the command prefix.
+pub(crate) fn target_why(family: Family, error: TargetError) -> String {
+    match error {
         TargetError::NotConnected(listing) => format!("is not connected{}", indented(&listing)),
         TargetError::Held {
             open_error: Some(cause),
@@ -181,8 +192,7 @@ pub(crate) fn target_refusal(vid: u16, pid: u16, family: Family, error: TargetEr
             };
             format!("{head}{}", indented(&lines))
         }
-    };
-    refusal(vid, pid, &why)
+    }
 }
 
 /// Picks among the collections enumeration opened; the picked index is only ever used on

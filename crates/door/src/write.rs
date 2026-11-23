@@ -1,10 +1,14 @@
-//! The one write door: a write budget, the family's fixed battery query, one write per query and
-//! a bounded wait for the reply. No API here takes raw bytes.
+//! The one write door: a write budget, the family's fixed battery query (plus the Compx
+//! online-status query), one write per query and a bounded wait for the reply. No API here
+//! takes raw bytes.
 
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
-use protocol::{Decoded, Family, Link, SERIAL_FRAME_LEN, battery_query, decode, known};
+use protocol::{
+    Decoded, Family, Link, SERIAL_FRAME_LEN, battery_query, decode, decode_online, known,
+    online_query,
+};
 
 use crate::transport::Target;
 
@@ -12,7 +16,7 @@ use crate::transport::Target;
 pub const MAX_KEPT_UNRELATED: usize = 16;
 
 /// One HID read gets a buffer this large.
-const HID_READ_LEN: usize = 256;
+pub(crate) const HID_READ_LEN: usize = 256;
 const MIN_READ_TIMEOUT: Duration = Duration::from_millis(1);
 
 /// What one query sent and got back.
@@ -26,14 +30,21 @@ pub struct Exchange {
     pub dropped: usize,
 }
 
+/// The two frames the door can send; each decides how its reply is decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Query {
+    Battery,
+    Online,
+}
+
 impl Exchange {
     /// Keeps `bytes` as the reply, or as an unrelated report; true once the reply is in.
     /// An echo of the request decodes as `Invalid`, so it is filed as unrelated to keep the wait open.
-    fn take(&mut self, bytes: Vec<u8>) -> bool {
-        let decoded = if bytes == self.sent {
-            Decoded::NotTheReply
-        } else {
-            decode(self.family, &bytes)
+    fn take(&mut self, query: Query, bytes: Vec<u8>) -> bool {
+        let decoded = match query {
+            _ if bytes == self.sent => Decoded::NotTheReply,
+            Query::Battery => decode(self.family, &bytes),
+            Query::Online => decode_online(self.family, &bytes),
         };
         match decoded {
             Decoded::NotTheReply if self.unrelated.len() < MAX_KEPT_UNRELATED => {
@@ -71,17 +82,38 @@ impl Door {
 
     /// Sends the battery query of the target's family once and waits for the reply.
     pub fn send(&mut self, target: &mut Target) -> anyhow::Result<Exchange> {
-        // The deadline is the family's reply timeout; an unknown device is refused in `send_until`.
-        let timeout =
-            known(target.vid, target.pid).map_or(Duration::ZERO, |d| d.family.reply_timeout());
-        self.send_until(target, Instant::now() + timeout)
+        self.send_query(target, Query::Battery)
     }
 
-    /// `send` with an explicit deadline. Refusals happen before any I/O; the budget drops
-    /// before the write, so a failed write is never retried.
+    /// Sends the Compx online-status query once and waits for the reply; every other family is
+    /// refused before any I/O.
+    pub fn send_online(&mut self, target: &mut Target) -> anyhow::Result<Exchange> {
+        self.send_query(target, Query::Online)
+    }
+
+    fn send_query(&mut self, target: &mut Target, query: Query) -> anyhow::Result<Exchange> {
+        // The deadline is the family's reply timeout; an unknown device is refused in `exchange_until`.
+        let timeout =
+            known(target.vid, target.pid).map_or(Duration::ZERO, |d| d.family.reply_timeout());
+        self.exchange_until(target, query, Instant::now() + timeout)
+    }
+
+    /// `send` with an explicit deadline.
+    #[cfg(test)]
     pub(crate) fn send_until(
         &mut self,
         target: &mut Target,
+        deadline: Instant,
+    ) -> anyhow::Result<Exchange> {
+        self.exchange_until(target, Query::Battery, deadline)
+    }
+
+    /// Refusals happen before any I/O; the budget drops before the write, so a failed write is
+    /// never retried.
+    fn exchange_until(
+        &mut self,
+        target: &mut Target,
+        query: Query,
         deadline: Instant,
     ) -> anyhow::Result<Exchange> {
         let (vid, pid) = (target.vid, target.pid);
@@ -93,12 +125,16 @@ impl Door {
                 "link mismatch: {vid:04X}:{pid:04X} is not queried over this link; nothing was sent"
             );
         }
+        let sent = match query {
+            Query::Battery => battery_query(family),
+            Query::Online => online_query(family)
+                .ok_or_else(|| anyhow!("online query is Compx only; nothing was sent"))?,
+        };
         if self.writes_left == 0 {
             bail!("write budget used up; nothing was sent");
         }
 
         self.writes_left -= 1;
-        let sent = battery_query(family);
         target.transport.write(sent).context("write failed")?;
 
         let mut exchange = Exchange {
@@ -108,14 +144,14 @@ impl Door {
             unrelated: Vec::new(),
             dropped: 0,
         };
-        await_reply(target, deadline, &mut exchange)
+        await_reply(target, query, deadline, &mut exchange)
             .context("reading the reply failed (the query was sent)")?;
         Ok(exchange)
     }
 }
 
 /// Time left until `deadline`, at least 1 ms; `None` once it has passed.
-fn time_left(deadline: Instant) -> Option<Duration> {
+pub(crate) fn time_left(deadline: Instant) -> Option<Duration> {
     let left = deadline.saturating_duration_since(Instant::now());
     (!left.is_zero()).then(|| left.max(MIN_READ_TIMEOUT))
 }
@@ -124,6 +160,7 @@ fn time_left(deadline: Instant) -> Option<Duration> {
 /// unit gathers chunks into one 64-byte frame, and a partial frame at the end is still decoded.
 fn await_reply(
     target: &mut Target,
+    query: Query,
     deadline: Instant,
     exchange: &mut Exchange,
 ) -> anyhow::Result<()> {
@@ -142,12 +179,12 @@ fn await_reply(
         if target.link == Link::Serial && pending.len() < SERIAL_FRAME_LEN {
             continue;
         }
-        if exchange.take(std::mem::take(&mut pending)) {
+        if exchange.take(query, std::mem::take(&mut pending)) {
             return Ok(());
         }
     }
     if !pending.is_empty() {
-        exchange.take(pending);
+        exchange.take(query, pending);
     }
     Ok(())
 }
@@ -453,5 +490,85 @@ mod tests {
             exchange.reply,
             Some((bad_checksum, Decoded::Invalid("bad checksum")))
         );
+    }
+
+    /// A Compx online-status reply (id first) with a valid checksum.
+    fn online_reply(status: u8, value: u8) -> Vec<u8> {
+        let mut reply = padded(&[0x08, 0x03, status, 0, 0, 0, value], 17);
+        reply[16] = protocol::compx::checksum(&reply[..16]);
+        reply
+    }
+
+    #[test]
+    fn online_sends_exactly_the_online_frame_for_compx() {
+        let reads = bytes(&[online_reply(0, 1)]);
+        let (mut target, log) = target(0x391D, 0x1A05, Link::Hid, reads);
+        let exchange = Door::new(1).send_online(&mut target).expect("send");
+        let query = online_query(Family::Compx).unwrap();
+        assert_eq!(log.borrow().writes, vec![query.to_vec()]);
+        assert_eq!(exchange.sent, query);
+        assert_eq!(
+            exchange.reply,
+            Some((online_reply(0, 1), Decoded::Online(protocol::Online::Yes)))
+        );
+    }
+
+    #[test]
+    fn online_echo_is_not_the_reply() {
+        let echo = online_query(Family::Compx).unwrap().to_vec();
+        let (mut target, _log) = target(
+            0x391D,
+            0x1A05,
+            Link::Hid,
+            bytes(std::slice::from_ref(&echo)),
+        );
+        let exchange = Door::new(1)
+            .exchange_until(&mut target, Query::Online, far())
+            .expect("send");
+        assert_eq!(exchange.reply, None);
+        assert_eq!(exchange.unrelated, vec![echo]);
+    }
+
+    #[test]
+    fn allow_list_is_battery_plus_compx_online() {
+        for device in protocol::KNOWN {
+            let link = device.family.link();
+            let open = || target(device.vid, device.pid, link, Vec::new());
+
+            let (mut target, log) = open();
+            Door::new(1).send(&mut target).expect("battery send");
+            assert_eq!(
+                log.borrow().writes,
+                vec![battery_query(device.family).to_vec()],
+                "{:04X}:{:04X}",
+                device.vid,
+                device.pid
+            );
+
+            let (mut target, log) = open();
+            let online = Door::new(1).send_online(&mut target);
+            match (device.family, online) {
+                (Family::Compx, Ok(_)) => assert_eq!(
+                    log.borrow().writes,
+                    vec![online_query(Family::Compx).unwrap().to_vec()]
+                ),
+                (Family::Compx, Err(error)) => panic!("compx online refused: {error:#}"),
+                (_, Ok(_)) => panic!("{:04X}:{:04X} accepted online", device.vid, device.pid),
+                (_, Err(error)) => {
+                    assert!(format!("{error:#}").contains("Compx only"), "{error:#}");
+                    assert!(log.borrow().writes.is_empty());
+                    assert!(log.borrow().timeouts.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn refused_online_keeps_the_budget() {
+        let mut door = Door::new(1);
+        let (mut mchose, log) = target(0x3837, 0x6011, Link::Hid, Vec::new());
+        assert!(door.send_online(&mut mchose).is_err());
+        assert_eq!(door.writes_left(), 1);
+        assert!(log.borrow().writes.is_empty());
     }
 }

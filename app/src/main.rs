@@ -7,6 +7,7 @@ mod dialog;
 mod instance;
 mod interval;
 mod licenses;
+mod listen;
 mod login;
 mod menu;
 mod probe;
@@ -28,7 +29,11 @@ fn main() -> ExitCode {
         Some("scan") => run_scan(),
         Some("probe") => {
             attach_parent_console();
-            probe::run_probe(std::env::args().nth(2))
+            probe::run_probe(std::env::args().skip(2).collect())
+        }
+        Some("listen") => {
+            attach_parent_console();
+            listen::run_listen(std::env::args().skip(2).collect())
         }
         Some("licenses") => {
             attach_parent_console();
