@@ -1,14 +1,19 @@
 //! Pure battery protocol: device families, query frames, reply decoders, the known-device table
-//! and per-family query floors. No I/O; everything is checked from byte frames.
+//! per-family query floors, HID report-descriptor sizes, the collection open rule and target
+//! picking. No I/O; everything is checked from byte frames.
 
 mod atk_serial;
 pub mod compx;
 mod devices;
+mod hid;
 mod mchose;
+mod report;
 
 use std::time::{Duration, SystemTime};
 
 pub use devices::{KNOWN, KnownDevice, known};
+pub use hid::{HidShape, PickError, open_permission, pick_target};
+pub use report::{ReportKind, ReportSize, TopCollection, parse_descriptor, reports_of};
 
 /// Size of one serial frame in both directions.
 pub const SERIAL_FRAME_LEN: usize = 64;
