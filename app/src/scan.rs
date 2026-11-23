@@ -375,7 +375,7 @@ mod tests {
                 .any(|line| line.starts_with("  HID if 1 FF00:0001 vendor"))
         );
         // The VGN device keeps its own header; the instance id is the only elision.
-        assert!(lines.contains(&"3554:FA09  VGN Dragonfly 3 Master+ (dongle) · VGN report 0x13"));
+        assert!(lines.contains(&"3554:FA09  AULA F75 (2.4G receiver) · VGN report 0x13"));
         assert_eq!(report.matches('…').count(), 3);
     }
 

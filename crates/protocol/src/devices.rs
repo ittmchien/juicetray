@@ -96,20 +96,20 @@ pub const KNOWN: &[KnownDevice] = &[
     device(
         0x3554,
         0xFA09,
-        "VGN Dragonfly 3 Master+ (dongle)",
+        "AULA F75 (2.4G receiver)",
         Family::Report13,
         false,
         false,
-        true,
+        false,
     ),
     device(
         0x391D,
         0x1A05,
-        "VGN Dragonfly 3 Master+ (cable)",
+        "VGN Dragonfly 3 Master+ (receiver)",
         Family::Compx,
         false,
-        true,
-        true,
+        false,
+        false,
     ),
     device(
         0x373B,
@@ -183,10 +183,7 @@ mod tests {
                 .collect()
         };
         assert_eq!(ids(|d| d.confirmed), [(0x3837, 0x6011)]);
-        assert_eq!(
-            ids(|d| d.cable),
-            [(0x3837, 0x6010), (0x391D, 0x1A05), (0x373B, 0x11CA)]
-        );
+        assert_eq!(ids(|d| d.cable), [(0x3837, 0x6010), (0x373B, 0x11CA)]);
     }
 
     #[test]
@@ -196,26 +193,27 @@ mod tests {
             .filter(|d| d.needs_capture)
             .map(|d| (d.vid, d.pid))
             .collect();
-        assert_eq!(ids, [(0x3554, 0xFA09), (0x391D, 0x1A05)]);
+        // The flag stays as the mechanism for a future device without a known command.
+        assert!(ids.is_empty());
         assert!(KNOWN.iter().all(|d| !(d.needs_capture && d.confirmed)));
     }
 
     #[test]
     fn fa09_is_report13_and_unconfirmed() {
         let fa09 = known(0x3554, 0xFA09).expect("FA09 is in the table");
-        assert_eq!(fa09.name, "VGN Dragonfly 3 Master+ (dongle)");
+        assert_eq!(fa09.name, "AULA F75 (2.4G receiver)");
         assert_eq!(fa09.family, Family::Report13);
         assert!(!fa09.confirmed);
     }
 
     #[test]
-    fn x1_se_dongle_is_bitmouse_and_dragonfly_cable_is_compx() {
+    fn x1_se_dongle_is_bitmouse_and_dragonfly_receiver_is_compx() {
         let dongle = known(0x373B, 0x1216).expect("X1 SE dongle is in the table");
         assert_eq!(dongle.family, Family::AtkBitmouse);
         assert!(!dongle.confirmed);
-        let cable = known(0x391D, 0x1A05).expect("Dragonfly cable is in the table");
-        assert_eq!(cable.family, Family::Compx);
-        assert!(cable.cable && !cable.confirmed);
+        let receiver = known(0x391D, 0x1A05).expect("Dragonfly receiver is in the table");
+        assert_eq!(receiver.family, Family::Compx);
+        assert!(!receiver.cable && !receiver.confirmed);
     }
 
     #[test]

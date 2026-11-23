@@ -19,7 +19,8 @@ Juicetray only reads the value the OS stores; it sends nothing to the device.
 | MCHOSE V9 Pro 2 (`3837:6011` dongle) | Headset | Confirmed |
 | ATK X1 SE (`373B:1216` dongle) | Mouse | Protocol known, waiting for a probe |
 | ATK N9 Ultra (`373B:1204` dongle) | Headset | Protocol known; close ATK HUB, then probe |
-| VGN Dragonfly 3 Master+ (`3554:FA09` dongle, `391D:1A05` cable) | Mouse | Not supported yet: no reply to the known commands |
+| VGN Dragonfly 3 Master+ (`391D:1A05` receiver) | Mouse | Receiver answers; turn the mouse on, then probe |
+| AULA F75 (`3554:FA09` 2.4G receiver) | Keyboard | Protocol known; probe while the keyboard is on 2.4G |
 
 Only confirmed devices are queried automatically. An unconfirmed device is listed but never
 touched until you confirm it with `juicetray probe <VID:PID>` and add it to `allow` in the

@@ -266,7 +266,8 @@ fn reason(device: &KnownDevice, outcome: Outcome) -> String {
 
 fn kind(family: Family) -> DeviceKind {
     match family {
-        Family::Compx | Family::Report13 | Family::AtkBitmouse => DeviceKind::Mouse,
+        Family::Report13 => DeviceKind::Keyboard,
+        Family::Compx | Family::AtkBitmouse => DeviceKind::Mouse,
         Family::Mchose | Family::AtkSerial => DeviceKind::Headset,
     }
 }
@@ -377,15 +378,15 @@ mod tests {
 
     #[test]
     fn gate_blocks_capture_first_then_unconfirmed() {
-        let vgn = device(0x3554, 0xFA09);
-        let cable = device(0x391D, 0x1A05);
         let x1 = device(0x373B, 0x1216);
         // A device that needs a capture stays closed even when the owner allows it.
-        for needs_capture in [vgn, cable] {
-            let id = (needs_capture.vid, needs_capture.pid);
-            assert_eq!(gate(needs_capture, &[id]), Err(Outcome::NeedsCapture));
-            assert_eq!(gate(needs_capture, &[]), Err(Outcome::NeedsCapture));
-        }
+        let needs_capture = KnownDevice {
+            needs_capture: true,
+            ..*x1
+        };
+        let id = (needs_capture.vid, needs_capture.pid);
+        assert_eq!(gate(&needs_capture, &[id]), Err(Outcome::NeedsCapture));
+        assert_eq!(gate(&needs_capture, &[]), Err(Outcome::NeedsCapture));
         assert_eq!(gate(x1, &[]), Err(Outcome::Unconfirmed));
         assert_eq!(gate(x1, &[(0x3837, 0x6011)]), Err(Outcome::Unconfirmed));
         assert_eq!(gate(x1, &[(0x373B, 0x1216)]), Ok(()));
@@ -650,7 +651,7 @@ mod tests {
                 0x3554,
                 0xFA09,
                 "usb-3554-fa09",
-                DeviceKind::Mouse,
+                DeviceKind::Keyboard,
                 Path::Dongle,
             ),
             (
@@ -679,7 +680,7 @@ mod tests {
                 0x1A05,
                 "usb-391d-1a05",
                 DeviceKind::Mouse,
-                Path::Cable,
+                Path::Dongle,
             ),
         ];
         for (vid, pid, id, kind, path) in cases {

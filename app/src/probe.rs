@@ -301,18 +301,6 @@ mod tests {
     }
 
     #[test]
-    fn probe_refuses_devices_that_need_a_capture() {
-        for arg in ["3554:FA09", "391D:1A05"] {
-            let text = probe(Some(arg), false).expect_err(arg);
-            assert!(
-                text.contains("not supported yet: needs a capture"),
-                "{text}"
-            );
-            assert!(text.ends_with("nothing was sent"), "{text}");
-        }
-    }
-
-    #[test]
     fn probe_text_reading() {
         let text = exchange_text(
             mchose(),
@@ -459,16 +447,20 @@ mod tests {
 
     #[test]
     fn early_refusal_online_rules() {
-        let vgn = known(0x3554, 0xFA09).unwrap();
-        let cable = known(0x391D, 0x1A05).unwrap();
+        let vgn = &KnownDevice {
+            needs_capture: true,
+            ..*known(0x3554, 0xFA09).unwrap()
+        };
+        let cable = &KnownDevice {
+            needs_capture: true,
+            ..*known(0x391D, 0x1A05).unwrap()
+        };
         let x1 = known(0x373B, 0x1107).unwrap();
 
         // needs_capture blocks the battery query but not the online one (Compx only).
-        assert!(
-            early_refusal(cable, false)
-                .unwrap_err()
-                .contains("needs a capture")
-        );
+        let refusal = early_refusal(cable, false).unwrap_err();
+        assert!(refusal.contains("needs a capture"), "{refusal}");
+        assert!(refusal.ends_with("nothing was sent"), "{refusal}");
         assert_eq!(early_refusal(cable, true), Ok(()));
         assert_eq!(early_refusal(x1, true), Ok(()));
         assert_eq!(early_refusal(x1, false), Ok(()));
