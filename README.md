@@ -31,7 +31,15 @@ More devices will be added over time.
 
 Juicetray only sends read-only battery queries, one at a time, with no retry loops. It never
 changes a device setting. Bluetooth levels are read from what the OS already stores, so no
-query reaches those devices.
+query reaches those devices. A receiver or cable device is queried at most once per 10 s
+(mice) or 5 min (headsets), whatever the auto-refresh setting.
+
+## Diagnostics
+
+- `juicetray scan` lists Bluetooth, HID and serial devices, writes nothing, and redacts serial
+  numbers.
+- `juicetray probe <VID:PID>` sends one read-only battery query to a supported device and
+  prints the raw reply. Close the vendor app first; probe refuses within the device's floor.
 
 ## Contributing
 
