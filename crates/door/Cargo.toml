@@ -1,0 +1,20 @@
+[package]
+name = "juicetray-door"
+version.workspace = true
+edition.workspace = true
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "door"
+
+[dependencies]
+anyhow = "1"
+juicetray-protocol = { path = "../protocol" }
+serialport = { version = "4.10", default-features = false }
+
+# hidapi's defaults are Linux/illumos backends; each OS gets its own backend feature.
+[target.'cfg(windows)'.dependencies]
+hidapi = { version = "2.6", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+hidapi = { version = "2.6", default-features = false, features = ["macos-shared-device"] }
