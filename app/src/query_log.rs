@@ -5,10 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use directories::ProjectDirs;
 use toml::{Table, Value};
 
-use crate::config::write_atomically;
+use crate::config::{project_dirs, write_atomically};
 
 /// `VID:PID` (upper-case hex) → Unix seconds of the last query sent to that device.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -18,8 +17,7 @@ pub struct QueryLog {
 
 /// `query-log.toml` in the OS local data folder; `None` when the OS has no such folder.
 pub fn path() -> Option<PathBuf> {
-    let dirs = ProjectDirs::from("io.github", "ittmchien", "juicetray")?;
-    Some(dirs.data_local_dir().join("query-log.toml"))
+    Some(project_dirs()?.data_local_dir().join("query-log.toml"))
 }
 
 fn key(vid: u16, pid: u16) -> String {

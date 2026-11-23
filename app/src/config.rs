@@ -173,9 +173,13 @@ pub(crate) fn write_atomically(path: &Path, text: &str) -> Result<()> {
     fs::rename(&tmp, path).with_context(|| format!("rename to {}", path.display()))
 }
 
+/// The app's OS folders; the one place that names the app's qualifier, organization and name.
+pub(crate) fn project_dirs() -> Option<ProjectDirs> {
+    ProjectDirs::from("io.github", "ittmchien", "juicetray")
+}
+
 pub fn path() -> Option<PathBuf> {
-    let dirs = ProjectDirs::from("io.github", "ittmchien", "juicetray")?;
-    Some(dirs.config_dir().join("config.toml"))
+    Some(project_dirs()?.config_dir().join("config.toml"))
 }
 
 /// `auto`, `original` or a hex colour `RRGGBB` (optional `#`, any case).

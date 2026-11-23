@@ -154,7 +154,8 @@ fn claim_query(
 }
 
 /// A door error. Door refusals before the write say "nothing was sent"; any other error comes
-/// from the write or the read, so the query went out (or may have) and the floor applies.
+/// from the write or the read, so the query went out (or may have) and the floor applies; a
+/// refused HID write is usually a vendor app holding the device, hence the hint.
 fn send_failed(device: &KnownDevice, error: &str) -> String {
     let head = format!("probe {:04X}:{:04X}: {error}", device.vid, device.pid);
     if error.contains("nothing was sent") {
@@ -164,6 +165,7 @@ fn send_failed(device: &KnownDevice, error: &str) -> String {
         head,
         bytes_line("sent", battery_query(device.family)),
         "the query was (or may have been) sent; the next probe waits for the floor".to_owned(),
+        "if a vendor app is open, close it and wait for the floor before the next probe".to_owned(),
     ]
     .join("\n")
 }
@@ -726,6 +728,7 @@ mod tests {
         );
         assert!(lines[2].contains("may have been) sent"), "{text}");
         assert!(lines[2].contains("floor"), "{text}");
+        assert!(lines[3].contains("vendor app is open"), "{text}");
 
         let refused = send_failed(mchose(), "write budget used up; nothing was sent");
         assert_eq!(
