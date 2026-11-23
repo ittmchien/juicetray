@@ -61,9 +61,9 @@ pub struct Inventory {
 /// A descriptor read once per path, with its parse result.
 type PathRead = Result<(Vec<u8>, Result<Vec<TopCollection>, String>), String>;
 
-/// Lists HID collections and USB serial ports, keeping only `filter`'s VID:PID when given.
-/// Never fails as a whole; a source that cannot be listed is named in `errors`.
-pub fn inventory(filter: Option<(u16, u16)>) -> Inventory {
+/// Lists HID collections and USB serial ports, keeping only the VID:PIDs in `filter` (empty =
+/// every device). Never fails as a whole; a source that cannot be listed is named in `errors`.
+pub fn inventory(filter: &[(u16, u16)]) -> Inventory {
     let mut errors = Vec::new();
     let (api, hid) = match HidApi::new() {
         Ok(api) => {
@@ -90,13 +90,14 @@ pub fn inventory(filter: Option<(u16, u16)>) -> Inventory {
     }
 }
 
-fn wanted(filter: Option<(u16, u16)>, vid: u16, pid: u16) -> bool {
-    filter.is_none_or(|ids| ids == (vid, pid))
+/// An empty filter keeps every device; the open rule still ran over the full list.
+fn wanted(filter: &[(u16, u16)], vid: u16, pid: u16) -> bool {
+    filter.is_empty() || filter.contains(&(vid, pid))
 }
 
 /// Builds every collection's entry. Page and usage come from hidapi; the descriptor only
 /// gives report sizes.
-fn hid_collections(api: &HidApi, filter: Option<(u16, u16)>) -> Vec<HidCollection> {
+fn hid_collections(api: &HidApi, filter: &[(u16, u16)]) -> Vec<HidCollection> {
     let infos: Vec<&DeviceInfo> = api.device_list().collect();
     let paths: Vec<String> = infos
         .iter()
@@ -198,8 +199,8 @@ fn has_serial(info: &DeviceInfo) -> bool {
         || info.serial_number_raw().is_some_and(|raw| !raw.is_empty())
 }
 
-/// Keeps USB ports only, then `filter`'s VID:PID.
-fn serial_entries(ports: Vec<SerialPortInfo>, filter: Option<(u16, u16)>) -> Vec<SerialEntry> {
+/// Keeps USB ports only, then the VID:PIDs in `filter` (empty = all).
+fn serial_entries(ports: Vec<SerialPortInfo>, filter: &[(u16, u16)]) -> Vec<SerialEntry> {
     let mut serial: Vec<SerialEntry> = ports
         .into_iter()
         .filter_map(|port| match port.port_type {
@@ -217,4 +218,23 @@ fn serial_entries(ports: Vec<SerialPortInfo>, filter: Option<(u16, u16)>) -> Vec
         .collect();
     serial.sort_by(|a, b| (a.vid, a.pid, &a.port_name).cmp(&(b.vid, b.pid, &b.port_name)));
     serial
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wanted;
+
+    #[test]
+    fn wanted_keeps_only_listed_ids() {
+        let filter = [(0x3837, 0x6011), (0x3554, 0xFA09)];
+        assert!(wanted(&filter, 0x3837, 0x6011));
+        assert!(wanted(&filter, 0x3554, 0xFA09));
+        assert!(!wanted(&filter, 0x3837, 0xFA09));
+        assert!(!wanted(&filter, 0x046D, 0xC52B));
+    }
+
+    #[test]
+    fn wanted_empty_filter_keeps_everything() {
+        assert!(wanted(&[], 0x046D, 0xC52B));
+    }
 }

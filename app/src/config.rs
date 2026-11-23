@@ -41,6 +41,8 @@ pub struct Config {
     pub show_disconnected: bool,
     /// Keyed by device id; entries of devices not seen this run are kept.
     pub devices: BTreeMap<String, DeviceConfig>,
+    /// Hand-edited `VID:PID` entries that let unconfirmed receivers be queried; kept verbatim.
+    pub allow: Vec<String>,
 }
 
 impl Default for Config {
@@ -52,6 +54,7 @@ impl Default for Config {
             hidden_ids: Vec::new(),
             show_disconnected: false,
             devices: BTreeMap::new(),
+            allow: Vec::new(),
         }
     }
 }
@@ -76,6 +79,7 @@ impl Config {
                 .and_then(Value::as_bool)
                 .unwrap_or(defaults.show_disconnected),
             devices: devices(&table),
+            allow: string_items(&table, "allow"),
         }
     }
 
@@ -102,7 +106,18 @@ impl Config {
             .map(|(id, device)| (id.clone(), Value::Table(device_table(device))))
             .collect();
         table.insert("devices".into(), Value::Table(devices));
+        if !self.allow.is_empty() {
+            table.insert("allow".into(), string_array(&self.allow));
+        }
         table.to_string()
+    }
+
+    /// The `allow` entries that are valid `VID:PID`; others stay in `allow` but are ignored.
+    pub fn allowed(&self) -> Vec<(u16, u16)> {
+        self.allow
+            .iter()
+            .filter_map(|entry| crate::query::parse_vid_pid(entry).ok())
+            .collect()
     }
 
     /// Hidden by id, or by name in the milestone-1 list.
@@ -156,8 +171,13 @@ impl Config {
         self.save_to(&path)
     }
 
+    /// `allow` is owner-edited while the app runs, so the file's value wins over the in-memory one.
     fn save_to(&self, path: &Path) -> Result<()> {
-        write_atomically(path, &self.to_toml())
+        let mut config = self.clone();
+        if let Ok(text) = fs::read_to_string(path) {
+            config.allow = Self::parse(&text).allow;
+        }
+        write_atomically(path, &config.to_toml())
     }
 }
 
@@ -257,6 +277,17 @@ fn string_list(table: &Table, key: &str) -> Option<Vec<String>> {
         .collect()
 }
 
+/// The string items of an array key; non-strings are skipped, a missing key gives none.
+fn string_items(table: &Table, key: &str) -> Vec<String> {
+    table
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.as_str().map(str::to_owned))
+        .collect()
+}
+
 fn string_array(items: &[String]) -> Value {
     Value::Array(items.iter().cloned().map(Value::String).collect())
 }
@@ -342,8 +373,41 @@ mod tests {
             hidden_ids: vec![MAC_ID.into()],
             show_disconnected: true,
             devices: BTreeMap::new(),
+            allow: vec!["373B:1204".into(), "junk".into()],
         };
         assert_eq!(Config::parse(&config.to_toml()), config);
+    }
+
+    #[test]
+    fn allow_absent_is_empty_and_not_written() {
+        let config = Config::parse("");
+        assert!(config.allow.is_empty());
+        let written: Table = config.to_toml().parse().unwrap();
+        assert!(!written.contains_key("allow"));
+    }
+
+    #[test]
+    fn allow_skips_non_strings_and_bad_entries() {
+        let config =
+            Config::parse("allow = [\"373b:1204\", 5, \"zzzz:1\", \"373B\", \"0001:ABCD\"]\n");
+        assert_eq!(config.allow, ["373b:1204", "zzzz:1", "373B", "0001:ABCD"]);
+        assert_eq!(config.allowed(), [(0x373B, 0x1204), (0x0001, 0xABCD)]);
+    }
+
+    #[test]
+    fn save_keeps_allow_edited_on_disk() {
+        let root =
+            std::env::temp_dir().join(format!("juicetray-allow-test-{}", std::process::id()));
+        let path = root.join("config.toml");
+        let config = Config::default();
+        config.save_to(&path).unwrap();
+        fs::write(&path, "allow = [\"373B:1204\"]\n").unwrap();
+
+        config.save_to(&path).unwrap();
+        let loaded = Config::parse(&fs::read_to_string(&path).unwrap());
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(loaded.allow, ["373B:1204"]);
     }
 
     #[test]

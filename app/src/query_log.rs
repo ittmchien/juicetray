@@ -98,7 +98,6 @@ impl QueryLog {
     }
 
     /// The last decoded reading and when it was taken; the refresh worker reads it between queries.
-    #[allow(dead_code)]
     pub fn reading(&self, vid: u16, pid: u16) -> Option<(Reading, SystemTime)> {
         let stored = self.readings.get(&key(vid, pid))?;
         Some((stored.reading, from_unix_secs(stored.read_at)?))

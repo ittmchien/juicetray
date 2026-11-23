@@ -68,6 +68,11 @@ impl Door {
         }
     }
 
+    /// Queries this door may still send; callers check it before claiming a query time.
+    pub fn writes_left(&self) -> u8 {
+        self.writes_left
+    }
+
     /// Sends the battery query of the target's family once and waits for the reply.
     pub fn send(&mut self, target: &mut Target) -> anyhow::Result<Exchange> {
         let timeout = match target.link {

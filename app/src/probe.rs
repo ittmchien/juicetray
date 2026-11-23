@@ -10,7 +10,7 @@ use protocol::{Decoded, KNOWN, KnownDevice, Link, battery_query, known};
 
 use crate::query::{
     ClaimError, claim_query, claim_refusal, floor_check, open_hid_target, open_serial_target,
-    parse_vid_pid, refusal,
+    parse_vid_pid, refusal, target_refusal,
 };
 use crate::query_log::{self, QueryLog};
 use crate::scan::bytes_line;
@@ -55,11 +55,13 @@ fn probe(arg: Option<&str>) -> Result<(String, bool), String> {
         return Err(refuse(error));
     }
 
-    let inventory = door::inventory(Some((vid, pid)));
-    let (mut target, target_line) = match family.link() {
-        Link::Hid => open_hid_target(&inventory, family, vid, pid)?,
-        Link::Serial => open_serial_target(&inventory, vid, pid)?,
+    let inventory = door::inventory(&[(vid, pid)]);
+    let opened = match family.link() {
+        Link::Hid => open_hid_target(&inventory, family, vid, pid),
+        Link::Serial => open_serial_target(&inventory, vid, pid),
     };
+    let (mut target, target_line) =
+        opened.map_err(|error| target_refusal(vid, pid, family, error))?;
     claim_query(&log_path, family, vid, pid, SystemTime::now()).map_err(refuse)?;
 
     let exchange = Door::new(1)

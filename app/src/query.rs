@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use door::{Access, HidCollection, Inventory, SerialEntry, Target};
-use protocol::{Family, HidShape, PickError, floor_wait, pick_target};
+use protocol::{Family, HidShape, Link, PickError, floor_wait, pick_target};
 
 use crate::query_log::QueryLog;
 use crate::scan::{mask_serial, redact_path};
@@ -130,35 +130,76 @@ pub(crate) fn pick_port(ports: &[SerialEntry], vid: u16, pid: u16) -> Result<usi
     }
 }
 
-/// Listing failures, one indented line each; empty when the listing worked.
-pub(crate) fn listing_errors(inventory: &Inventory) -> String {
-    inventory
-        .errors
-        .iter()
-        .map(|error| format!("\n  {error}"))
-        .collect()
+/// Detail lines, each on its own indented line; empty for no lines.
+fn indented(lines: &[String]) -> String {
+    lines.iter().map(|line| format!("\n  {line}")).collect()
 }
 
 pub(crate) fn usage_pair(shape: &HidShape) -> String {
     format!("{:04X}:{:04X}", shape.usage_page, shape.usage)
 }
 
+/// Why no target could be picked or opened; `target_refusal` turns it into the user-facing
+/// text. Detail strings are already redacted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TargetError {
+    /// No such device in the listing; the listing failures, if any.
+    NotConnected(Vec<String>),
+    /// Something else holds the device: a collection failed to open during enumeration
+    /// (`lines`), or opening the pick failed (`open_error`, the OS error without paths).
+    Held {
+        open_error: Option<String>,
+        lines: Vec<String>,
+    },
+    /// Collections exist but none carries the family's battery channel; one line per
+    /// collection that was not opened.
+    NoChannel(Vec<String>),
+    /// Several candidates fit; one redacted line each.
+    Ambiguous(Vec<String>),
+}
+
+/// The refusal text for a target that could not be picked or opened.
+pub(crate) fn target_refusal(vid: u16, pid: u16, family: Family, error: TargetError) -> String {
+    let why = match error {
+        TargetError::NotConnected(listing) => format!("is not connected{}", indented(&listing)),
+        TargetError::Held {
+            open_error: Some(cause),
+            ..
+        } => cause,
+        TargetError::Held { lines, .. } | TargetError::NoChannel(lines) => format!(
+            "no collection matches the {} shape (see juicetray scan){}",
+            family.name(),
+            indented(&lines)
+        ),
+        TargetError::Ambiguous(lines) => {
+            let head = match family.link() {
+                Link::Hid => format!(
+                    "several collections match the {} shape; unplug the extra receiver",
+                    family.name()
+                ),
+                Link::Serial => "several serial ports match; unplug the extra receiver".to_owned(),
+            };
+            format!("{head}{}", indented(&lines))
+        }
+    };
+    refusal(vid, pid, &why)
+}
+
 /// Picks among the collections enumeration opened; the picked index is only ever used on
-/// that same `opened` list.
-pub(crate) fn open_hid_target(
-    inventory: &Inventory,
+/// that same `opened` list. No I/O: the refresh worker judges a device by it before opening.
+pub(crate) fn pick_hid<'a>(
+    hid: &'a [HidCollection],
+    errors: &[String],
     family: Family,
     vid: u16,
     pid: u16,
-) -> Result<(Target, String), String> {
-    let all: Vec<&HidCollection> = inventory
-        .hid
+) -> Result<&'a HidCollection, TargetError> {
+    let all: Vec<&HidCollection> = hid
         .iter()
         .filter(|collection| (collection.vid, collection.pid) == (vid, pid))
         .collect();
     if all.is_empty() {
-        let why = format!("is not connected{}", listing_errors(inventory));
-        return Err(refusal(vid, pid, &why));
+        return Err(TargetError::NotConnected(errors.to_vec()));
     }
     let opened: Vec<&HidCollection> = all
         .iter()
@@ -171,63 +212,83 @@ pub(crate) fn open_hid_target(
         .collect();
 
     match pick_target(family, &shapes) {
-        Ok(index) => {
-            let collection = opened[index];
-            let target = inventory
-                .open_hid(collection)
-                .map_err(|error| refusal(vid, pid, &format!("{error:#}")))?;
-            let interface = collection
-                .shape
-                .interface
-                .map_or("?".to_owned(), |n| n.to_string());
-            let line = format!(
-                "target HID if {interface} {} · path {}",
-                usage_pair(&collection.shape),
-                redact_path(&collection.path)
-            );
-            Ok((target, line))
-        }
+        Ok(index) => Ok(opened[index]),
         Err(PickError::NoMatch) => {
-            let mut why = format!(
-                "no collection matches the {} shape (see juicetray scan)",
-                family.name()
-            );
+            let mut lines = Vec::new();
+            let mut held = false;
             for collection in &all {
                 let usage = usage_pair(&collection.shape);
                 match &collection.access {
-                    Access::Failed(text) => why.push_str(&format!(
-                        "\n  {usage} open failed: {text}; close the vendor app"
-                    )),
+                    Access::Failed(text) => {
+                        held = true;
+                        lines.push(format!("{usage} open failed: {text}; close the vendor app"));
+                    }
                     Access::Skipped(reason) => {
-                        why.push_str(&format!("\n  {usage} not opened ({reason})"))
+                        lines.push(format!("{usage} not opened ({reason})"));
                     }
                     Access::Opened { .. } => {}
                 }
             }
-            Err(refusal(vid, pid, &why))
+            Err(if held {
+                TargetError::Held {
+                    open_error: None,
+                    lines,
+                }
+            } else {
+                TargetError::NoChannel(lines)
+            })
         }
-        Err(PickError::Ambiguous(indices)) => {
-            let mut why = format!(
-                "several collections match the {} shape; unplug the extra receiver",
-                family.name()
-            );
-            for collection in indices.iter().filter_map(|&index| opened.get(index)) {
-                why.push_str(&format!(
-                    "\n  {} path {}",
-                    usage_pair(&collection.shape),
-                    redact_path(&collection.path)
-                ));
-            }
-            Err(refusal(vid, pid, &why))
-        }
+        Err(PickError::Ambiguous(indices)) => Err(TargetError::Ambiguous(
+            indices
+                .iter()
+                .filter_map(|&index| opened.get(index))
+                .map(|collection| {
+                    format!(
+                        "{} path {}",
+                        usage_pair(&collection.shape),
+                        redact_path(&collection.path)
+                    )
+                })
+                .collect(),
+        )),
     }
+}
+
+/// A failed open means the OS refused the pick (usually a vendor app holds it).
+fn open_failed(error: &anyhow::Error) -> TargetError {
+    TargetError::Held {
+        open_error: Some(format!("{error:#}")),
+        lines: Vec::new(),
+    }
+}
+
+pub(crate) fn open_hid_target(
+    inventory: &Inventory,
+    family: Family,
+    vid: u16,
+    pid: u16,
+) -> Result<(Target, String), TargetError> {
+    let collection = pick_hid(&inventory.hid, &inventory.errors, family, vid, pid)?;
+    let target = inventory
+        .open_hid(collection)
+        .map_err(|error| open_failed(&error))?;
+    let interface = collection
+        .shape
+        .interface
+        .map_or("?".to_owned(), |n| n.to_string());
+    let line = format!(
+        "target HID if {interface} {} · path {}",
+        usage_pair(&collection.shape),
+        redact_path(&collection.path)
+    );
+    Ok((target, line))
 }
 
 pub(crate) fn open_serial_target(
     inventory: &Inventory,
     vid: u16,
     pid: u16,
-) -> Result<(Target, String), String> {
+) -> Result<(Target, String), TargetError> {
     let port_name =
         |entry: &SerialEntry| mask_serial(&entry.port_name, entry.serial_number.as_deref());
     match pick_port(&inventory.serial, vid, pid) {
@@ -235,23 +296,17 @@ pub(crate) fn open_serial_target(
             let entry = &inventory.serial[index];
             let target = inventory
                 .open_serial(entry)
-                .map_err(|error| refusal(vid, pid, &format!("{error:#}")))?;
+                .map_err(|error| open_failed(&error))?;
             Ok((target, format!("target serial {}", port_name(entry))))
         }
-        Err(PickError::NoMatch) => {
-            let why = format!("is not connected{}", listing_errors(inventory));
-            Err(refusal(vid, pid, &why))
-        }
-        Err(PickError::Ambiguous(indices)) => {
-            let mut why = "several serial ports match; unplug the extra receiver".to_owned();
-            for entry in indices
+        Err(PickError::NoMatch) => Err(TargetError::NotConnected(inventory.errors.clone())),
+        Err(PickError::Ambiguous(indices)) => Err(TargetError::Ambiguous(
+            indices
                 .iter()
                 .filter_map(|&index| inventory.serial.get(index))
-            {
-                why.push_str(&format!("\n  {}", port_name(entry)));
-            }
-            Err(refusal(vid, pid, &why))
-        }
+                .map(port_name)
+                .collect(),
+        )),
     }
 }
 
@@ -344,6 +399,100 @@ mod tests {
         let ports = [port("COM5", 0x046D, 0xC52B), port("COM6", 0x046D, 0xC52B)];
         assert_eq!(pick_port(&ports, 0x373B, 0x1204), Err(PickError::NoMatch));
         assert_eq!(pick_port(&[], 0x373B, 0x1204), Err(PickError::NoMatch));
+    }
+
+    fn collection(vid: u16, pid: u16, access: Access) -> HidCollection {
+        HidCollection {
+            vid,
+            pid,
+            bus: "Usb".into(),
+            manufacturer: None,
+            product: None,
+            has_serial: false,
+            path: "P".into(),
+            shape: HidShape {
+                interface: Some(1),
+                usage_page: 0xFF02,
+                usage: 0x0002,
+                reports: Vec::new(),
+            },
+            access,
+        }
+    }
+
+    fn opened() -> Access {
+        Access::Opened {
+            descriptor: Vec::new(),
+            parse_error: None,
+        }
+    }
+
+    const COMPX: (u16, u16) = (0x3554, 0xFA09);
+
+    #[test]
+    fn pick_hid_held_when_a_collection_failed() {
+        let hid = [collection(COMPX.0, COMPX.1, Access::Failed("busy".into()))];
+
+        let error = pick_hid(&hid, &[], Family::Compx, COMPX.0, COMPX.1).expect_err("held");
+
+        assert_eq!(
+            error,
+            TargetError::Held {
+                open_error: None,
+                lines: vec!["FF02:0002 open failed: busy; close the vendor app".into()],
+            }
+        );
+        let text = target_refusal(COMPX.0, COMPX.1, Family::Compx, error);
+        assert_eq!(
+            text,
+            "probe 3554:FA09: no collection matches the Compx report 8 shape (see juicetray scan)\n  FF02:0002 open failed: busy; close the vendor app\nnothing was sent"
+        );
+    }
+
+    #[test]
+    fn pick_hid_no_channel_when_none_fits() {
+        let hid = [
+            collection(COMPX.0, COMPX.1, opened()),
+            collection(COMPX.0, COMPX.1, Access::Skipped("system mouse")),
+        ];
+
+        let error = pick_hid(&hid, &[], Family::Compx, COMPX.0, COMPX.1).expect_err("no channel");
+
+        assert_eq!(
+            error,
+            TargetError::NoChannel(vec!["FF02:0002 not opened (system mouse)".into()])
+        );
+    }
+
+    #[test]
+    fn pick_hid_not_connected_when_the_id_is_absent() {
+        let hid = [collection(0x046D, 0xC52B, opened())];
+        let listing = ["serial ports could not be listed: boom".to_owned()];
+
+        let error = pick_hid(&hid, &listing, Family::Compx, COMPX.0, COMPX.1).expect_err("absent");
+
+        assert_eq!(error, TargetError::NotConnected(listing.to_vec()));
+        assert_eq!(
+            target_refusal(COMPX.0, COMPX.1, Family::Compx, error),
+            "probe 3554:FA09: is not connected\n  serial ports could not be listed: boom\nnothing was sent"
+        );
+    }
+
+    #[test]
+    fn target_refusal_open_error_and_ambiguous() {
+        let open = TargetError::Held {
+            open_error: Some("could not open".into()),
+            lines: Vec::new(),
+        };
+        assert_eq!(
+            target_refusal(0x373B, 0x1204, Family::AtkSerial, open),
+            "probe 373B:1204: could not open; nothing was sent"
+        );
+        let several = TargetError::Ambiguous(vec!["COM3".into(), "COM4".into()]);
+        assert_eq!(
+            target_refusal(0x373B, 0x1204, Family::AtkSerial, several),
+            "probe 373B:1204: several serial ports match; unplug the extra receiver\n  COM3\n  COM4\nnothing was sent"
+        );
     }
 
     #[test]

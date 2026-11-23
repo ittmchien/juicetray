@@ -12,6 +12,7 @@ mod menu;
 mod probe;
 mod query;
 mod query_log;
+mod receivers;
 mod refresh;
 mod scan;
 mod svg_cache;
@@ -64,7 +65,7 @@ fn run_scan() -> ExitCode {
         }
     };
 
-    let inventory = door::inventory(None);
+    let inventory = door::inventory(&[]);
     println!(
         "\n{}",
         scan::usb_report(&inventory.hid, &inventory.serial, &inventory.errors)

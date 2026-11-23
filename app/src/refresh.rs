@@ -1,11 +1,13 @@
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use tao::event_loop::EventLoopProxy;
 
 use crate::app::UserEvent;
+use crate::config::Config;
+use crate::receivers::read_receivers;
 
 pub enum Command {
     RefreshNow,
@@ -29,16 +31,19 @@ pub fn spawn_worker(
 /// without a read, and the loop ends when the app drops the sender or the event loop is gone.
 fn run(proxy: &EventLoopProxy<UserEvent>, commands: &Receiver<Command>, mut interval: Option<u32>) {
     let mut read_now = true;
+    // The last Bluetooth list that was read; a failed Bluetooth read sends it again.
+    let mut bluetooth_devices = Vec::new();
     loop {
         if read_now {
             match bluetooth::read_devices() {
-                Ok(devices) => {
-                    if proxy.send_event(UserEvent::Devices(devices)).is_err() {
-                        return;
-                    }
-                }
-                // The app keeps showing the previous list.
+                Ok(devices) => bluetooth_devices = devices,
                 Err(error) => eprintln!("bluetooth read failed: {error:#}"),
+            }
+            // `allow` is re-read every time, so hand edits apply without a restart.
+            let receivers = read_receivers(&Config::load().allowed(), SystemTime::now());
+            let devices = bluetooth_devices.iter().cloned().chain(receivers).collect();
+            if proxy.send_event(UserEvent::Devices(devices)).is_err() {
+                return;
             }
         }
         read_now = true;
