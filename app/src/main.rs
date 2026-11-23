@@ -4,6 +4,9 @@ mod alerts;
 mod app;
 mod config;
 mod instance;
+// Phase A only: `parse_interval` gets its caller with the Custom… dialog.
+#[cfg_attr(not(test), allow(dead_code))]
+mod interval;
 mod login;
 mod menu;
 mod refresh;

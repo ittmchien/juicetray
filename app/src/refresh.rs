@@ -12,7 +12,7 @@ pub enum Command {
     SetInterval(Option<u32>),
 }
 
-/// Starts the worker; it reads at once, then on `RefreshNow` and every `interval` minutes.
+/// Starts the worker; it reads at once, then on `RefreshNow` and every `interval` seconds.
 pub fn spawn_worker(
     proxy: EventLoopProxy<UserEvent>,
     interval: Option<u32>,
@@ -44,8 +44,8 @@ fn run(proxy: &EventLoopProxy<UserEvent>, commands: &Receiver<Command>, mut inte
         read_now = true;
         match wait(commands, interval) {
             Ok(Command::RefreshNow) | Err(RecvTimeoutError::Timeout) => {}
-            Ok(Command::SetInterval(minutes)) => {
-                interval = minutes;
+            Ok(Command::SetInterval(seconds)) => {
+                interval = seconds;
                 read_now = false;
             }
             Err(RecvTimeoutError::Disconnected) => return,
@@ -56,7 +56,7 @@ fn run(proxy: &EventLoopProxy<UserEvent>, commands: &Receiver<Command>, mut inte
 /// Auto-refresh Off waits for a command forever.
 fn wait(commands: &Receiver<Command>, interval: Option<u32>) -> Result<Command, RecvTimeoutError> {
     match interval {
-        Some(minutes) => commands.recv_timeout(Duration::from_secs(u64::from(minutes) * 60)),
+        Some(seconds) => commands.recv_timeout(Duration::from_secs(u64::from(seconds))),
         None => commands.recv().map_err(|_| RecvTimeoutError::Disconnected),
     }
 }

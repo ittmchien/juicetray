@@ -126,7 +126,7 @@ impl App {
             .build()?;
         #[cfg(windows)]
         let taskbar = new_taskbar_strip(proxy.clone());
-        let worker = refresh::spawn_worker(proxy, config.refresh_minutes)?;
+        let worker = refresh::spawn_worker(proxy, config.refresh_seconds)?;
         let mut app = Self {
             tray,
             current_menu,
@@ -152,6 +152,8 @@ impl App {
         match event {
             UserEvent::Devices(devices) => self.on_devices(devices),
             UserEvent::Menu(event) => {
+                // muda flips check items on click; a forced rebuild restores the config's ticks.
+                self.shown_entries.clear();
                 if let Some(action) = menu::action_for(event.id.as_ref()) {
                     if action == MenuAction::Quit {
                         #[cfg(windows)]
@@ -182,7 +184,7 @@ impl App {
         // Every device is checked so its last reading stays current even while hidden.
         for device in &devices {
             let crossed = self.alerts.check(device, self.config.low_battery_percent);
-            if crossed && !self.config.hidden.contains(&device.name) {
+            if crossed && !self.config.is_hidden(&device.id, &device.name) {
                 notify_low_battery(device);
             }
         }
@@ -193,23 +195,28 @@ impl App {
     fn on_action(&mut self, action: MenuAction) {
         match action {
             MenuAction::Refresh => self.tell_worker(Command::RefreshNow),
-            MenuAction::SetRefresh(minutes) => {
-                self.config.refresh_minutes = minutes;
-                self.tell_worker(Command::SetInterval(minutes));
+            MenuAction::SetRefresh(seconds) => {
+                self.config.refresh_seconds = seconds;
+                self.tell_worker(Command::SetInterval(seconds));
                 self.save_config();
             }
+            // Dialog-driven actions are wired with the dialogs.
+            MenuAction::CustomRefresh | MenuAction::PickSvg(_) | MenuAction::CustomColor(_) => {}
             MenuAction::SetLow(percent) => {
                 self.config.low_battery_percent = percent;
                 self.save_config();
             }
-            MenuAction::ToggleHidden(name) => {
-                match self.config.hidden.iter().position(|hidden| *hidden == name) {
-                    Some(position) => {
-                        self.config.hidden.remove(position);
-                    }
-                    None => self.config.hidden.push(name),
-                }
+            MenuAction::ToggleHidden(id) => {
+                let name = self.device_name(&id);
+                self.config.toggle_hidden(&id, &name);
                 self.save_config();
+            }
+            MenuAction::TogglePercent(id) => {
+                self.update_device(&id, |options| options.show_percent = !options.show_percent);
+            }
+            MenuAction::SetIcon(id, icon) => self.update_device(&id, |options| options.icon = icon),
+            MenuAction::SetColor(id, color) => {
+                self.update_device(&id, |options| options.color = color);
             }
             MenuAction::ToggleShowDisconnected => {
                 self.config.show_disconnected = !self.config.show_disconnected;
@@ -224,6 +231,21 @@ impl App {
             // Handled by the caller, which stops the loop.
             MenuAction::Quit => {}
         }
+    }
+
+    /// The device's current name; empty when it vanished since the menu was built.
+    fn device_name(&self, id: &str) -> String {
+        self.devices
+            .iter()
+            .find(|device| device.id == id)
+            .map(|device| device.name.clone())
+            .unwrap_or_default()
+    }
+
+    fn update_device(&mut self, id: &str, change: impl FnOnce(&mut DisplayOptions)) {
+        let name = self.device_name(id);
+        self.config.update_device(id, &name, change);
+        self.save_config();
     }
 
     fn tell_worker(&self, command: Command) {
@@ -265,13 +287,13 @@ impl App {
     /// Re-reads the theme and rebuilds the tray icon when the strip or theme changed.
     fn apply_strip(&mut self) {
         let theme = theme::current_theme(&self.tray);
+        // Hiding by id or old name is decided here, so the strip gets no name list.
         let segments = build_strip(
-            &self.devices,
+            &self.visible_devices(),
             self.config.low_battery_percent,
-            &self.config.hidden,
+            &[],
             self.config.show_disconnected,
-            // Per-device options arrive with the config wiring.
-            &|_| DisplayOptions::default(),
+            &|id| self.config.display_options(id),
         );
         let strip = (segments, theme);
         if self.shown_strip.as_ref() != Some(&strip) {
@@ -309,7 +331,7 @@ impl App {
     /// The devices the strip shows: listed in the menu and not hidden.
     fn visible_devices(&self) -> Vec<DeviceView> {
         menu::listed_devices(&self.devices, &self.config)
-            .filter(|device| !self.config.hidden.contains(&device.name))
+            .filter(|device| !self.config.is_hidden(&device.id, &device.name))
             .cloned()
             .collect()
     }
