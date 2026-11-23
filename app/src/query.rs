@@ -38,56 +38,79 @@ pub(crate) fn wait_text(wait: Duration) -> String {
     format!("wait {} s", secs.max(1))
 }
 
-/// Refuses within the family's floor. A stamp in the future (clock moved back) is replaced by
-/// `now` and saved, so the device is free again one floor later instead of locked out.
+/// Why a query may not go out; `claim_refusal` turns it into the user-facing text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClaimError {
+    /// Within the family's floor; the time left.
+    Wait(Duration),
+    /// The stored stamp is in the future (clock moved back).
+    ClockBack,
+    /// The query time could not be saved; the OS error only (the outer contexts carry paths).
+    Record(String),
+}
+
+impl From<anyhow::Error> for ClaimError {
+    fn from(error: anyhow::Error) -> Self {
+        ClaimError::Record(error.root_cause().to_string())
+    }
+}
+
+/// The refusal text for a failed claim.
+pub(crate) fn claim_refusal(vid: u16, pid: u16, family: Family, error: ClaimError) -> String {
+    let why = match error {
+        ClaimError::Wait(wait) => wait_text(wait),
+        ClaimError::ClockBack => format!(
+            "clock moved back; recorded now, {}",
+            wait_text(family.query_floor())
+        ),
+        ClaimError::Record(cause) => format!("could not record the query time ({cause})"),
+    };
+    refusal(vid, pid, &why)
+}
+
+/// Read-only: refuses within the family's floor, and on a stamp in the future (clock moved
+/// back), which `claim_query` replaces by `now`.
 pub(crate) fn floor_check(
-    log: &mut QueryLog,
-    log_path: &Path,
+    log: &QueryLog,
     family: Family,
     vid: u16,
     pid: u16,
     now: SystemTime,
-) -> Result<(), String> {
+) -> Result<(), ClaimError> {
     let last = log.last(vid, pid);
     if last.is_some_and(|last| last > now) {
-        log.stamp(vid, pid, now);
-        log.save_to(log_path)
-            .map_err(|error| record_failed(vid, pid, &error))?;
-        let why = format!(
-            "clock moved back; recorded now, {}",
-            wait_text(family.query_floor())
-        );
-        return Err(refusal(vid, pid, &why));
+        return Err(ClaimError::ClockBack);
     }
     match floor_wait(family, last, now) {
-        Some(wait) => Err(refusal(vid, pid, &wait_text(wait))),
+        Some(wait) => Err(ClaimError::Wait(wait)),
         None => Ok(()),
     }
 }
 
-/// Re-reads the log file, checks the floor, then saves the stamp; only a saved stamp lets the
-/// query go out. The re-read catches another probe that claimed since this one loaded the log.
-/// shortcut: re-read narrows but does not close the race between two processes; add a lock
-/// file (`create_new`) before milestone 3's refresh worker shares this log.
+/// Under the log lock: re-reads the log file, checks the floor, then saves the stamp; only a
+/// saved stamp lets the query go out. A future stamp is replaced by `now` and saved, so the
+/// device is free again one floor later instead of locked out, and the claim still refuses.
 pub(crate) fn claim_query(
-    log: &mut QueryLog,
     log_path: &Path,
     family: Family,
     vid: u16,
     pid: u16,
     now: SystemTime,
-) -> Result<(), String> {
-    *log = QueryLog::load_from(log_path);
-    floor_check(log, log_path, family, vid, pid, now)?;
-    log.stamp(vid, pid, now);
-    log.save_to(log_path)
-        .map_err(|error| record_failed(vid, pid, &error))
-}
-
-/// Names the OS error only: the outer contexts carry the data folder path (R10).
-pub(crate) fn record_failed(vid: u16, pid: u16, error: &anyhow::Error) -> String {
-    let why = format!("could not record the query time ({})", error.root_cause());
-    refusal(vid, pid, &why)
+) -> Result<(), ClaimError> {
+    QueryLog::update(log_path, |log| {
+        match floor_check(log, family, vid, pid, now) {
+            Ok(()) => {
+                log.stamp(vid, pid, now);
+                Ok(())
+            }
+            Err(ClaimError::ClockBack) => {
+                log.stamp(vid, pid, now);
+                log.save_to(log_path)?;
+                Err(ClaimError::ClockBack)
+            }
+            Err(refused) => Err(refused),
+        }
+    })
 }
 
 /// The one USB serial port of `vid:pid`; macOS `/dev/tty.*` twins of `/dev/cu.*` are ignored.
@@ -331,6 +354,16 @@ mod tests {
         assert_eq!(wait_text(Duration::ZERO), "wait 1 s");
     }
 
+    fn claim_text(
+        path: &Path,
+        family: Family,
+        (vid, pid): (u16, u16),
+        now: SystemTime,
+    ) -> Result<(), String> {
+        claim_query(path, family, vid, pid, now)
+            .map_err(|error| claim_refusal(vid, pid, family, error))
+    }
+
     #[test]
     fn claim_within_floor_leaves_log_untouched() {
         let root = temp_root("within");
@@ -341,14 +374,13 @@ mod tests {
         log.save_to(&path).unwrap();
         let before = fs::read(&path).unwrap();
 
-        let result = claim_query(&mut log, &path, Family::Mchose, vid, pid, whole(NOW));
+        let result = claim_text(&path, Family::Mchose, MCHOSE, whole(NOW));
         let after = fs::read(&path).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         let text = result.expect_err("within the floor");
         assert!(text.contains("wait 240 s"), "{text}");
         assert!(text.ends_with("nothing was sent"), "{text}");
-        assert_eq!(log.last(vid, pid), Some(whole(NOW - 60)));
         assert_eq!(after, before);
     }
 
@@ -358,10 +390,8 @@ mod tests {
         let blocker = root.join("blocker");
         fs::write(&blocker, "a file, not a folder").unwrap();
         let path = blocker.join("query-log.toml");
-        let (vid, pid) = MCHOSE;
-        let mut log = QueryLog::default();
 
-        let result = claim_query(&mut log, &path, Family::Mchose, vid, pid, whole(NOW));
+        let result = claim_text(&path, Family::Mchose, MCHOSE, whole(NOW));
         fs::remove_dir_all(&root).unwrap();
 
         let text = result.expect_err("an unsaved stamp must refuse");
@@ -379,7 +409,7 @@ mod tests {
         log.stamp(vid, pid, whole(NOW + 3600));
         log.save_to(&path).unwrap();
 
-        let result = claim_query(&mut log, &path, Family::Mchose, vid, pid, whole(NOW));
+        let result = claim_text(&path, Family::Mchose, MCHOSE, whole(NOW));
         let saved = QueryLog::load_from(&path);
         fs::remove_dir_all(&root).unwrap();
 
@@ -387,7 +417,6 @@ mod tests {
         assert!(text.contains("clock moved back"), "{text}");
         assert!(text.contains("wait 300 s"), "{text}");
         assert!(text.ends_with("nothing was sent"), "{text}");
-        assert_eq!(log.last(vid, pid), Some(whole(NOW)));
         assert_eq!(saved.last(vid, pid), Some(whole(NOW)));
     }
 
@@ -396,10 +425,9 @@ mod tests {
         let root = temp_root("ok");
         let path = root.join("query-log.toml");
         let (vid, pid) = MCHOSE;
-        let mut log = QueryLog::default();
         let now = whole(NOW) + Duration::from_millis(400);
 
-        let result = claim_query(&mut log, &path, Family::Mchose, vid, pid, now);
+        let result = claim_query(&path, Family::Mchose, vid, pid, now);
         let saved = QueryLog::load_from(&path);
         fs::remove_dir_all(&root).unwrap();
 
@@ -412,14 +440,13 @@ mod tests {
         let root = temp_root("reread");
         let path = root.join("query-log.toml");
         let (vid, pid) = MCHOSE;
-        // The caller loaded an empty log; another probe has since stamped the file.
-        let mut stale = QueryLog::default();
+        // Another probe has stamped the file after the caller last looked at it.
         let mut other = QueryLog::default();
         other.stamp(vid, pid, whole(NOW - 60));
         other.save_to(&path).unwrap();
         let before = fs::read(&path).unwrap();
 
-        let result = claim_query(&mut stale, &path, Family::Mchose, vid, pid, whole(NOW));
+        let result = claim_text(&path, Family::Mchose, MCHOSE, whole(NOW));
         let after = fs::read(&path).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
@@ -430,6 +457,29 @@ mod tests {
     }
 
     #[test]
+    fn claim_keeps_stored_reading() {
+        let root = temp_root("keeps-reading");
+        let path = root.join("query-log.toml");
+        let (vid, pid) = MCHOSE;
+        let reading = protocol::Reading {
+            percent: 92,
+            charging: false,
+            asleep: false,
+        };
+        let mut log = QueryLog::default();
+        log.record_reading(vid, pid, reading, whole(NOW - 600));
+        log.save_to(&path).unwrap();
+
+        let result = claim_query(&path, Family::Mchose, vid, pid, whole(NOW));
+        let saved = QueryLog::load_from(&path);
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(saved.last(vid, pid), Some(whole(NOW)));
+        assert_eq!(saved.reading(vid, pid), Some((reading, whole(NOW - 600))));
+    }
+
+    #[test]
     fn floor_check_passes_after_the_floor_without_stamping() {
         let root = temp_root("after");
         let path = root.join("query-log.toml");
@@ -437,12 +487,33 @@ mod tests {
         let mut log = QueryLog::default();
         log.stamp(vid, pid, whole(NOW - 10));
 
-        let result = floor_check(&mut log, &path, Family::Compx, vid, pid, whole(NOW));
+        let result = floor_check(&log, Family::Compx, vid, pid, whole(NOW));
         let written = path.exists();
         fs::remove_dir_all(&root).unwrap();
 
         assert_eq!(result, Ok(()));
         assert_eq!(log.last(vid, pid), Some(whole(NOW - 10)));
         assert!(!written);
+    }
+
+    #[test]
+    fn floor_check_refuses_without_writing() {
+        let root = temp_root("floor-readonly");
+        let path = root.join("query-log.toml");
+        let (vid, pid) = MCHOSE;
+        let mut within = QueryLog::default();
+        within.stamp(vid, pid, whole(NOW - 60));
+        let mut future = QueryLog::default();
+        future.stamp(vid, pid, whole(NOW + 3600));
+
+        let wait = floor_check(&within, Family::Mchose, vid, pid, whole(NOW));
+        let clock = floor_check(&future, Family::Mchose, vid, pid, whole(NOW));
+        let written = path.exists() || root.join("query-log.lock").exists();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(wait, Err(ClaimError::Wait(Duration::from_secs(240))));
+        assert_eq!(clock, Err(ClaimError::ClockBack));
+        assert_eq!(future.last(vid, pid), Some(whole(NOW + 3600)));
+        assert!(!written, "floor_check never touches the files");
     }
 }

@@ -161,13 +161,13 @@ impl Config {
     }
 }
 
-/// Writes `<path>.tmp` then renames it over `path`, so a crash never leaves a half-written file.
-/// Creates the parent folder when it is missing.
+/// Writes `<path>.<pid>.tmp` then renames it over `path`, so a crash never leaves a half-written
+/// file and two processes never share a temp file. Creates the parent folder when it is missing.
 pub(crate) fn write_atomically(path: &Path, text: &str) -> Result<()> {
     let dir = path.parent().context("path has no parent folder")?;
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(format!(".{}.tmp", std::process::id()));
     let tmp = PathBuf::from(tmp);
     fs::write(&tmp, text).with_context(|| format!("write {}", tmp.display()))?;
     fs::rename(&tmp, path).with_context(|| format!("rename to {}", path.display()))

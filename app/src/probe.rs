@@ -9,7 +9,8 @@ use door::{Door, Exchange, HID_REPLY_TIMEOUT, SERIAL_REPLY_TIMEOUT};
 use protocol::{Decoded, KNOWN, KnownDevice, Link, battery_query, known};
 
 use crate::query::{
-    claim_query, floor_check, open_hid_target, open_serial_target, parse_vid_pid, refusal,
+    ClaimError, claim_query, claim_refusal, floor_check, open_hid_target, open_serial_target,
+    parse_vid_pid, refusal,
 };
 use crate::query_log::{self, QueryLog};
 use crate::scan::bytes_line;
@@ -41,21 +42,46 @@ fn probe(arg: Option<&str>) -> Result<(String, bool), String> {
 
     let log_path = query_log::path()
         .ok_or_else(|| refusal(vid, pid, "no data directory to record the query time"))?;
-    let mut log = QueryLog::load_from(&log_path);
-    floor_check(&mut log, &log_path, family, vid, pid, SystemTime::now())?;
+    let log = QueryLog::load_from(&log_path);
+    let refuse = |error: ClaimError| claim_refusal(vid, pid, family, error);
+    if let Err(early) = floor_check(&log, family, vid, pid, SystemTime::now()) {
+        // A future stamp is replaced by the claim, which refuses with the same clock-back text.
+        let error = match early {
+            ClaimError::ClockBack => claim_query(&log_path, family, vid, pid, SystemTime::now())
+                .err()
+                .unwrap_or(early),
+            other => other,
+        };
+        return Err(refuse(error));
+    }
 
     let inventory = door::inventory(Some((vid, pid)));
     let (mut target, target_line) = match family.link() {
         Link::Hid => open_hid_target(&inventory, family, vid, pid)?,
         Link::Serial => open_serial_target(&inventory, vid, pid)?,
     };
-    claim_query(&mut log, &log_path, family, vid, pid, SystemTime::now())?;
+    claim_query(&log_path, family, vid, pid, SystemTime::now()).map_err(refuse)?;
 
     let exchange = Door::new(1)
         .send(&mut target)
         .map_err(|error| send_failed(device, &format!("{error:#}")))?;
-    let is_reading = matches!(exchange.reply, Some((_, Decoded::Reading(_))));
-    Ok((exchange_text(device, &target_line, &exchange), is_reading))
+    let mut text = exchange_text(device, &target_line, &exchange);
+    let Some((_, Decoded::Reading(reading))) = &exchange.reply else {
+        return Ok((text, false));
+    };
+    // A failed record is a note only; the reading itself was valid.
+    let read_at = SystemTime::now();
+    let recorded = QueryLog::update(&log_path, |log| {
+        log.record_reading(vid, pid, *reading, read_at);
+        Ok::<_, anyhow::Error>(())
+    });
+    if let Err(error) = recorded {
+        text.push_str(&format!(
+            "\nnote: could not record the reading ({})",
+            error.root_cause()
+        ));
+    }
+    Ok((text, true))
 }
 
 fn unknown_device(vid: u16, pid: u16) -> String {

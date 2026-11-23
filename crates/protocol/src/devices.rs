@@ -48,7 +48,7 @@ pub const KNOWN: &[KnownDevice] = &[
         0x6010,
         "MCHOSE V9 Pro 2 (cable)",
         Family::Mchose,
-        true,
+        false,
         true,
     ),
     device(0x373B, 0x1107, "ATK X1 SE NK", Family::Compx, false, false),
@@ -144,7 +144,7 @@ mod tests {
                 .map(|d| (d.vid, d.pid))
                 .collect()
         };
-        assert_eq!(ids(|d| d.confirmed), [(0x3837, 0x6011), (0x3837, 0x6010)]);
+        assert_eq!(ids(|d| d.confirmed), [(0x3837, 0x6011)]);
         assert_eq!(ids(|d| d.cable), [(0x3837, 0x6010), (0x373B, 0x11CA)]);
     }
 
