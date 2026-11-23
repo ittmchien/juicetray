@@ -964,6 +964,8 @@ dependencies = [
  "directories",
  "embed-resource",
  "juicetray-bluetooth",
+ "juicetray-door",
+ "juicetray-protocol",
  "juicetray-strip-render",
  "juicetray-ui-model",
  "notify-rust",

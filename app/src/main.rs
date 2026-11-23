@@ -25,27 +25,44 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_scan() -> ExitCode {
-    // A GUI-subsystem exe has no console; borrow the parent shell's so output is visible.
+/// A GUI-subsystem exe has no console; borrow the parent shell's so output is visible.
+fn attach_parent_console() {
     #[cfg(windows)]
     {
         use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
         // Fails when launched without a parent console; then there is nowhere to print.
         let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
     }
+}
 
-    match bluetooth::read_devices() {
+/// Prints every section it can; fails only when Bluetooth or the USB listing itself failed.
+fn run_scan() -> ExitCode {
+    attach_parent_console();
+
+    let bluetooth_ok = match bluetooth::read_devices() {
         Ok(mut devices) => {
             ui_model::sort_weakest_first(&mut devices);
             println!("{}", scan::scan_report(&devices, SystemTime::now()));
-            // Layout data for diagnosing the taskbar strip on a machine nobody can inspect.
-            #[cfg(windows)]
-            println!("\n{}", taskbar::describe_environment());
-            ExitCode::SUCCESS
+            true
         }
         Err(error) => {
             eprintln!("scan failed: {error:#}");
-            ExitCode::FAILURE
+            false
         }
+    };
+
+    let inventory = door::inventory(None);
+    println!(
+        "\n{}",
+        scan::usb_report(&inventory.hid, &inventory.serial, &inventory.errors)
+    );
+    // Layout data for diagnosing the taskbar strip on a machine nobody can inspect.
+    #[cfg(windows)]
+    println!("\n{}", taskbar::describe_environment());
+
+    if bluetooth_ok && inventory.errors.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }

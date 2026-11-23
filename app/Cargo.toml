@@ -8,6 +8,8 @@ license = "GPL-3.0-or-later"
 anyhow = "1"
 directories = "6"
 juicetray-bluetooth = { path = "../crates/bluetooth" }
+juicetray-door = { path = "../crates/door" }
+juicetray-protocol = { path = "../crates/protocol" }
 juicetray-strip-render = { path = "../crates/strip-render" }
 juicetray-ui-model = { path = "../crates/ui-model" }
 # Desktop notifications only; the default features pull in the Linux D-Bus stack.
