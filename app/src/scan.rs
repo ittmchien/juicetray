@@ -176,14 +176,30 @@ pub(crate) fn bytes_line(label: &str, bytes: &[u8]) -> String {
     format!("{label} ({} B):{hex}", bytes.len())
 }
 
-/// Windows HID paths are `#`-separated; part 2 is the machine-local device instance id.
+/// Windows HID paths are `#`-separated; part 2 is the machine-local device instance id, and a
+/// Bluetooth LE hardware id in part 1 carries the address as a `_<12 hex>` token.
 pub(crate) fn redact_path(path: &str) -> String {
-    let mut parts: Vec<&str> = path.split('#').collect();
+    let mut parts: Vec<String> = path.split('#').map(str::to_owned).collect();
     if parts.len() < 4 {
         return path.to_owned();
     }
-    parts[2] = "…";
+    parts[1] = parts[1]
+        .split('&')
+        .map(mask_address)
+        .collect::<Vec<_>>()
+        .join("&");
+    parts[2] = "…".to_owned();
     parts.join("#")
+}
+
+/// `…_<exactly 12 hex digits>` (one `&`-separated piece) becomes `…_…`.
+fn mask_address(piece: &str) -> String {
+    match piece.rsplit_once('_') {
+        Some((head, tail)) if tail.len() == 12 && tail.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            format!("{head}_…")
+        }
+        _ => piece.to_owned(),
+    }
 }
 
 /// Short name of a well-known usage; empty when there is nothing useful to say.
@@ -398,6 +414,20 @@ mod tests {
         assert_eq!(redact_path("DevSrvsID:4294969073"), "DevSrvsID:4294969073");
         assert_eq!(redact_path("COM3"), "COM3");
         assert_eq!(redact_path("a#b#c"), "a#b#c");
+    }
+
+    #[test]
+    fn redact_path_masks_ble_address() {
+        let ble = "\\\\?\\hid#{00001812-0000-1000-8000-00805f9b34fb}_dev_vid&02046d_pid&b025_rev&0005_d1e5f6a7b8c9&col01#9&1f2e3d4c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        let masked = redact_path(ble);
+
+        assert_eq!(
+            masked,
+            "\\\\?\\hid#{00001812-0000-1000-8000-00805f9b34fb}_dev_vid&02046d_pid&b025_rev&0005_…&col01#…#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        );
+        assert!(!masked.contains("d1e5f6a7b8c9"), "{masked}");
+        assert!(!masked.contains("1f2e3d4c"), "{masked}");
+        assert!(masked.contains("vid&02046d_pid&b025"), "{masked}");
     }
 
     #[test]
