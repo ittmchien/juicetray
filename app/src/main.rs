@@ -10,6 +10,7 @@ mod licenses;
 mod login;
 mod menu;
 mod probe;
+mod query;
 mod query_log;
 mod refresh;
 mod scan;
