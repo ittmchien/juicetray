@@ -128,12 +128,12 @@ struct App {
     /// `None` when the strip window class or keeper timer could not be set up.
     #[cfg(windows)]
     taskbar: Option<TaskbarStrip>,
-    /// The status-bar font with the taskbar DPI and strip height it was read for.
+    /// The status-bar font per (taskbar DPI, strip height) it was read for.
     #[cfg(windows)]
-    taskbar_text: Option<(u32, u32, TextStyle)>,
-    /// Strip, theme, bitmap height, taskbar DPI and tooltip last handed to the taskbar strip.
+    taskbar_text: HashMap<(u32, u32), TextStyle>,
+    /// Strip, theme and tooltip last handed to the taskbar strip.
     #[cfg(windows)]
-    shown_taskbar: Option<(Vec<Segment>, Theme, u32, u32, String)>,
+    shown_taskbar: Option<(Vec<Segment>, Theme, String)>,
 }
 
 impl App {
@@ -165,7 +165,7 @@ impl App {
             #[cfg(windows)]
             taskbar,
             #[cfg(windows)]
-            taskbar_text: None,
+            taskbar_text: HashMap::new(),
             #[cfg(windows)]
             shown_taskbar: None,
         };
@@ -466,53 +466,42 @@ impl App {
     fn keep_taskbar(&mut self) {
         self.apply_strip();
         self.sync_taskbar();
-        if let Some(taskbar) = self.taskbar.as_mut() {
-            taskbar.keep();
-        }
+        self.keep_taskbar_windows();
     }
 
-    /// Renders the strip at the taskbar's current height, only when strip, theme, height or
-    /// tooltip differ from what the taskbar window shows.
+    /// Hands the strip to every taskbar window, only when strip, theme or tooltip differ from
+    /// what they show; each window renders at its own taskbar's height and DPI.
     fn sync_taskbar(&mut self) {
         let (Some(taskbar), Some((segments, theme))) =
             (self.taskbar.as_mut(), self.shown_strip.as_ref())
         else {
             return;
         };
-        // Explorer is missing for now; the keeper recreates the window once it is back.
-        let (Some(height), Some(dpi)) = (TaskbarStrip::strip_height(), TaskbarStrip::taskbar_dpi())
-        else {
-            return;
-        };
-        let unchanged = self
-            .shown_taskbar
-            .as_ref()
-            .is_some_and(|(s, t, h, d, tooltip)| {
-                s == segments
-                    && t == theme
-                    && *h == height
-                    && *d == dpi
-                    && *tooltip == self.shown_tooltip
-            });
+        let unchanged = self.shown_taskbar.as_ref().is_some_and(|(s, t, tooltip)| {
+            s == segments && t == theme && *tooltip == self.shown_tooltip
+        });
         if unchanged {
             return;
         }
-        // The OS font is read again only when the taskbar's DPI or the strip height changes.
-        let text = match self.taskbar_text.take() {
-            Some(cached @ (d, h, _)) if d == dpi && h == height => cached,
-            _ => (dpi, height, ui_font::status_text(dpi, height)),
+        let (svgs, texts) = (&self.svgs, &mut self.taskbar_text);
+        taskbar.show(
+            &mut |height, dpi| render_taskbar_strip(segments, *theme, svgs, texts, height, dpi),
+            &self.shown_tooltip,
+        );
+        self.shown_taskbar = Some((segments.clone(), *theme, self.shown_tooltip.clone()));
+    }
+
+    /// Keeper tick: re-renders windows whose taskbar height or DPI changed and re-docks them all.
+    fn keep_taskbar_windows(&mut self) {
+        let (Some(taskbar), Some((segments, theme))) =
+            (self.taskbar.as_mut(), self.shown_strip.as_ref())
+        else {
+            return;
         };
-        let bitmap =
-            strip_render::render_strip(segments, height, *theme, self.svgs.icons(), &text.2);
-        self.taskbar_text = Some(text);
-        taskbar.show(&bitmap, &self.shown_tooltip);
-        self.shown_taskbar = Some((
-            segments.clone(),
-            *theme,
-            height,
-            dpi,
-            self.shown_tooltip.clone(),
-        ));
+        let (svgs, texts) = (&self.svgs, &mut self.taskbar_text);
+        taskbar.keep(&mut |height, dpi| {
+            render_taskbar_strip(segments, *theme, svgs, texts, height, dpi)
+        });
     }
 
     /// Opens the live menu from a strip click, anchored to the tray icon's own window.
@@ -531,6 +520,22 @@ impl App {
             taskbar.hide();
         }
     }
+}
+
+/// Renders the strip for one taskbar; the OS font is read again only for an unseen (DPI, height).
+#[cfg(windows)]
+fn render_taskbar_strip(
+    segments: &[Segment],
+    theme: Theme,
+    svgs: &SvgCache,
+    texts: &mut HashMap<(u32, u32), TextStyle>,
+    height: u32,
+    dpi: u32,
+) -> Bitmap {
+    let text = texts
+        .entry((dpi, height))
+        .or_insert_with(|| ui_font::status_text(dpi, height));
+    strip_render::render_strip(segments, height, theme, svgs.icons(), text)
 }
 
 /// Without a strip window the tray icon still shows the weakest number.

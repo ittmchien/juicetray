@@ -1,6 +1,7 @@
 //! Layered child window docked into Explorer's taskbar, kept alive by a 2 s timer.
 //! Every window procedure only forwards a signal to the event loop; nothing here blocks.
 
+use std::collections::HashMap;
 use std::ptr;
 use std::sync::OnceLock;
 
@@ -34,6 +35,7 @@ use windows::core::{PCWSTR, PWSTR, w};
 
 use super::layout::{
     Placement, Rect, natural_container, place_secondary_strip, place_strip, shrink_to_clear,
+    strip_height,
 };
 use super::premultiplied_bgra;
 
@@ -44,8 +46,6 @@ const KEEPER_INTERVAL_MS: u32 = 2000;
 const TOOLTIP_TOOL_ID: usize = 1;
 /// Wide enough that a tooltip's own line breaks decide the wrapping.
 const TOOLTIP_MAX_WIDTH_PX: isize = 600;
-/// Strip height as a share of the taskbar's client height, in percent.
-const STRIP_HEIGHT_PERCENT: i32 = 55;
 
 /// What a window procedure tells the event loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +71,14 @@ struct StripWindow {
     tooltip: Option<HWND>,
 }
 
+/// What a dock's window currently shows: the (height, DPI) it was rendered for and its pixel size.
+#[derive(Clone, Copy)]
+struct Shown {
+    size: (u32, u32),
+    width: i32,
+    height: i32,
+}
+
 /// One strip copy, the taskbar it lives in and the space it reserved there.
 struct Dock {
     taskbar: HWND,
@@ -79,13 +87,19 @@ struct Dock {
     strip: StripWindow,
     /// The task-button container has been sized by this copy, so `release` must restore it.
     reserved: bool,
+    /// `None` until the copy has been painted.
+    shown: Option<Shown>,
 }
+
+/// Renders the strip for one taskbar's (height px, DPI).
+pub type RenderStrip<'a> = dyn FnMut(u32, u32) -> Bitmap + 'a;
 
 pub struct TaskbarStrip {
     instance: HINSTANCE,
     /// One copy per taskbar: the primary and every `Shell_SecondaryTrayWnd`.
     docks: Vec<Dock>,
-    bitmap: Option<Bitmap>,
+    /// A strip is being shown (set by `show`, cleared by `hide`); the keeper only acts while it is.
+    active: bool,
     tooltip: String,
     create_failure_logged: bool,
 }
@@ -136,53 +150,39 @@ impl TaskbarStrip {
         Ok(Self {
             instance,
             docks: Vec::new(),
-            bitmap: None,
+            active: false,
             tooltip: String::new(),
             create_failure_logged: false,
         })
     }
 
-    /// Height of the strip bitmap for the primary taskbar, or `None` while it does not exist.
-    pub fn strip_height() -> Option<u32> {
-        let bar = client_rect_on_screen(find_taskbar()?)?;
-        u32::try_from((bar.h * STRIP_HEIGHT_PERCENT + 50) / 100)
-            .ok()
-            .filter(|height| *height > 0)
-    }
-
-    /// DPI of the primary taskbar's monitor, or `None` while the taskbar does not exist.
-    pub fn taskbar_dpi() -> Option<u32> {
-        // SAFETY: only reads a property of a window handle; a stale handle gives 0.
-        let dpi = unsafe { GetDpiForWindow(find_taskbar()?) };
-        (dpi > 0).then_some(dpi)
-    }
-
-    /// Shows `bitmap` with `tooltip`, creating the window when it is missing.
-    pub fn show(&mut self, bitmap: &Bitmap, tooltip: &str) {
-        self.bitmap = Some(bitmap.clone());
+    /// Shows the strip with `tooltip` on every taskbar, calling `render` once per distinct
+    /// (height px, DPI) among them, and creates the windows that are missing.
+    pub fn show(&mut self, render: &mut RenderStrip, tooltip: &str) {
+        self.active = true;
         tooltip.clone_into(&mut self.tooltip);
-        self.sync(true);
+        self.sync(render, true);
     }
 
-    /// Keeper tick: recreates copies after an Explorer restart or a display change and re-docks them.
-    pub fn keep(&mut self) {
-        self.sync(false);
+    /// Keeper tick: recreates copies after an Explorer restart or a display change, re-renders
+    /// copies whose taskbar height or DPI changed and re-docks them.
+    pub fn keep(&mut self, render: &mut RenderStrip) {
+        self.sync(render, false);
     }
 
     /// Removes every strip copy, gives back the reserved space and stops showing anything.
     pub fn hide(&mut self) {
-        self.bitmap = None;
+        self.active = false;
         self.docks.drain(..).for_each(Dock::destroy);
     }
 
-    /// Gives every taskbar a live copy, paints copies when `repaint` (or when new) and docks them.
-    fn sync(&mut self, repaint: bool) {
-        let Some(bitmap) = &self.bitmap else {
+    /// Gives every taskbar a live copy, paints copies when `repaint` (or when new, or when their
+    /// taskbar's height or DPI changed) and docks them.
+    fn sync(&mut self, render: &mut RenderStrip, repaint: bool) {
+        if !self.active {
             return;
-        };
+        }
         let primary = find_taskbar();
-        // shortcut: every copy shows the bitmap rendered for the primary taskbar's height and DPI, so
-        // a secondary on another DPI shows a primary-size strip; upgrade by rendering per dock DPI.
         let taskbars: Vec<HWND> = primary
             .into_iter()
             .chain(dockable_secondary_taskbars())
@@ -193,11 +193,19 @@ impl TaskbarStrip {
             .partition(|dock| dock.strip.is_alive() && taskbars.contains(&dock.taskbar));
         gone.into_iter().for_each(Dock::destroy);
         self.docks = live;
-        let existing = self.docks.len();
+        // Taskbars with the same (height, DPI) share one render within this call.
+        let mut rendered: HashMap<(u32, u32), Bitmap> = HashMap::new();
         for taskbar in taskbars {
             if self.docks.iter().any(|dock| dock.taskbar == taskbar) {
                 continue;
             }
+            // Explorer is mid-restart for this bar; a later tick creates its copy.
+            let Some(size) = strip_size(taskbar) else {
+                continue;
+            };
+            let bitmap = rendered
+                .entry(size)
+                .or_insert_with(|| render(size.0, size.1));
             match StripWindow::create(taskbar, self.instance, bitmap) {
                 Ok(strip) => {
                     self.docks.push(Dock {
@@ -205,6 +213,7 @@ impl TaskbarStrip {
                         is_primary: Some(taskbar) == primary,
                         strip,
                         reserved: false,
+                        shown: None,
                     });
                     self.create_failure_logged = false;
                 }
@@ -217,11 +226,24 @@ impl TaskbarStrip {
                 }
             }
         }
-        for (index, dock) in self.docks.iter_mut().enumerate() {
-            if repaint || index >= existing {
+        for dock in &mut self.docks {
+            let Some(size) = strip_size(dock.taskbar) else {
+                continue;
+            };
+            if repaint || dock.shown.is_none_or(|shown| shown.size != size) {
+                let bitmap = rendered
+                    .entry(size)
+                    .or_insert_with(|| render(size.0, size.1));
                 dock.strip.show_bitmap(bitmap, &self.tooltip);
+                dock.shown = Some(Shown {
+                    size,
+                    width: px(bitmap.width),
+                    height: px(bitmap.height),
+                });
             }
-            dock.place(bitmap);
+            if let Some(shown) = dock.shown {
+                dock.place(shown.width, shown.height);
+            }
         }
     }
 }
@@ -235,8 +257,7 @@ impl Drop for TaskbarStrip {
 
 impl Dock {
     /// Docks the copy and reserves its space, or hides it and gives the space back when it does not fit.
-    fn place(&mut self, bitmap: &Bitmap) {
-        let (width, height) = (px(bitmap.width), px(bitmap.height));
+    fn place(&mut self, width: i32, height: i32) {
         let placement = client_rect_on_screen(self.taskbar).map_or(Placement::Fallback, |bar| {
             if self.is_primary {
                 place_strip(bar, notification_area(self.taskbar), width, height)
@@ -586,6 +607,14 @@ unsafe extern "system" fn keeper_proc(
     }
     // SAFETY: forwards the unchanged message arguments of this window procedure.
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+}
+
+/// (strip height px, DPI) for `taskbar`'s own monitor, or `None` while it cannot be measured.
+fn strip_size(taskbar: HWND) -> Option<(u32, u32)> {
+    let height = strip_height(client_rect_on_screen(taskbar)?)?;
+    // SAFETY: only reads a property of a window handle; a stale handle gives 0.
+    let dpi = unsafe { GetDpiForWindow(taskbar) };
+    (dpi > 0).then_some((height, dpi))
 }
 
 fn find_taskbar() -> Option<HWND> {

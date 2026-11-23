@@ -25,6 +25,17 @@ impl Rect {
     }
 }
 
+/// Strip height as a share of the taskbar's client height, in percent.
+const STRIP_HEIGHT_PERCENT: i32 = 55;
+
+/// Strip bitmap height in physical pixels for a taskbar whose client area is `bar`: the bar is
+/// already measured in the pixels of its own monitor, so no DPI scaling applies. `None` for an empty bar.
+pub fn strip_height(bar: Rect) -> Option<u32> {
+    u32::try_from((bar.h * STRIP_HEIGHT_PERCENT + 50) / 100)
+        .ok()
+        .filter(|height| *height > 0)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
     /// Position relative to the taskbar's client origin.
@@ -272,6 +283,19 @@ mod tests {
     fn strip_left_of_container_is_left_alone() {
         assert_eq!(shrink_to_clear(REBAR, 46), None);
         assert_eq!(shrink_to_clear(REBAR, 10), None);
+    }
+
+    #[test]
+    fn strip_height_follows_each_bar_height() {
+        // 40 px bar (100 %) and 60 px bar (150 %) round 55 % to 22 and 33.
+        assert_eq!(strip_height(Rect { h: 40, ..TASKBAR }), Some(22));
+        assert_eq!(strip_height(Rect { h: 60, ..TASKBAR }), Some(33));
+    }
+
+    #[test]
+    fn strip_height_of_an_empty_bar_is_none() {
+        assert_eq!(strip_height(Rect { h: 0, ..TASKBAR }), None);
+        assert_eq!(strip_height(Rect { h: -5, ..TASKBAR }), None);
     }
 
     /// Primary taskbar client area, as measured on a Windows 10 19045 machine.
