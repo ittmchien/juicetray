@@ -77,6 +77,36 @@ mod tests {
     }
 
     #[test]
+    fn open_hid_errors_never_show_the_path() {
+        let path = r"\\?\hid#vid_0001&pid_0002&mi_01&col01#7&2a5b1c3d&0&0000#{4d1e55b2}";
+        let opened = Access::Opened {
+            descriptor: Vec::new(),
+            parse_error: None,
+        };
+        let inventory = Inventory {
+            hid: vec![
+                collection(path, Access::Skipped("system mouse")),
+                HidCollection {
+                    shape: HidShape {
+                        interface: None,
+                        usage_page: 0xFF02,
+                        usage: 0x0002,
+                        reports: Vec::new(),
+                    },
+                    ..collection(path, opened)
+                },
+            ],
+            ..empty_inventory()
+        };
+        let foreign = collection(&format!("{path}x"), Access::Skipped("system mouse"));
+        for candidate in [&inventory.hid[0], &inventory.hid[1], &foreign] {
+            let text = refusal(inventory.open_hid(candidate));
+            assert!(!text.contains("7&2a5b1c3d"), "{text}");
+            assert!(!text.contains("hid#"), "{text}");
+        }
+    }
+
+    #[test]
     fn open_serial_refuses_foreign_entry() {
         let entry = SerialEntry {
             port_name: "COM9".into(),

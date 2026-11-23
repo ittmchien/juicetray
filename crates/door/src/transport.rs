@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, anyhow, bail};
 use hidapi::HidDevice;
 use protocol::Link;
-use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
+use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits};
 
 use crate::enumerate::{Access, HidCollection, Inventory, SerialEntry};
 use crate::write::SERIAL_REPLY_TIMEOUT;
@@ -46,11 +46,17 @@ impl Inventory {
         if !matches!(entry.access, Access::Opened { .. }) {
             bail!("collection was not opened during enumeration (rule 6)");
         }
+        // Errors name VID:PID and page:usage only: the raw path holds the device instance id (R10).
+        let label = format!(
+            "HID {:04X}:{:04X} {:04X}:{:04X}",
+            entry.vid, entry.pid, entry.shape.usage_page, entry.shape.usage
+        );
         let api = self.api.as_ref().context("HID is not available")?;
-        let path = CString::new(entry.path.as_str()).context("HID path contains a NUL byte")?;
+        let path = CString::new(entry.path.as_str())
+            .with_context(|| format!("{label}: path contains a NUL byte"))?;
         let device = api
             .open_path(&path)
-            .with_context(|| format!("could not open {}", entry.path))?;
+            .with_context(|| format!("could not open {label}"))?;
         Ok(Target {
             vid: entry.vid,
             pid: entry.pid,
@@ -69,8 +75,9 @@ impl Inventory {
                 own.port_name == entry.port_name && (own.vid, own.pid) == (entry.vid, entry.pid)
             })
             .ok_or_else(|| anyhow!("port is not in this inventory"))?;
-        let name = &entry.port_name;
-        let mut port = serialport::new(name, SERIAL_BAUD)
+        // Errors name VID:PID only: a macOS port name can contain the USB serial number (R10).
+        let label = format!("serial port {:04X}:{:04X}", entry.vid, entry.pid);
+        let mut port = serialport::new(&entry.port_name, SERIAL_BAUD)
             .data_bits(DataBits::Eight)
             .parity(Parity::None)
             .stop_bits(StopBits::One)
@@ -78,10 +85,14 @@ impl Inventory {
             .timeout(SERIAL_REPLY_TIMEOUT)
             .open()
             .with_context(|| {
-                format!("could not open {name}: busy or unavailable (is ATK HUB open?)")
+                format!("could not open {label}: busy or unavailable (is ATK HUB open?)")
             })?;
         port.write_data_terminal_ready(true)
-            .with_context(|| format!("could not set DTR on {name}"))?;
+            .with_context(|| format!("could not set DTR on {label}"))?;
+        // Host-side purge, nothing is sent: Windows keeps stale input on open, which would
+        // shift the 64-byte frames.
+        port.clear(ClearBuffer::Input)
+            .with_context(|| format!("could not clear stale input on {label}"))?;
         Ok(Target {
             vid: entry.vid,
             pid: entry.pid,
