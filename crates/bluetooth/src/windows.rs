@@ -140,6 +140,8 @@ fn view(id: u128, container: Container, now: SystemTime) -> Option<DeviceView> {
         charging: false,
         connected: container.connected,
         updated_at: now,
+        stale: false,
+        note: None,
     })
 }
 

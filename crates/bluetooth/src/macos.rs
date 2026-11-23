@@ -52,6 +52,8 @@ fn device_view(device: &IOBluetoothDevice, now: SystemTime) -> Option<DeviceView
         charging: false,
         connected,
         updated_at,
+        stale: false,
+        note: None,
     })
 }
 

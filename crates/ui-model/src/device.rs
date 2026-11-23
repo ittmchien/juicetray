@@ -85,6 +85,10 @@ pub struct DeviceView {
     pub charging: bool,
     pub connected: bool,
     pub updated_at: SystemTime,
+    /// The last attempt failed or the device is asleep; the strip shows it dimmed.
+    pub stale: bool,
+    /// Short reason shown at the end of the menu line.
+    pub note: Option<String>,
 }
 
 impl DeviceView {
@@ -119,6 +123,8 @@ pub(crate) fn test_device(name: &str, level: Level) -> DeviceView {
         charging: false,
         connected: true,
         updated_at: SystemTime::UNIX_EPOCH,
+        stale: false,
+        note: None,
     }
 }
 

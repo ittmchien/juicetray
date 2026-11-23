@@ -6,7 +6,8 @@ pub const EMPTY_MENU_TEXT: &str = "No Bluetooth devices with battery info";
 
 const NO_BATTERY_TEXT: &str = "no battery info";
 
-/// One menu line: `name — battery · path · age` when connected, `… · not connected` otherwise.
+/// One menu line: `name — battery · path · age` when connected, `… · not connected` otherwise,
+/// then the device's note when it has one.
 pub fn menu_line(d: &DeviceView, now: SystemTime) -> String {
     let mut parts = vec![battery_text(&d.level), d.path.to_string()];
     // Only a connected device's reading time is reliable; the OS gives no last-seen time otherwise.
@@ -18,6 +19,7 @@ pub fn menu_line(d: &DeviceView, now: SystemTime) -> String {
     if !d.connected {
         parts.push("not connected".to_owned());
     }
+    parts.extend(d.note.clone());
     format!("{} — {}", d.name, parts.join(" · "))
 }
 
@@ -124,6 +126,18 @@ mod tests {
         assert_eq!(
             menu_line(&away, now()),
             "Mouse — 40% · dongle · not connected"
+        );
+    }
+
+    #[test]
+    fn menu_line_appends_note_after_age() {
+        let mut mouse = updated_ago(test_device("Mouse", Level::Percent(40)), 180);
+        mouse.path = Path::Dongle;
+        mouse.stale = true;
+        mouse.note = Some("asleep or off".to_owned());
+        assert_eq!(
+            menu_line(&mouse, now()),
+            "Mouse — 40% · dongle · 3 min ago · asleep or off"
         );
     }
 

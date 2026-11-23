@@ -99,7 +99,8 @@ fn placeholder() -> Segment {
 }
 
 fn style_for(device: &DeviceView, percent: u8, threshold: u8) -> SegmentStyle {
-    if !device.connected {
+    // A disconnected or stale reading is dimmed, never alarming.
+    if !device.connected || device.stale {
         SegmentStyle::Dimmed
     } else if device.charging && percent >= 100 {
         SegmentStyle::Full
@@ -199,6 +200,15 @@ mod tests {
         let on = build_strip(&devices, Some(15), &[], true, &default_options);
         assert_eq!(on[0].style, SegmentStyle::Dimmed);
         assert_eq!(on[0].text, "40%");
+    }
+
+    #[test]
+    fn strip_dims_stale_connected_device() {
+        let mut device = percent("a", 40);
+        device.stale = true;
+        let segments = build_strip(&[device], Some(15), &[], false, &default_options);
+        assert_eq!(segments[0].style, SegmentStyle::Dimmed);
+        assert_eq!(segments[0].text, "40%");
     }
 
     #[test]

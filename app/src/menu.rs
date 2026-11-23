@@ -399,6 +399,8 @@ mod tests {
             charging: false,
             connected,
             updated_at: SystemTime::UNIX_EPOCH,
+            stale: false,
+            note: None,
         }
     }
 

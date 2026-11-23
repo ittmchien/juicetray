@@ -291,6 +291,8 @@ mod tests {
             charging: false,
             connected: true,
             updated_at: now - Duration::from_secs(120),
+            stale: false,
+            note: None,
         }
     }
 
