@@ -3,7 +3,8 @@
 Battery levels of your wireless mice and headsets, right next to the clock — without each
 vendor's software.
 
-> **Status:** in development. Not usable yet.
+> **Status:** beta. Bluetooth devices and the confirmed receivers below work on Windows; the
+> macOS build is compiled by CI.
 
 ## Supported devices
 
@@ -13,12 +14,20 @@ Juicetray only reads the value the OS stores; it sends nothing to the device.
 
 **2.4 GHz receiver / USB cable:**
 
-| Device | Kind |
-|---|---|
-| VGN Dragonfly F3 | Mouse |
-| ATK X1 SE | Mouse |
-| ATK N9 Ultra | Headset |
-| MCHOSE V9 Pro 2 | Headset |
+| Device | Kind | Status |
+|---|---|---|
+| MCHOSE V9 Pro 2 (`3837:6011` dongle) | Headset | Confirmed |
+| ATK X1 SE (`373B:1216` dongle) | Mouse | Protocol known, waiting for a probe |
+| ATK N9 Ultra (`373B:1204` dongle) | Headset | Protocol known; close ATK HUB, then probe |
+| VGN Dragonfly 3 Master+ (`3554:FA09` dongle, `391D:1A05` cable) | Mouse | Not supported yet: no reply to the known commands |
+
+Only confirmed devices are queried automatically. An unconfirmed device is listed but never
+touched until you confirm it with `juicetray probe <VID:PID>` and add it to `allow` in the
+config file:
+
+```toml
+allow = ["373B:1204"]
+```
 
 More devices will be added over time.
 
@@ -60,7 +69,9 @@ git clone -b dev https://github.com/ittmchien/juicetray
 ## Credits
 
 Protocol notes from M-HUB-linux-port (MCHOSE V9 Pro 2), the OpenMouse device catalogue
-(ATK) and the Linux `hid-kysona` driver.
+(ATK), the Linux `hid-kysona` driver, [Joule](https://github.com/DillanCidral/Joule) and
+[sanshoku](https://github.com/ushineko/sanshoku). Only protocol facts are used; no code is
+copied.
 
 Device icons: [Material Symbols](https://github.com/google/material-design-icons) by Google
 ([Apache-2.0](crates/strip-render/assets/icons/LICENSE)). Numbers: [Inter](https://rsms.me/inter/)
