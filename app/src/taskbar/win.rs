@@ -23,15 +23,18 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, FindWindowExW, FindWindowW,
-    GetClientRect, GetWindowRect, HWND_TOP, IsWindow, MA_NOACTIVATE, RegisterClassExW, SW_HIDE,
-    SWP_NOACTIVATE, SWP_NOSIZE, SWP_SHOWWINDOW, SendMessageW, SetTimer, SetWindowPos, ShowWindow,
-    ULW_ALPHA, UpdateLayeredWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+    GetClientRect, GetWindowRect, HWND_TOP, IsWindow, IsWindowVisible, MA_NOACTIVATE,
+    RegisterClassExW, SW_HIDE, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SendMessageW, SetTimer, SetWindowPos, ShowWindow, ULW_ALPHA,
+    UpdateLayeredWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_LBUTTONUP, WM_MOUSEACTIVATE,
     WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WNDPROC, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
-use super::layout::{Placement, Rect, place_strip};
+use super::layout::{
+    Placement, Rect, natural_container, place_secondary_strip, place_strip, shrink_to_clear,
+};
 use super::premultiplied_bgra;
 
 const STRIP_CLASS: PCWSTR = w!("JuicetrayTaskbarStrip");
@@ -68,11 +71,20 @@ struct StripWindow {
     tooltip: Option<HWND>,
 }
 
+/// One strip copy, the taskbar it lives in and the space it reserved there.
+struct Dock {
+    taskbar: HWND,
+    /// `Shell_TrayWnd` (docks left of the notification area) rather than `Shell_SecondaryTrayWnd`.
+    is_primary: bool,
+    strip: StripWindow,
+    /// The task-button container has been sized by this copy, so `release` must restore it.
+    reserved: bool,
+}
+
 pub struct TaskbarStrip {
     instance: HINSTANCE,
-    /// The `Shell_TrayWnd` the strip window was created under.
-    taskbar: HWND,
-    strip: Option<StripWindow>,
+    /// One copy per taskbar: the primary and every `Shell_SecondaryTrayWnd`.
+    docks: Vec<Dock>,
     bitmap: Option<Bitmap>,
     tooltip: String,
     create_failure_logged: bool,
@@ -123,8 +135,7 @@ impl TaskbarStrip {
         }
         Ok(Self {
             instance,
-            taskbar: HWND::default(),
-            strip: None,
+            docks: Vec::new(),
             bitmap: None,
             tooltip: String::new(),
             create_failure_logged: false,
@@ -153,42 +164,44 @@ impl TaskbarStrip {
         self.sync(true);
     }
 
-    /// Keeper tick: recreates the window after an Explorer restart and re-docks it.
+    /// Keeper tick: recreates copies after an Explorer restart or a display change and re-docks them.
     pub fn keep(&mut self) {
         self.sync(false);
     }
 
-    /// Removes the strip window and stops showing anything.
+    /// Removes every strip copy, gives back the reserved space and stops showing anything.
     pub fn hide(&mut self) {
         self.bitmap = None;
-        if let Some(old) = self.strip.take() {
-            old.destroy();
-        }
+        self.docks.drain(..).for_each(Dock::destroy);
     }
 
-    /// Makes the window exist, paints it when `repaint` (or when new) and docks it.
-    fn sync(&mut self, mut repaint: bool) {
+    /// Gives every taskbar a live copy, paints copies when `repaint` (or when new) and docks them.
+    fn sync(&mut self, repaint: bool) {
         let Some(bitmap) = &self.bitmap else {
             return;
         };
-        let Some(taskbar) = find_taskbar() else {
-            // Explorer is gone; its windows, ours included, go with it. The next tick looks again.
-            if let Some(old) = self.strip.take() {
-                old.destroy();
+        let primary = find_taskbar();
+        let taskbars: Vec<HWND> = primary.into_iter().chain(secondary_taskbars()).collect();
+        // Copies whose taskbar is gone (Explorer restart, display removed or setting off) go first.
+        let (live, gone): (Vec<Dock>, Vec<Dock>) = std::mem::take(&mut self.docks)
+            .into_iter()
+            .partition(|dock| dock.strip.is_alive() && taskbars.contains(&dock.taskbar));
+        gone.into_iter().for_each(Dock::destroy);
+        self.docks = live;
+        let existing = self.docks.len();
+        for taskbar in taskbars {
+            if self.docks.iter().any(|dock| dock.taskbar == taskbar) {
+                continue;
             }
-            return;
-        };
-        let alive = self.strip.as_ref().is_some_and(StripWindow::is_alive);
-        if !alive || taskbar != self.taskbar {
-            if let Some(old) = self.strip.take() {
-                old.destroy();
-            }
-            self.taskbar = taskbar;
             match StripWindow::create(taskbar, self.instance, bitmap) {
-                Ok(created) => {
-                    self.strip = Some(created);
+                Ok(strip) => {
+                    self.docks.push(Dock {
+                        taskbar,
+                        is_primary: Some(taskbar) == primary,
+                        strip,
+                        reserved: false,
+                    });
                     self.create_failure_logged = false;
-                    repaint = true;
                 }
                 Err(error) => {
                     // The tray icon keeps working; log once, then retry quietly every tick.
@@ -196,20 +209,93 @@ impl TaskbarStrip {
                         eprintln!("taskbar strip window failed (GetLastError): {error}");
                         self.create_failure_logged = true;
                     }
-                    return;
                 }
             }
         }
-        let Some(strip) = &self.strip else {
+        for (index, dock) in self.docks.iter_mut().enumerate() {
+            if repaint || index >= existing {
+                dock.strip.show_bitmap(bitmap, &self.tooltip);
+            }
+            dock.place(bitmap);
+        }
+    }
+}
+
+impl Drop for TaskbarStrip {
+    /// Explorer keeps a shrunk task-button container until its next layout, so give it back.
+    fn drop(&mut self) {
+        self.hide();
+    }
+}
+
+impl Dock {
+    /// Docks the copy and reserves its space, or hides it and gives the space back when it does not fit.
+    fn place(&mut self, bitmap: &Bitmap) {
+        let (width, height) = (px(bitmap.width), px(bitmap.height));
+        let placement = client_rect_on_screen(self.taskbar).map_or(Placement::Fallback, |bar| {
+            if self.is_primary {
+                place_strip(bar, notification_area(self.taskbar), width, height)
+            } else {
+                let clock = find_child(self.taskbar, w!("ClockButton")).and_then(window_rect);
+                place_secondary_strip(bar, clock, width, height)
+            }
+        });
+        self.strip.place(placement);
+        match placement {
+            Placement::Docked(rect) => self.reserve(rect.x),
+            Placement::Fallback => self.release(),
+        }
+    }
+
+    /// Shrinks the task-button container to end at `strip_x` (taskbar client coordinates),
+    /// moving it only when its rect differs from the wanted one.
+    fn reserve(&mut self, strip_x: i32) {
+        let Some((container, natural, current)) = self.container_layout() else {
+            // No such container (Windows 11 XAML taskbar): the strip floats over it as before.
+            self.reserved = false;
             return;
         };
-        if repaint {
-            if let Err(error) = strip.paint(bitmap) {
-                eprintln!("painting the taskbar strip failed: {error}");
-            }
-            strip.set_tooltip(&self.tooltip, bitmap);
+        let wanted = shrink_to_clear(natural, strip_x).unwrap_or(natural);
+        if wanted != current {
+            set_child_rect(container, wanted);
         }
-        strip.place(taskbar, bitmap);
+        self.reserved = true;
+    }
+
+    /// Gives the container back Explorer's own rect once this copy has sized it.
+    fn release(&mut self) {
+        if !std::mem::take(&mut self.reserved) {
+            return;
+        }
+        if let Some((container, natural, current)) = self.container_layout()
+            && natural != current
+        {
+            set_child_rect(container, natural);
+        }
+    }
+
+    /// The task-button container with Explorer's own rect and its current one, in taskbar client
+    /// coordinates. The own rect comes from the sibling it reaches, never from the current rect,
+    /// which a crashed run may have left shrunk.
+    fn container_layout(&self) -> Option<(HWND, Rect, Rect)> {
+        let container = task_container(self.taskbar, self.is_primary)?;
+        let bar = client_rect_on_screen(self.taskbar)?;
+        let current = child_rect(container, self.taskbar)?;
+        // Primary: the notification area's left; secondary: the clock's left, else the bar's end.
+        let edge = if self.is_primary {
+            window_rect(find_child(self.taskbar, w!("TrayNotifyWnd"))?)?.x - bar.x
+        } else {
+            find_child(self.taskbar, w!("ClockButton"))
+                .and_then(window_rect)
+                .map_or(bar.w, |clock| clock.x - bar.x)
+        };
+        let natural = natural_container(bar, current, edge)?;
+        Some((container, natural, current))
+    }
+
+    fn destroy(mut self) {
+        self.release();
+        self.strip.destroy();
     }
 }
 
@@ -249,6 +335,14 @@ impl StripWindow {
             // SAFETY: the window belongs to this thread; destroying it also destroys its tooltip.
             let _ = unsafe { DestroyWindow(self.hwnd) };
         }
+    }
+
+    /// Paints `bitmap` and points the tooltip at it.
+    fn show_bitmap(&self, bitmap: &Bitmap, tooltip: &str) {
+        if let Err(error) = self.paint(bitmap) {
+            eprintln!("painting the taskbar strip failed: {error}");
+        }
+        self.set_tooltip(tooltip, bitmap);
     }
 
     /// Draws `bitmap` through a top-down 32-bit DIB and `UpdateLayeredWindow`.
@@ -350,16 +444,8 @@ impl StripWindow {
         }
     }
 
-    /// Docks the window left of the notification area, or hides it when the layout does not fit.
-    fn place(&self, taskbar: HWND, bitmap: &Bitmap) {
-        let placement = client_rect_on_screen(taskbar).map_or(Placement::Fallback, |bar| {
-            place_strip(
-                bar,
-                notification_area(taskbar),
-                px(bitmap.width),
-                px(bitmap.height),
-            )
-        });
+    /// Moves the window to its docked spot, or hides it when the layout does not fit.
+    fn place(&self, placement: Placement) {
         match placement {
             Placement::Docked(rect) => {
                 // SAFETY: the window is ours; the position is in the parent's client coordinates.
@@ -531,14 +617,75 @@ fn window_rect(window: HWND) -> Option<Rect> {
     })
 }
 
-fn notify_window(taskbar: HWND) -> Option<HWND> {
-    // SAFETY: the class name is a literal; the taskbar handle may be stale, which only fails the call.
-    unsafe { FindWindowExW(Some(taskbar), None, w!("TrayNotifyWnd"), PCWSTR::null()) }.ok()
+/// Every `Shell_SecondaryTrayWnd`: one per extra display while "Show taskbar on all displays" is on.
+fn secondary_taskbars() -> Vec<HWND> {
+    let mut found = Vec::new();
+    let mut after = None;
+    // SAFETY: the class name is a literal; `after` is the top-level window found last.
+    while let Ok(next) =
+        unsafe { FindWindowExW(None, after, w!("Shell_SecondaryTrayWnd"), PCWSTR::null()) }
+    {
+        found.push(next);
+        after = Some(next);
+    }
+    found
+}
+
+/// First child of `parent` with window class `class`.
+fn find_child(parent: HWND, class: PCWSTR) -> Option<HWND> {
+    // SAFETY: the class name is a literal; a stale parent handle only fails the call.
+    unsafe { FindWindowExW(Some(parent), None, class, PCWSTR::null()) }.ok()
+}
+
+/// The visible window holding the task buttons on Windows 10: `ReBarWindow32` on the primary
+/// taskbar, the `WorkerW` around `MSTaskListWClass` on a secondary one.
+fn task_container(taskbar: HWND, is_primary: bool) -> Option<HWND> {
+    let container = if is_primary {
+        find_child(taskbar, w!("ReBarWindow32"))
+    } else {
+        find_child(taskbar, w!("WorkerW"))
+            .filter(|worker| find_child(*worker, w!("MSTaskListWClass")).is_some())
+    }?;
+    // SAFETY: IsWindowVisible accepts any handle value.
+    unsafe { IsWindowVisible(container) }
+        .as_bool()
+        .then_some(container)
+}
+
+/// A child's window rect in its parent's client coordinates.
+fn child_rect(child: HWND, parent: HWND) -> Option<Rect> {
+    let origin = client_rect_on_screen(parent)?;
+    let rect = window_rect(child)?;
+    Some(Rect {
+        x: rect.x - origin.x,
+        y: rect.y - origin.y,
+        ..rect
+    })
+}
+
+/// Sets a taskbar child's rect; `SWP_NOSENDCHANGING` because Explorer's `WM_WINDOWPOSCHANGING`
+/// handler snaps any outside shrink back to its own layout.
+fn set_child_rect(window: HWND, rect: Rect) {
+    // SAFETY: only repositions a window by handle; a stale handle fails the call.
+    let moved = unsafe {
+        SetWindowPos(
+            window,
+            None,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
+        )
+    };
+    if let Err(error) = moved {
+        eprintln!("resizing the taskbar's task buttons failed: {error}");
+    }
 }
 
 /// The notification area in screen coordinates; an empty rect when it cannot be found.
 fn notification_area(taskbar: HWND) -> Rect {
-    notify_window(taskbar)
+    find_child(taskbar, w!("TrayNotifyWnd"))
         .and_then(window_rect)
         .unwrap_or(Rect {
             x: 0,
@@ -552,7 +699,7 @@ fn px(value: u32) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
 
-/// Taskbar and notification-area geometry plus the Windows build, for `juicetray scan`.
+/// Taskbar, notification-area and task-button geometry plus the Windows build, for `juicetray scan`.
 pub fn describe_environment() -> String {
     let mut lines = Vec::new();
     match find_taskbar() {
@@ -567,10 +714,30 @@ pub fn describe_environment() -> String {
             ));
             lines.push(format!(
                 "TrayNotifyWnd rect: {}",
-                describe_rect(notify_window(taskbar).and_then(window_rect))
+                describe_rect(find_child(taskbar, w!("TrayNotifyWnd")).and_then(window_rect))
+            ));
+            lines.push(format!(
+                "Task buttons (ReBarWindow32) rect: {}",
+                describe_rect(task_container(taskbar, true).and_then(window_rect))
             ));
         }
         None => lines.push("Taskbar: not found".to_owned()),
+    }
+    // Secondary taskbars dock left of their clock and shrink their WorkerW task buttons.
+    for (index, taskbar) in secondary_taskbars().into_iter().enumerate() {
+        let number = index + 1;
+        lines.push(format!(
+            "Secondary taskbar {number} rect: {}",
+            describe_rect(window_rect(taskbar))
+        ));
+        lines.push(format!(
+            "Secondary taskbar {number} task buttons (WorkerW) rect: {}",
+            describe_rect(task_container(taskbar, false).and_then(window_rect))
+        ));
+        lines.push(format!(
+            "Secondary taskbar {number} ClockButton rect: {}",
+            describe_rect(find_child(taskbar, w!("ClockButton")).and_then(window_rect))
+        ));
     }
     lines.push(format!("Windows build: {}", windows_build()));
     lines.join("\n")
