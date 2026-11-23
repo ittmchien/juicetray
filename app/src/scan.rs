@@ -372,8 +372,8 @@ mod tests {
                 .iter()
                 .any(|line| line.starts_with("  HID if 1 FF00:0001 vendor"))
         );
-        // The Compx device keeps its own header; the instance id is the only elision.
-        assert!(lines.contains(&"3554:FA09  VGN Dragonfly F3 (dongle) · Compx report 8"));
+        // The VGN device keeps its own header; the instance id is the only elision.
+        assert!(lines.contains(&"3554:FA09  VGN Dragonfly 3 Master+ (dongle) · VGN report 0x13"));
         assert_eq!(report.matches('…').count(), 3);
     }
 

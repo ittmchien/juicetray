@@ -8,6 +8,7 @@ mod devices;
 mod hid;
 mod mchose;
 mod report;
+mod report13;
 
 use std::time::{Duration, SystemTime};
 
@@ -21,6 +22,7 @@ pub const SERIAL_FRAME_LEN: usize = 64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
     Compx,
+    Report13,
     Mchose,
     AtkSerial,
 }
@@ -50,7 +52,7 @@ pub enum Decoded {
 impl Family {
     pub fn link(self) -> Link {
         match self {
-            Family::Compx | Family::Mchose => Link::Hid,
+            Family::Compx | Family::Report13 | Family::Mchose => Link::Hid,
             Family::AtkSerial => Link::Serial,
         }
     }
@@ -58,6 +60,7 @@ impl Family {
     pub fn name(self) -> &'static str {
         match self {
             Family::Compx => "Compx report 8",
+            Family::Report13 => "VGN report 0x13",
             Family::Mchose => "MCHOSE",
             Family::AtkSerial => "ATK serial",
         }
@@ -66,7 +69,7 @@ impl Family {
     /// Minimum time between two queries to one device, independent of the UI refresh value.
     pub fn query_floor(self) -> Duration {
         match self {
-            Family::Compx => Duration::from_secs(10),
+            Family::Compx | Family::Report13 => Duration::from_secs(10),
             Family::Mchose | Family::AtkSerial => Duration::from_secs(300),
         }
     }
@@ -76,6 +79,7 @@ impl Family {
 pub fn battery_query(family: Family) -> &'static [u8] {
     match family {
         Family::Compx => &compx::QUERY,
+        Family::Report13 => &report13::QUERY,
         Family::Mchose => &mchose::QUERY,
         Family::AtkSerial => &atk_serial::QUERY,
     }
@@ -85,6 +89,7 @@ pub fn battery_query(family: Family) -> &'static [u8] {
 pub fn decode(family: Family, bytes: &[u8]) -> Decoded {
     match family {
         Family::Compx => compx::decode(bytes),
+        Family::Report13 => report13::decode(bytes),
         Family::Mchose => mchose::decode(bytes),
         Family::AtkSerial => atk_serial::decode(bytes),
     }
@@ -136,6 +141,7 @@ mod tests {
     #[test]
     fn query_floor_values() {
         assert_eq!(Family::Compx.query_floor(), Duration::from_secs(10));
+        assert_eq!(Family::Report13.query_floor(), Duration::from_secs(10));
         assert_eq!(Family::Mchose.query_floor(), Duration::from_secs(300));
         assert_eq!(Family::AtkSerial.query_floor(), Duration::from_secs(300));
     }
@@ -159,9 +165,11 @@ mod tests {
     #[test]
     fn family_link_and_name() {
         assert_eq!(Family::Compx.link(), Link::Hid);
+        assert_eq!(Family::Report13.link(), Link::Hid);
         assert_eq!(Family::Mchose.link(), Link::Hid);
         assert_eq!(Family::AtkSerial.link(), Link::Serial);
         assert_eq!(Family::Compx.name(), "Compx report 8");
+        assert_eq!(Family::Report13.name(), "VGN report 0x13");
         assert_eq!(Family::Mchose.name(), "MCHOSE");
         assert_eq!(Family::AtkSerial.name(), "ATK serial");
     }

@@ -7,8 +7,10 @@ const VENDOR_PAGE_MIN: u16 = 0xFF00;
 
 const COMPX_REPORT_ID: u8 = 0x08;
 const COMPX_REPORT_LEN: usize = 17;
-/// Usage page and usage preferred when several Compx candidates qualify.
-const COMPX_PREFERRED: (u16, u16) = (0xFF02, 0x0002);
+const REPORT13_REPORT_ID: u8 = 0x13;
+const REPORT13_REPORT_LEN: usize = 20;
+/// Usage page and usage preferred when several vendor candidates qualify.
+const VENDOR_PREFERRED: (u16, u16) = (0xFF02, 0x0002);
 const MCHOSE_REPORT_ID: u8 = 0x55;
 const MCHOSE_REPORT_LEN: usize = 64;
 const MCHOSE_INTERFACE: u8 = 3;
@@ -68,7 +70,8 @@ pub fn open_permission(entries: &[(&str, u16, u16)]) -> Vec<Result<(), &'static 
 /// Index of the collection `family`'s battery query goes to. `AtkSerial` is never HID.
 pub fn pick_target(family: Family, shapes: &[HidShape]) -> Result<usize, PickError> {
     match family {
-        Family::Compx => pick_compx(shapes),
+        Family::Compx => pick_vendor_report(shapes, COMPX_REPORT_ID, COMPX_REPORT_LEN),
+        Family::Report13 => pick_vendor_report(shapes, REPORT13_REPORT_ID, REPORT13_REPORT_LEN),
         Family::Mchose => pick_mchose(shapes),
         Family::AtkSerial => Err(PickError::NoMatch),
     }
@@ -98,13 +101,13 @@ fn exactly_one(found: Vec<usize>) -> Result<usize, PickError> {
     }
 }
 
-/// Vendor collection with a 17-byte id-8 report in both directions; several candidates are
-/// narrowed to `FF02/0002`.
-fn pick_compx(shapes: &[HidShape]) -> Result<usize, PickError> {
+/// Vendor collection with an `id` report of `bytes` (id included) in both directions; several
+/// candidates are narrowed to `FF02/0002`.
+fn pick_vendor_report(shapes: &[HidShape], id: u8, bytes: usize) -> Result<usize, PickError> {
     let candidates = matching(shapes, |shape| {
         shape.usage_page >= VENDOR_PAGE_MIN
-            && has_report(shape, ReportKind::Input, COMPX_REPORT_ID, COMPX_REPORT_LEN)
-            && has_report(shape, ReportKind::Output, COMPX_REPORT_ID, COMPX_REPORT_LEN)
+            && has_report(shape, ReportKind::Input, id, bytes)
+            && has_report(shape, ReportKind::Output, id, bytes)
     });
     if candidates.len() <= 1 {
         return exactly_one(candidates);
@@ -112,7 +115,7 @@ fn pick_compx(shapes: &[HidShape]) -> Result<usize, PickError> {
     let preferred: Vec<usize> = candidates
         .iter()
         .copied()
-        .filter(|&index| (shapes[index].usage_page, shapes[index].usage) == COMPX_PREFERRED)
+        .filter(|&index| (shapes[index].usage_page, shapes[index].usage) == VENDOR_PREFERRED)
         .collect();
     match preferred.len() {
         1 => Ok(preferred[0]),
@@ -267,6 +270,25 @@ mod tests {
         ];
         assert_eq!(pick_target(Family::Compx, &shapes), Err(PickError::NoMatch));
         assert_eq!(pick_target(Family::Compx, &[]), Err(PickError::NoMatch));
+    }
+
+    #[test]
+    fn pick_report13_prefers_ff02() {
+        let shapes = [
+            shape(0xFF00, 0x0001, both(0x13, 20)),
+            shape(0xFF02, 0x0002, both(0x13, 20)),
+        ];
+        assert_eq!(pick_target(Family::Report13, &shapes), Ok(1));
+    }
+
+    #[test]
+    fn pick_report13_refuses_the_compx_collection() {
+        let shapes = [shape(0xFF02, 0x0002, both(0x08, 17))];
+        assert_eq!(
+            pick_target(Family::Report13, &shapes),
+            Err(PickError::NoMatch)
+        );
+        assert_eq!(pick_target(Family::Compx, &shapes), Ok(0));
     }
 
     #[test]
