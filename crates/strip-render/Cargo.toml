@@ -9,8 +9,12 @@ name = "strip_render"
 
 [dependencies]
 juicetray-ui-model = { path = "../ui-model" }
+anyhow = "1"
+# resvg re-exports usvg and tiny_skia, so they stay one version; no text, raster or system-font features.
+resvg = { version = "0.50", default-features = false }
 tiny-skia = { version = "0.12", default-features = false, features = ["std"] }
 ab_glyph = { version = "0.2", default-features = false, features = ["std"] }
+memmap2 = "0.9"
 
 [dev-dependencies]
 # PNG output for the preview example only.

@@ -26,6 +26,12 @@ lipo -create -output "$app/Contents/MacOS/juicetray" \
 sed "s/__VERSION__/$version/g" packaging/macos/Info.plist >"$app/Contents/Info.plist"
 cp packaging/macos/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 
+# Licence texts: this app (GPL), Material Symbols icons (Apache-2.0), Inter font (OFL).
+mkdir -p "$app/Contents/Resources/licenses"
+cp LICENSE "$app/Contents/Resources/licenses/LICENSE"
+cp crates/strip-render/assets/icons/LICENSE "$app/Contents/Resources/licenses/Material-Symbols-LICENSE"
+cp crates/strip-render/assets/OFL.txt "$app/Contents/Resources/licenses/Inter-OFL.txt"
+
 # Ad-hoc signature; --deep is unnecessary because the bundle has no nested code.
 codesign --force -s - "$app"
 

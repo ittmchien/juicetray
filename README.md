@@ -51,3 +51,7 @@ git clone -b dev https://github.com/ittmchien/juicetray
 
 Protocol notes from M-HUB-linux-port (MCHOSE V9 Pro 2), the OpenMouse device catalogue
 (ATK) and the Linux `hid-kysona` driver.
+
+Device icons: [Material Symbols](https://github.com/google/material-design-icons) by Google
+([Apache-2.0](crates/strip-render/assets/icons/LICENSE)). Numbers: [Inter](https://rsms.me/inter/)
+([OFL-1.1](crates/strip-render/assets/OFL.txt)).

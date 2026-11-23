@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::process::ExitCode;
 use std::sync::mpsc::Sender;
 use std::time::SystemTime;
 
-use strip_render::{Bitmap, Theme};
+use strip_render::{Bitmap, TextStyle, Theme};
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopProxy};
 use tray_icon::menu::{Menu, MenuEvent};
@@ -373,7 +374,14 @@ impl App {
         if unchanged {
             return;
         }
-        let bitmap = strip_render::render_strip(segments, height, *theme);
+        // Built-in icons and the embedded font: no custom SVGs or OS font are loaded here.
+        let bitmap = strip_render::render_strip(
+            segments,
+            height,
+            *theme,
+            &HashMap::new(),
+            &TextStyle::fallback(height),
+        );
         taskbar.show(&bitmap, &self.shown_tooltip);
         self.shown_taskbar = Some((segments.clone(), *theme, height, self.shown_tooltip.clone()));
     }
@@ -421,10 +429,13 @@ fn new_taskbar_strip(proxy: EventLoopProxy<UserEvent>) -> Option<TaskbarStrip> {
 /// macOS shows the whole strip in the menu bar.
 #[cfg(target_os = "macos")]
 fn tray_bitmap(segments: &[Segment], theme: Theme) -> Option<Bitmap> {
+    // Built-in icons and the embedded font: no custom SVGs or OS font are loaded here.
     Some(strip_render::render_strip(
         segments,
         MAC_STRIP_HEIGHT_PX,
         theme,
+        &HashMap::new(),
+        &TextStyle::fallback(MAC_STRIP_HEIGHT_PX),
     ))
 }
 

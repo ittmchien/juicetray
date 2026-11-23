@@ -17,7 +17,6 @@ pub enum SegmentStyle {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Segment {
-    pub kind: DeviceKind,
     pub caption: Option<String>,
     pub text: String,
     pub style: SegmentStyle,
@@ -56,7 +55,6 @@ pub fn build_strip(
         .into_iter()
         .zip(device_captions)
         .map(|((device, percent, options), caption)| Segment {
-            kind: device.kind,
             caption,
             text: if options.show_percent {
                 format!("{percent}%")
@@ -91,7 +89,6 @@ fn resolve_options(kind: DeviceKind, options: DisplayOptions) -> DisplayOptions 
 
 fn placeholder() -> Segment {
     Segment {
-        kind: DeviceKind::Other,
         caption: None,
         text: "–".to_owned(),
         style: SegmentStyle::Placeholder,
@@ -210,7 +207,6 @@ mod tests {
         assert_eq!(
             segments,
             [Segment {
-                kind: DeviceKind::Other,
                 caption: None,
                 text: "–".to_owned(),
                 style: SegmentStyle::Placeholder,
@@ -337,6 +333,24 @@ mod tests {
         let segments = build_strip(&[first, second], None, &[], false, &custom);
         assert_eq!(segments[0].caption, None);
         assert_eq!(segments[1].caption, None);
+    }
+
+    #[test]
+    fn auto_and_explicit_same_icon_get_captions() {
+        let mut first = percent("Mouse-AB1", 70);
+        first.kind = DeviceKind::Mouse;
+        let second = percent("Mouse-CD2", 60);
+        let options = |id: &str| DisplayOptions {
+            icon: if id == "bt:Mouse-CD2" {
+                IconChoice::Kind(DeviceKind::Mouse)
+            } else {
+                IconChoice::Auto
+            },
+            ..DisplayOptions::default()
+        };
+        let segments = build_strip(&[first, second], None, &[], false, &options);
+        assert_eq!(segments[0].caption.as_deref(), Some("AB1"));
+        assert_eq!(segments[1].caption.as_deref(), Some("CD2"));
     }
 
     #[test]
