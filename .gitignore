@@ -1,0 +1,6 @@
+# Notes and Claude config live outside this repo
+.claude/
+CLAUDE.md
+
+# Rust build output
+/target
