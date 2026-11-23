@@ -337,16 +337,27 @@ impl Canvas {
     /// Draws `icon` in the `size` square at (`x`, `y`); with a `tint` only its shape is kept,
     /// filled with that flat colour.
     fn draw_icon(&mut self, icon: &SvgIcon, x: f32, y: f32, size: f32, tint: Option<Color>) {
-        let Some(color) = tint else {
-            icon.render(&mut self.pixmap, x, y, size);
+        // The icon is rendered on its own box-sized pixmap, so content outside its viewBox is
+        // clipped there; one extra pixel keeps the sub-pixel offset of (`x`, `y`).
+        let (left, top) = (x.floor(), y.floor());
+        let side = size.ceil() as u32 + 1;
+        let Some(mut box_pixmap) = Pixmap::new(side, side) else {
             return;
         };
-        let mut layer = self.blank_layer();
-        icon.render(&mut layer.pixmap, x, y, size);
-        let shape = Mask::from_pixmap(layer.pixmap.as_ref(), MaskType::Alpha);
-        layer.pixmap.fill(color);
-        layer.pixmap.apply_mask(&shape);
-        self.composite(&layer, 1.0);
+        icon.render(&mut box_pixmap, x - left, y - top, size);
+        if let Some(color) = tint {
+            let shape = Mask::from_pixmap(box_pixmap.as_ref(), MaskType::Alpha);
+            box_pixmap.fill(color);
+            box_pixmap.apply_mask(&shape);
+        }
+        self.pixmap.draw_pixmap(
+            left as i32,
+            top as i32,
+            box_pixmap.as_ref(),
+            &PixmapPaint::default(),
+            Transform::identity(),
+            None,
+        );
     }
 
     /// Draws the gauge with its top-left corner at (`x`, `y`): `outline` ink frame and cap, `fill_color` level.
@@ -748,6 +759,44 @@ mod tests {
     }
 
     #[test]
+    fn svg_overhang_is_clipped_to_icon_box() {
+        // A rect far larger than the viewBox must not paint over gauge, number or neighbours.
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="20" viewBox="0 0 10 20"><rect x="-300" y="-300" width="600" height="600" fill="red"/></svg>"#;
+        let svgs = HashMap::from([("t.svg".to_owned(), SvgIcon::parse(svg).unwrap())]);
+        let lone_icon = Segment {
+            gauge: None,
+            text: String::new(),
+            ..svg_segment(IconColor::Original)
+        };
+        let height = TEST_HEIGHT as f32;
+        let bitmap = render_strip(
+            std::slice::from_ref(&lone_icon),
+            TEST_HEIGHT,
+            Theme::Light,
+            &svgs,
+            &TextStyle::fallback(TEST_HEIGHT),
+        );
+        let (left, right) = (EDGE_PADDING * height, (EDGE_PADDING + ICON_SIZE) * height);
+        let top = (1.0 - ICON_SIZE) * height / 2.0;
+        let bottom = top + ICON_SIZE * height;
+        // Two pixels of margin cover the sub-pixel offset and anti-aliasing.
+        let outside = |x: u32, y: u32| {
+            let (x, y) = (x as f32, y as f32);
+            x < left - 2.0 || x > right + 2.0 || y < top - 2.0 || y > bottom + 2.0
+        };
+        for y in 0..bitmap.height {
+            for x in 0..bitmap.width {
+                let pixel = bitmap.pixels()[(y * bitmap.width + x) as usize];
+                assert!(
+                    !outside(x, y) || pixel[3] == 0,
+                    "pixel at {x},{y}: {pixel:?}"
+                );
+            }
+        }
+        assert!(has_pixel(&bitmap, |r, g, b| r > 200 && g < 60 && b < 60));
+    }
+
+    #[test]
     fn svg_missing_draws_generic_icon() {
         let missing = Segment {
             icon: IconChoice::Svg("absent.svg".to_owned()),
@@ -794,8 +843,14 @@ mod tests {
 
     #[test]
     fn external_image_ignored() {
-        let file = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="/etc/hosts" width="10" height="10"/></svg>"#;
-        assert!(SvgIcon::parse(file).is_err());
+        // A real SVG file on disk: the default resolver would load it as a nested image.
+        let local = temp_file("nested.svg", RECT_SVG);
+        let href = local.to_string_lossy().replace('\\', "/");
+        let file = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="{href}" width="10" height="10"/></svg>"#
+        );
+        assert!(SvgIcon::parse(file.as_bytes()).is_err());
+        fs::remove_file(local).unwrap();
         // The same square as an SVG data URL: a nested SVG is not loaded either.
         let nested = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMCIgaGVpZ2h0PSIxMCI+PHJlY3Qgd2lkdGg9IjEwIiBoZWlnaHQ9IjEwIi8+PC9zdmc+" width="10" height="10"/></svg>"#;
         assert!(SvgIcon::parse(nested).is_err());
