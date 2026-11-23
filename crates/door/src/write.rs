@@ -443,8 +443,8 @@ mod tests {
             0x08, 0x04, 0, 0, 0, 0, 0x54, 0x01, 0x0f, 0xa0, 0, 0, 0, 0, 0, 0, 0x44,
         ];
         let reads = bytes(std::slice::from_ref(&bad_checksum));
-        // 373B:1216 is a Compx device, so the report-8 checksum applies.
-        let (mut target, _log) = target(0x373B, 0x1216, Link::Hid, reads);
+        // 391D:1A05 is a Compx device, so the report-8 checksum applies.
+        let (mut target, _log) = target(0x391D, 0x1A05, Link::Hid, reads);
         let exchange = Door::new(1).send_until(&mut target, far()).expect("send");
         assert_eq!(
             exchange.reply,

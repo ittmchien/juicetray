@@ -3,6 +3,7 @@
 //! picking. No I/O; everything is checked from byte frames.
 
 mod atk_serial;
+mod bitmouse;
 pub mod compx;
 mod devices;
 mod hid;
@@ -25,6 +26,7 @@ pub enum Family {
     Report13,
     Mchose,
     AtkSerial,
+    AtkBitmouse,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +54,7 @@ pub enum Decoded {
 impl Family {
     pub fn link(self) -> Link {
         match self {
-            Family::Compx | Family::Report13 | Family::Mchose => Link::Hid,
+            Family::Compx | Family::Report13 | Family::Mchose | Family::AtkBitmouse => Link::Hid,
             Family::AtkSerial => Link::Serial,
         }
     }
@@ -63,13 +65,14 @@ impl Family {
             Family::Report13 => "VGN report 0x13",
             Family::Mchose => "MCHOSE",
             Family::AtkSerial => "ATK serial",
+            Family::AtkBitmouse => "ATK BITMOUSE",
         }
     }
 
     /// Minimum time between two queries to one device, independent of the UI refresh value.
     pub fn query_floor(self) -> Duration {
         match self {
-            Family::Compx | Family::Report13 => Duration::from_secs(10),
+            Family::Compx | Family::Report13 | Family::AtkBitmouse => Duration::from_secs(10),
             Family::Mchose | Family::AtkSerial => Duration::from_secs(300),
         }
     }
@@ -82,6 +85,7 @@ pub fn battery_query(family: Family) -> &'static [u8] {
         Family::Report13 => &report13::QUERY,
         Family::Mchose => &mchose::QUERY,
         Family::AtkSerial => &atk_serial::QUERY,
+        Family::AtkBitmouse => &bitmouse::QUERY,
     }
 }
 
@@ -92,6 +96,7 @@ pub fn decode(family: Family, bytes: &[u8]) -> Decoded {
         Family::Report13 => report13::decode(bytes),
         Family::Mchose => mchose::decode(bytes),
         Family::AtkSerial => atk_serial::decode(bytes),
+        Family::AtkBitmouse => bitmouse::decode(bytes),
     }
 }
 
@@ -144,6 +149,7 @@ mod tests {
         assert_eq!(Family::Report13.query_floor(), Duration::from_secs(10));
         assert_eq!(Family::Mchose.query_floor(), Duration::from_secs(300));
         assert_eq!(Family::AtkSerial.query_floor(), Duration::from_secs(300));
+        assert_eq!(Family::AtkBitmouse.query_floor(), Duration::from_secs(10));
     }
 
     #[test]
@@ -168,9 +174,11 @@ mod tests {
         assert_eq!(Family::Report13.link(), Link::Hid);
         assert_eq!(Family::Mchose.link(), Link::Hid);
         assert_eq!(Family::AtkSerial.link(), Link::Serial);
+        assert_eq!(Family::AtkBitmouse.link(), Link::Hid);
         assert_eq!(Family::Compx.name(), "Compx report 8");
         assert_eq!(Family::Report13.name(), "VGN report 0x13");
         assert_eq!(Family::Mchose.name(), "MCHOSE");
         assert_eq!(Family::AtkSerial.name(), "ATK serial");
+        assert_eq!(Family::AtkBitmouse.name(), "ATK BITMOUSE");
     }
 }

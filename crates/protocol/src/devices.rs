@@ -65,7 +65,7 @@ pub const KNOWN: &[KnownDevice] = &[
         0x373B,
         0x1216,
         "ATK X1 SE (dongle)",
-        Family::Compx,
+        Family::AtkBitmouse,
         false,
         false,
     ),
@@ -76,6 +76,14 @@ pub const KNOWN: &[KnownDevice] = &[
         Family::Report13,
         false,
         false,
+    ),
+    device(
+        0x391D,
+        0x1A05,
+        "VGN Dragonfly 3 Master+ (cable)",
+        Family::Compx,
+        false,
+        true,
     ),
     device(
         0x373B,
@@ -123,8 +131,9 @@ mod tests {
             (0x373B, 0x1107, Family::Compx),
             (0x373B, 0x1299, Family::Compx),
             (0x373B, 0x130E, Family::Compx),
-            (0x373B, 0x1216, Family::Compx),
+            (0x373B, 0x1216, Family::AtkBitmouse),
             (0x3554, 0xFA09, Family::Report13),
+            (0x391D, 0x1A05, Family::Compx),
             (0x373B, 0x11CB, Family::AtkSerial),
             (0x373B, 0x11CA, Family::AtkSerial),
             (0x373B, 0x1204, Family::AtkSerial),
@@ -145,7 +154,10 @@ mod tests {
                 .collect()
         };
         assert_eq!(ids(|d| d.confirmed), [(0x3837, 0x6011)]);
-        assert_eq!(ids(|d| d.cable), [(0x3837, 0x6010), (0x373B, 0x11CA)]);
+        assert_eq!(
+            ids(|d| d.cable),
+            [(0x3837, 0x6010), (0x391D, 0x1A05), (0x373B, 0x11CA)]
+        );
     }
 
     #[test]
@@ -154,6 +166,16 @@ mod tests {
         assert_eq!(fa09.name, "VGN Dragonfly 3 Master+ (dongle)");
         assert_eq!(fa09.family, Family::Report13);
         assert!(!fa09.confirmed);
+    }
+
+    #[test]
+    fn x1_se_dongle_is_bitmouse_and_dragonfly_cable_is_compx() {
+        let dongle = known(0x373B, 0x1216).expect("X1 SE dongle is in the table");
+        assert_eq!(dongle.family, Family::AtkBitmouse);
+        assert!(!dongle.confirmed);
+        let cable = known(0x391D, 0x1A05).expect("Dragonfly cable is in the table");
+        assert_eq!(cable.family, Family::Compx);
+        assert!(cable.cable && !cable.confirmed);
     }
 
     #[test]

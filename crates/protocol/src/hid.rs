@@ -1,6 +1,6 @@
 //! HID collection rules: which collections may be opened, and which one a family's query goes to.
 
-use crate::{Family, ReportKind, ReportSize};
+use crate::{Family, ReportKind, ReportSize, bitmouse};
 
 /// First usage page of the vendor-defined range.
 const VENDOR_PAGE_MIN: u16 = 0xFF00;
@@ -73,6 +73,7 @@ pub fn pick_target(family: Family, shapes: &[HidShape]) -> Result<usize, PickErr
         Family::Compx => pick_vendor_report(shapes, COMPX_REPORT_ID, COMPX_REPORT_LEN),
         Family::Report13 => pick_vendor_report(shapes, REPORT13_REPORT_ID, REPORT13_REPORT_LEN),
         Family::Mchose => pick_mchose(shapes),
+        Family::AtkBitmouse => pick_bitmouse(shapes),
         Family::AtkSerial => Err(PickError::NoMatch),
     }
 }
@@ -142,6 +143,25 @@ fn pick_mchose(shapes: &[HidShape]) -> Result<usize, PickError> {
                 MCHOSE_REPORT_ID,
                 MCHOSE_REPORT_LEN,
             )
+    }))
+}
+
+/// `FF05/0001` with a 64-byte id-8 output report and an id-8 input report of any usable size.
+fn pick_bitmouse(shapes: &[HidShape]) -> Result<usize, PickError> {
+    exactly_one(matching(shapes, |shape| {
+        shape.usage_page == 0xFF05
+            && shape.usage == 0x0001
+            && has_report(
+                shape,
+                ReportKind::Output,
+                bitmouse::REPORT_ID,
+                bitmouse::REPORT_LEN,
+            )
+            && shape.reports.iter().any(|report| {
+                report.kind == ReportKind::Input
+                    && report.id == bitmouse::REPORT_ID
+                    && report.bytes >= bitmouse::MIN_REPLY_LEN
+            })
     }))
 }
 
@@ -324,6 +344,36 @@ mod tests {
         assert_eq!(
             pick_target(Family::Mchose, &[twin.clone(), twin]),
             Err(PickError::Ambiguous(vec![0, 1]))
+        );
+    }
+
+    #[test]
+    fn pick_bitmouse_finds_ff05_among_x1_se_collections() {
+        let out = |id, bytes| report(ReportKind::Output, id, bytes);
+        let input = |id, bytes| report(ReportKind::Input, id, bytes);
+        let shapes = [
+            shape(0xFFB3, 0x0001, vec![input(0, 24), out(0, 64)]),
+            shape(0xFF05, 0x0001, vec![input(8, 127), out(8, 64)]),
+            shape(0xFFB1, 0x0001, vec![out(9, 13)]),
+        ];
+        assert_eq!(pick_target(Family::AtkBitmouse, &shapes), Ok(1));
+        assert_eq!(
+            pick_target(Family::AtkBitmouse, &shapes[..1]),
+            Err(PickError::NoMatch)
+        );
+        assert_eq!(
+            pick_target(Family::AtkBitmouse, &[shapes[1].clone(), shapes[1].clone()]),
+            Err(PickError::Ambiguous(vec![0, 1]))
+        );
+    }
+
+    #[test]
+    fn pick_bitmouse_needs_both_reports() {
+        let only_input = shape(0xFF05, 0x0001, vec![report(ReportKind::Input, 8, 127)]);
+        let short_output = shape(0xFF05, 0x0001, both(8, 17));
+        assert_eq!(
+            pick_target(Family::AtkBitmouse, &[only_input, short_output]),
+            Err(PickError::NoMatch)
         );
     }
 
