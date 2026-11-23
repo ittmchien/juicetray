@@ -32,6 +32,17 @@ More devices will be added over time.
 Juicetray only sends read-only battery queries, one at a time, with no retry loops and at
 most one automatic refresh every few minutes. It never changes a device setting.
 
+## Contributing
+
+`main` holds released code only. Development happens on `dev`:
+
+```sh
+git clone -b dev https://github.com/ittmchien/juicetray
+```
+
+- Open pull requests against `dev`.
+- When forking, untick **"Copy the `main` branch only"** so your fork gets `dev` too.
+
 ## License
 
 [GPL-3.0-or-later](LICENSE).
