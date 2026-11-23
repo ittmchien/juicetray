@@ -29,8 +29,9 @@ More devices will be added over time.
 
 ## Safety
 
-Juicetray only sends read-only battery queries, one at a time, with no retry loops and at
-most one automatic refresh every few minutes. It never changes a device setting.
+Juicetray only sends read-only battery queries, one at a time, with no retry loops. It never
+changes a device setting. Bluetooth levels are read from what the OS already stores, so no
+query reaches those devices.
 
 ## Contributing
 
