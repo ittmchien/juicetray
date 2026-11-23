@@ -12,6 +12,8 @@ juicetray-strip-render = { path = "../crates/strip-render" }
 juicetray-ui-model = { path = "../crates/ui-model" }
 # Desktop notifications only; the default features pull in the Linux D-Bus stack.
 notify-rust = { version = "4", default-features = false }
+# Native SVG file picker; the default features are the Linux GTK / portal backends.
+rfd = { version = "0.18", default-features = false }
 tao = { version = "0.37", default-features = false }
 toml = "1"
 tray-icon = { version = "0.26", default-features = false }
@@ -22,20 +24,29 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "libc",
+    "objc2-core-foundation",
+    "NSAlert",
     "NSAppearance",
+    "NSApplication",
     "NSButton",
     "NSControl",
+    "NSFont",
+    "NSResponder",
     "NSRunningApplication",
     "NSStatusBarButton",
     "NSStatusItem",
+    "NSTextField",
     "NSView",
+    "NSWindow",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "block2",
+    "objc2-core-foundation",
     "NSArray",
     "NSBundle",
     "NSDistributedNotificationCenter",
+    "NSGeometry",
     "NSNotification",
     "NSOperation",
     "NSString",
@@ -58,5 +69,6 @@ windows = { version = "0.62", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
     "Win32_UI_WindowsAndMessaging",
 ] }

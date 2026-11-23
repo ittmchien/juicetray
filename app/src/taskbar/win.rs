@@ -20,6 +20,7 @@ use windows::Win32::UI::Controls::{
     ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, TOOLTIPS_CLASSW, TTF_SUBCLASS,
     TTM_ADDTOOLW, TTM_DELTOOLW, TTM_SETMAXTIPWIDTH, TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW,
 };
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, FindWindowExW, FindWindowW,
     GetClientRect, GetWindowRect, HWND_TOP, IsWindow, MA_NOACTIVATE, RegisterClassExW, SW_HIDE,
@@ -136,6 +137,13 @@ impl TaskbarStrip {
         u32::try_from((bar.h * STRIP_HEIGHT_PERCENT + 50) / 100)
             .ok()
             .filter(|height| *height > 0)
+    }
+
+    /// DPI of the primary taskbar's monitor, or `None` while the taskbar does not exist.
+    pub fn taskbar_dpi() -> Option<u32> {
+        // SAFETY: only reads a property of a window handle; a stale handle gives 0.
+        let dpi = unsafe { GetDpiForWindow(find_taskbar()?) };
+        (dpi > 0).then_some(dpi)
     }
 
     /// Shows `bitmap` with `tooltip`, creating the window when it is missing.

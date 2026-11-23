@@ -9,17 +9,20 @@ use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopProxy};
 use tray_icon::menu::{Menu, MenuEvent};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use ui_model::{
-    DeviceView, DisplayOptions, EMPTY_MENU_TEXT, Segment, build_strip, sort_weakest_first,
+    DeviceView, DisplayOptions, EMPTY_MENU_TEXT, IconChoice, IconColor, Segment, build_strip,
+    sort_weakest_first,
 };
 
 use crate::alerts::{AlertState, notify_low_battery};
-use crate::config::Config;
+use crate::config::{self, Config};
+use crate::interval::{format_interval, parse_interval};
 use crate::login::{self, LoginState};
 use crate::menu::{self, MenuAction, MenuEntry};
 use crate::refresh::{self, Command};
+use crate::svg_cache::SvgCache;
 #[cfg(windows)]
 use crate::taskbar::{self, TaskbarStrip};
-use crate::{instance, theme};
+use crate::{dialog, instance, theme, ui_font};
 
 /// The tray icon reads at 22 pt; twice that gives sharp pixels on Retina bars.
 #[cfg(target_os = "macos")]
@@ -32,6 +35,12 @@ const WINDOWS_ICON_PX: u32 = 32;
 const WINDOWS_TOOLTIP_MAX_UTF16: usize = 127;
 
 const BLUETOOTH_PERMISSION_HINT: &str = "Allow Bluetooth in System Settings › Privacy & Security";
+
+const REFRESH_PROMPT_TITLE: &str = "Custom auto-refresh";
+const REFRESH_PROMPT: &str = "How often to read the batteries, from 5s to 24h: 45s, 2m30s, 1h30m.";
+const COLOR_PROMPT_TITLE: &str = "Custom icon colour";
+const COLOR_PROMPT: &str = "Type a colour as #RRGGBB, for example #FF8800.";
+const COLOR_HINT: &str = "That is not a colour. Type #RRGGBB, for example #FF8800.";
 
 pub enum UserEvent {
     Devices(Vec<DeviceView>),
@@ -109,12 +118,22 @@ struct App {
     shown_strip: Option<(Vec<Segment>, Theme)>,
     shown_tooltip: String,
     shown_entries: Vec<MenuEntry>,
+    svgs: SvgCache,
+    /// The menu bar font, read once at start.
+    #[cfg(target_os = "macos")]
+    text: TextStyle,
+    /// Kept alive while it is the app's (hidden) main menu.
+    #[cfg(target_os = "macos")]
+    _edit_menu: Option<Menu>,
     /// `None` when the strip window class or keeper timer could not be set up.
     #[cfg(windows)]
     taskbar: Option<TaskbarStrip>,
-    /// Strip, theme, bitmap height and tooltip last handed to the taskbar strip.
+    /// The status-bar font with the taskbar DPI and strip height it was read for.
     #[cfg(windows)]
-    shown_taskbar: Option<(Vec<Segment>, Theme, u32, String)>,
+    taskbar_text: Option<(u32, u32, TextStyle)>,
+    /// Strip, theme, bitmap height, taskbar DPI and tooltip last handed to the taskbar strip.
+    #[cfg(windows)]
+    shown_taskbar: Option<(Vec<Segment>, Theme, u32, u32, String)>,
 }
 
 impl App {
@@ -138,8 +157,15 @@ impl App {
             shown_strip: None,
             shown_tooltip: String::new(),
             shown_entries: Vec::new(),
+            svgs: SvgCache::default(),
+            #[cfg(target_os = "macos")]
+            text: ui_font::menu_bar_text(MAC_STRIP_HEIGHT_PX),
+            #[cfg(target_os = "macos")]
+            _edit_menu: install_edit_menu(),
             #[cfg(windows)]
             taskbar,
+            #[cfg(windows)]
+            taskbar_text: None,
             #[cfg(windows)]
             shown_taskbar: None,
         };
@@ -195,13 +221,10 @@ impl App {
     fn on_action(&mut self, action: MenuAction) {
         match action {
             MenuAction::Refresh => self.tell_worker(Command::RefreshNow),
-            MenuAction::SetRefresh(seconds) => {
-                self.config.refresh_seconds = seconds;
-                self.tell_worker(Command::SetInterval(seconds));
-                self.save_config();
-            }
-            // Dialog-driven actions are wired with the dialogs.
-            MenuAction::CustomRefresh | MenuAction::PickSvg(_) | MenuAction::CustomColor(_) => {}
+            MenuAction::SetRefresh(seconds) => self.set_refresh(seconds),
+            MenuAction::CustomRefresh => self.prompt_refresh(),
+            MenuAction::PickSvg(id) => self.pick_svg(&id),
+            MenuAction::CustomColor(id) => self.prompt_color(&id),
             MenuAction::SetLow(percent) => {
                 self.config.low_battery_percent = percent;
                 self.save_config();
@@ -230,6 +253,70 @@ impl App {
             }
             // Handled by the caller, which stops the loop.
             MenuAction::Quit => {}
+        }
+    }
+
+    fn set_refresh(&mut self, seconds: Option<u32>) {
+        self.config.refresh_seconds = seconds;
+        self.tell_worker(Command::SetInterval(seconds));
+        self.save_config();
+    }
+
+    /// Asks for a custom interval, pre-filled with the current one, until valid or cancelled.
+    fn prompt_refresh(&mut self) {
+        let current = self
+            .config
+            .refresh_seconds
+            .map(format_interval)
+            .unwrap_or_default();
+        if let Some(seconds) = dialog::prompt_parsed(
+            REFRESH_PROMPT_TITLE,
+            REFRESH_PROMPT,
+            &current,
+            parse_interval,
+        ) {
+            self.set_refresh(Some(seconds));
+        }
+    }
+
+    /// Asks for a `#RRGGBB` icon colour, pre-filled with the device's custom one.
+    fn prompt_color(&mut self, id: &str) {
+        let current = match self.config.display_options(id).color {
+            IconColor::Rgb(red, green, blue) => format!("#{}", config::hex(red, green, blue)),
+            IconColor::Auto | IconColor::Original => String::new(),
+        };
+        if let Some(color) =
+            dialog::prompt_parsed(COLOR_PROMPT_TITLE, COLOR_PROMPT, &current, parse_hex_color)
+        {
+            self.update_device(id, |options| options.color = color);
+        }
+    }
+
+    /// Lets the owner pick an SVG file as the device's icon.
+    fn pick_svg(&mut self, id: &str) {
+        let Some(path) = dialog::pick_svg() else {
+            return;
+        };
+        let path = match path.into_os_string().into_string() {
+            Ok(path) => path,
+            Err(raw) => {
+                let shown = std::path::Path::new(&raw).display().to_string();
+                eprintln!("SVG path {shown} is not valid Unicode; icon unchanged");
+                return;
+            }
+        };
+        // Picking a file again re-reads it, so a fixed file replaces its earlier failure.
+        self.svgs.forget(&path);
+        self.force_redraw();
+        self.update_device(id, |options| options.icon = IconChoice::Svg(path));
+    }
+
+    /// Makes the next `apply` render the strip even when its segments look unchanged.
+    fn force_redraw(&mut self) {
+        self.shown_strip = None;
+        #[cfg(windows)]
+        {
+            self.shown_taskbar = None;
         }
     }
 
@@ -287,13 +374,22 @@ impl App {
     /// Re-reads the theme and rebuilds the tray icon when the strip or theme changed.
     fn apply_strip(&mut self) {
         let theme = theme::current_theme(&self.tray);
-        // Hiding by id or old name is decided here, so the strip gets no name list.
+        let devices = self.visible_devices();
+        // Resolved up front: loading an SVG updates the cache, which the strip builder cannot.
+        let options: HashMap<String, DisplayOptions> = devices
+            .iter()
+            .map(|device| {
+                let options = self.svgs.resolve(self.config.display_options(&device.id));
+                (device.id.clone(), options)
+            })
+            .collect();
+        // Hiding by id or old name is decided in `visible_devices`, so the strip gets no names.
         let segments = build_strip(
-            &self.visible_devices(),
+            &devices,
             self.config.low_battery_percent,
             &[],
             self.config.show_disconnected,
-            &|id| self.config.display_options(id),
+            &|id| options.get(id).cloned().unwrap_or_default(),
         );
         let strip = (segments, theme);
         if self.shown_strip.as_ref() != Some(&strip) {
@@ -303,7 +399,7 @@ impl App {
     }
 
     fn set_icon(&self, segments: &[Segment], theme: Theme) {
-        let Some(bitmap) = tray_bitmap(segments, theme) else {
+        let Some(bitmap) = self.tray_bitmap(segments, theme) else {
             return;
         };
         let icon = match Icon::from_rgba(bitmap.rgba, bitmap.width, bitmap.height) {
@@ -384,28 +480,39 @@ impl App {
             return;
         };
         // Explorer is missing for now; the keeper recreates the window once it is back.
-        let Some(height) = TaskbarStrip::strip_height() else {
+        let (Some(height), Some(dpi)) = (TaskbarStrip::strip_height(), TaskbarStrip::taskbar_dpi())
+        else {
             return;
         };
         let unchanged = self
             .shown_taskbar
             .as_ref()
-            .is_some_and(|(s, t, h, tooltip)| {
-                s == segments && t == theme && *h == height && *tooltip == self.shown_tooltip
+            .is_some_and(|(s, t, h, d, tooltip)| {
+                s == segments
+                    && t == theme
+                    && *h == height
+                    && *d == dpi
+                    && *tooltip == self.shown_tooltip
             });
         if unchanged {
             return;
         }
-        // Built-in icons and the embedded font: no custom SVGs or OS font are loaded here.
-        let bitmap = strip_render::render_strip(
-            segments,
-            height,
-            *theme,
-            &HashMap::new(),
-            &TextStyle::fallback(height),
-        );
+        // The OS font is read again only when the taskbar's DPI or the strip height changes.
+        let text = match self.taskbar_text.take() {
+            Some(cached @ (d, h, _)) if d == dpi && h == height => cached,
+            _ => (dpi, height, ui_font::status_text(dpi, height)),
+        };
+        let bitmap =
+            strip_render::render_strip(segments, height, *theme, self.svgs.icons(), &text.2);
+        self.taskbar_text = Some(text);
         taskbar.show(&bitmap, &self.shown_tooltip);
-        self.shown_taskbar = Some((segments.clone(), *theme, height, self.shown_tooltip.clone()));
+        self.shown_taskbar = Some((
+            segments.clone(),
+            *theme,
+            height,
+            dpi,
+            self.shown_tooltip.clone(),
+        ));
     }
 
     /// Opens the live menu from a strip click, anchored to the tray icon's own window.
@@ -448,23 +555,65 @@ fn new_taskbar_strip(proxy: EventLoopProxy<UserEvent>) -> Option<TaskbarStrip> {
     }
 }
 
-/// macOS shows the whole strip in the menu bar.
 #[cfg(target_os = "macos")]
-fn tray_bitmap(segments: &[Segment], theme: Theme) -> Option<Bitmap> {
-    // Built-in icons and the embedded font: no custom SVGs or OS font are loaded here.
-    Some(strip_render::render_strip(
-        segments,
-        MAC_STRIP_HEIGHT_PX,
-        theme,
-        &HashMap::new(),
-        &TextStyle::fallback(MAC_STRIP_HEIGHT_PX),
-    ))
+impl App {
+    /// macOS shows the whole strip in the menu bar.
+    fn tray_bitmap(&self, segments: &[Segment], theme: Theme) -> Option<Bitmap> {
+        Some(strip_render::render_strip(
+            segments,
+            MAC_STRIP_HEIGHT_PX,
+            theme,
+            self.svgs.icons(),
+            &self.text,
+        ))
+    }
 }
 
-/// The Windows tray icon is one square with the weakest device's number.
 #[cfg(windows)]
-fn tray_bitmap(segments: &[Segment], theme: Theme) -> Option<Bitmap> {
-    segments
-        .first()
-        .map(|weakest| strip_render::render_square(weakest, WINDOWS_ICON_PX, theme))
+impl App {
+    /// The Windows tray icon is one square with the weakest device's number.
+    fn tray_bitmap(&self, segments: &[Segment], theme: Theme) -> Option<Bitmap> {
+        segments
+            .first()
+            .map(|weakest| strip_render::render_square(weakest, WINDOWS_ICON_PX, theme))
+    }
+}
+
+/// Accessory apps show no menu bar, but key equivalents still go through the main menu: a
+/// hidden Edit menu makes Cmd+X/C/V/A/Z work in dialog text fields.
+#[cfg(target_os = "macos")]
+fn install_edit_menu() -> Option<Menu> {
+    use tray_icon::menu::{PredefinedMenuItem, Submenu};
+
+    let edit = Submenu::with_items(
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(None),
+            &PredefinedMenuItem::redo(None),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::cut(None),
+            &PredefinedMenuItem::copy(None),
+            &PredefinedMenuItem::paste(None),
+            &PredefinedMenuItem::select_all(None),
+        ],
+    );
+    match edit.and_then(|edit| Menu::with_items(&[&edit])) {
+        Ok(menu) => {
+            menu.init_for_nsapp();
+            Some(menu)
+        }
+        Err(error) => {
+            eprintln!("edit menu unavailable, so no copy/paste in dialogs: {error}");
+            None
+        }
+    }
+}
+
+/// Only a `#RRGGBB` colour (the `#` is optional) counts as a custom colour.
+fn parse_hex_color(text: &str) -> Result<IconColor, String> {
+    match config::parse_color(text.trim()) {
+        Some(color @ IconColor::Rgb(..)) => Ok(color),
+        _ => Err(COLOR_HINT.to_owned()),
+    }
 }

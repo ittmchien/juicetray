@@ -1,0 +1,250 @@
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    BS_DEFPUSHBUTTON, BS_PUSHBUTTON, DLGTEMPLATE, DS_CENTER, DS_MODALFRAME, DS_SETFONT,
+    DS_SETFOREGROUND, DialogBoxIndirectParamW, ES_AUTOHSCROLL, EndDialog, GWLP_USERDATA,
+    GetDlgItem, GetDlgItemTextW, GetWindowLongPtrW, GetWindowTextLengthW, IDCANCEL, IDOK,
+    SetDlgItemTextW, SetWindowLongPtrW, WINDOW_STYLE, WM_COMMAND, WM_INITDIALOG, WS_BORDER,
+    WS_CAPTION, WS_CHILD, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+};
+use windows::core::HSTRING;
+
+/// Predefined control classes, by the atoms dialog templates use for them.
+const BUTTON_CLASS: u16 = 0x0080;
+const EDIT_CLASS: u16 = 0x0081;
+const STATIC_CLASS: u16 = 0x0082;
+/// Marks the next template word as a class atom instead of a class name.
+const ATOM_MARKER: u16 = 0xFFFF;
+
+const MESSAGE_ID: u16 = 100;
+const INPUT_ID: u16 = 101;
+
+const FONT_POINTS: u16 = 9;
+const FONT_FACE: &str = "Segoe UI";
+
+/// Layout in dialog units: `[x, y, width, height]`.
+const DIALOG_RECT: [i16; 4] = [0, 0, 220, 84];
+const MESSAGE_RECT: [i16; 4] = [7, 7, 206, 26];
+const INPUT_RECT: [i16; 4] = [7, 38, 206, 14];
+const OK_RECT: [i16; 4] = [109, 62, 50, 14];
+const CANCEL_RECT: [i16; 4] = [163, 62, 50, 14];
+
+/// What the dialog procedure reads at start and writes on OK.
+struct Prompt {
+    default: HSTRING,
+    answer: Option<String>,
+}
+
+/// A modal dialog centred on the primary monitor; Enter is OK and Esc is Cancel.
+pub fn prompt_text(title: &str, message: &str, default: &str) -> Option<String> {
+    // SAFETY: a null module name asks for this executable's own handle, which never fails here.
+    let instance = match unsafe { GetModuleHandleW(None) } {
+        Ok(module) => HINSTANCE::from(module),
+        Err(error) => {
+            eprintln!("text prompt failed: {error}");
+            return None;
+        }
+    };
+    let template = dialog_template(title, message);
+    let mut prompt = Prompt {
+        default: HSTRING::from(default),
+        answer: None,
+    };
+    // SAFETY: the template is DWORD-aligned and well formed; `prompt` outlives the modal call,
+    // which is the only time the dialog procedure reads it.
+    let result = unsafe {
+        DialogBoxIndirectParamW(
+            Some(instance),
+            template.as_ptr().cast::<DLGTEMPLATE>(),
+            None,
+            Some(dialog_proc),
+            LPARAM(&raw mut prompt as isize),
+        )
+    };
+    if result == -1 {
+        eprintln!(
+            "text prompt failed: {}",
+            windows::core::Error::from_thread()
+        );
+    }
+    prompt.answer
+}
+
+/// Fills the input at start, stores its text on OK and closes on OK or Cancel; the dialog
+/// manager turns Enter into OK and Esc into Cancel.
+unsafe extern "system" fn dialog_proc(
+    dialog: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> isize {
+    match message {
+        WM_INITDIALOG => {
+            // SAFETY: `lparam` is the `Prompt` pointer handed to DialogBoxIndirectParamW, valid
+            // until it returns; the window keeps it for the WM_COMMAND below.
+            let prompt = unsafe {
+                SetWindowLongPtrW(dialog, GWLP_USERDATA, lparam.0);
+                &*(lparam.0 as *const Prompt)
+            };
+            // SAFETY: `dialog` is the live dialog and INPUT_ID one of its controls.
+            if let Err(error) = unsafe { SetDlgItemTextW(dialog, INPUT_ID.into(), &prompt.default) }
+            {
+                eprintln!("text prompt default not set: {error}");
+            }
+            // TRUE lets the dialog manager focus the first tab stop, the input (text selected).
+            1
+        }
+        WM_COMMAND => {
+            let id = i32::from(wparam.0 as u16);
+            if id != IDOK.0 && id != IDCANCEL.0 {
+                return 0;
+            }
+            if id == IDOK.0 {
+                // SAFETY: GWLP_USERDATA holds the `Prompt` pointer set at WM_INITDIALOG, still
+                // valid inside the modal call; nothing else touches it meanwhile.
+                let prompt =
+                    unsafe { &mut *(GetWindowLongPtrW(dialog, GWLP_USERDATA) as *mut Prompt) };
+                prompt.answer = Some(input_text(dialog));
+            }
+            // SAFETY: `dialog` is the live modal dialog.
+            if let Err(error) = unsafe { EndDialog(dialog, id as isize) } {
+                eprintln!("closing the text prompt failed: {error}");
+            }
+            1
+        }
+        _ => 0,
+    }
+}
+
+/// The input control's current text.
+fn input_text(dialog: HWND) -> String {
+    // SAFETY: `dialog` is the live dialog; the buffer holds the text plus its terminator.
+    unsafe {
+        let length = GetDlgItem(Some(dialog), INPUT_ID.into())
+            .map(|input| GetWindowTextLengthW(input))
+            .unwrap_or_default();
+        let mut buffer = vec![0u16; usize::try_from(length).unwrap_or_default() + 1];
+        let copied = GetDlgItemTextW(dialog, INPUT_ID.into(), &mut buffer) as usize;
+        String::from_utf16_lossy(&buffer[..copied.min(buffer.len())])
+    }
+}
+
+/// An in-memory `DLGTEMPLATE`: caption, font, message, input, OK and Cancel. Returned as
+/// `u32` words because the template must start on a DWORD boundary.
+fn dialog_template(title: &str, message: &str) -> Vec<u32> {
+    let mut words = TemplateWords::default();
+    let style = WS_POPUP
+        | WS_CAPTION
+        | WS_SYSMENU
+        | dialog_style(DS_MODALFRAME | DS_SETFONT | DS_CENTER | DS_SETFOREGROUND);
+    words.dword(style.0);
+    words.dword(0);
+    let item_count = 4;
+    words.word(item_count);
+    words.rect(DIALOG_RECT);
+    // No menu, default dialog class.
+    words.word(0);
+    words.word(0);
+    words.text(title);
+    words.word(FONT_POINTS);
+    words.text(FONT_FACE);
+
+    let control = WS_CHILD | WS_VISIBLE;
+    words.item(control, MESSAGE_RECT, MESSAGE_ID, STATIC_CLASS, message);
+    words.item(
+        control | WS_BORDER | WS_TABSTOP | dialog_style(ES_AUTOHSCROLL),
+        INPUT_RECT,
+        INPUT_ID,
+        EDIT_CLASS,
+        "",
+    );
+    words.item(
+        control | WS_TABSTOP | dialog_style(BS_DEFPUSHBUTTON),
+        OK_RECT,
+        IDOK.0 as u16,
+        BUTTON_CLASS,
+        "OK",
+    );
+    words.item(
+        control | WS_TABSTOP | dialog_style(BS_PUSHBUTTON),
+        CANCEL_RECT,
+        IDCANCEL.0 as u16,
+        BUTTON_CLASS,
+        "Cancel",
+    );
+    words.into_dwords()
+}
+
+/// Dialog, edit and button style constants are `i32` bit sets in the bindings.
+fn dialog_style(bits: i32) -> WINDOW_STYLE {
+    WINDOW_STYLE(bits as u32)
+}
+
+/// Little-endian 16-bit words of a dialog template.
+#[derive(Default)]
+struct TemplateWords(Vec<u16>);
+
+impl TemplateWords {
+    fn word(&mut self, value: u16) {
+        self.0.push(value);
+    }
+
+    fn dword(&mut self, value: u32) {
+        self.0.push(value as u16);
+        self.0.push((value >> 16) as u16);
+    }
+
+    fn rect(&mut self, rect: [i16; 4]) {
+        self.0.extend(rect.map(|value| value as u16));
+    }
+
+    /// A NUL-terminated UTF-16 string.
+    fn text(&mut self, text: &str) {
+        self.0.extend(text.encode_utf16());
+        self.0.push(0);
+    }
+
+    /// One `DLGITEMTEMPLATE`, DWORD-aligned, with a predefined class and no creation data.
+    fn item(&mut self, style: WINDOW_STYLE, rect: [i16; 4], id: u16, class: u16, text: &str) {
+        if self.0.len() % 2 == 1 {
+            self.0.push(0);
+        }
+        self.dword(style.0);
+        self.dword(0);
+        self.rect(rect);
+        self.word(id);
+        self.word(ATOM_MARKER);
+        self.word(class);
+        self.text(text);
+        self.word(0);
+    }
+
+    fn into_dwords(self) -> Vec<u32> {
+        self.0
+            .chunks(2)
+            .map(|pair| u32::from(pair[0]) | (u32::from(pair.get(1).copied().unwrap_or(0)) << 16))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn template_items_are_dword_aligned() {
+        let template = dialog_template("Odd", "x");
+        let words: Vec<u16> = template
+            .iter()
+            .flat_map(|dword| [*dword as u16, (dword >> 16) as u16])
+            .collect();
+        // Header: style, extended style, item count.
+        assert_eq!(words[4], 4);
+        // The first item follows the header (11 fixed words, "Odd\0", point size, "Segoe UI\0"),
+        // padded to an even word index, and begins with its style.
+        let header_words = 11 + 4 + 1 + 9;
+        let first_item = header_words + header_words % 2;
+        let style = u32::from(words[first_item]) | (u32::from(words[first_item + 1]) << 16);
+        assert_eq!(style, (WS_CHILD | WS_VISIBLE).0);
+    }
+}
