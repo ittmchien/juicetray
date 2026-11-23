@@ -7,6 +7,8 @@ const VENDOR_PAGE_MIN: u16 = 0xFF00;
 
 const COMPX_REPORT_ID: u8 = 0x08;
 const COMPX_REPORT_LEN: usize = 17;
+/// Usage page and usage preferred when several Compx candidates qualify.
+const COMPX_PREFERRED: (u16, u16) = (0xFF02, 0x0002);
 const MCHOSE_REPORT_ID: u8 = 0x55;
 const MCHOSE_REPORT_LEN: usize = 64;
 const MCHOSE_INTERFACE: u8 = 3;
@@ -110,7 +112,7 @@ fn pick_compx(shapes: &[HidShape]) -> Result<usize, PickError> {
     let preferred: Vec<usize> = candidates
         .iter()
         .copied()
-        .filter(|&index| shapes[index].usage_page == 0xFF02 && shapes[index].usage == 0x0002)
+        .filter(|&index| (shapes[index].usage_page, shapes[index].usage) == COMPX_PREFERRED)
         .collect();
     match preferred.len() {
         1 => Ok(preferred[0]),

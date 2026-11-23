@@ -81,7 +81,9 @@ pub fn parse_descriptor(bytes: &[u8]) -> Result<Vec<TopCollection>, String> {
             .fold(0u32, |acc, &byte| (acc << 8) | u32::from(byte));
 
         match (kind, tag) {
-            (GLOBAL, 0x0) => globals.usage_page = data as u16,
+            (GLOBAL, 0x0) => {
+                globals.usage_page = u16::try_from(data).map_err(|_| "usage page out of range")?;
+            }
             (GLOBAL, 0x7) => globals.field_bits = data,
             (GLOBAL, 0x8) => {
                 globals.report_id = u8::try_from(data).map_err(|_| "report id out of range")?;
@@ -133,6 +135,10 @@ pub fn parse_descriptor(bytes: &[u8]) -> Result<Vec<TopCollection>, String> {
         }
     }
 
+    // A descriptor cut on an item boundary would parse with smaller sizes; refuse it.
+    if depth != 0 {
+        return Err("unclosed collection".into());
+    }
     tops.into_iter().map(finish).collect()
 }
 
@@ -308,6 +314,9 @@ mod tests {
     fn parse_errors() {
         for bad in [
             "06 02",
+            // Unclosed collection, and a usage page wider than 16 bits.
+            "06 00 ff 09 01 a1 01 75 08 95 01 81 02",
+            "07 00 00 01 00 09 01 a1 01 c0",
             "c0",
             "b4",
             "fe",

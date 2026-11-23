@@ -1,4 +1,4 @@
-//! Pure battery protocol: device families, query frames, reply decoders, the known-device table
+//! Pure battery protocol: device families, query frames, reply decoders, the known-device table,
 //! per-family query floors, HID report-descriptor sizes, the collection open rule and target
 //! picking. No I/O; everything is checked from byte frames.
 
