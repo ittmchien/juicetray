@@ -2,10 +2,12 @@
 
 mod caption;
 mod device;
+mod display;
 mod strip;
 mod text;
 
 pub use caption::captions;
-pub use device::{DeviceKind, DeviceView, Level, Path, sort_weakest_first};
+pub use device::{DeviceKind, DeviceView, Level, Path, UnknownDeviceKind, sort_weakest_first};
+pub use display::{DisplayOptions, IconChoice, IconColor};
 pub use strip::{Segment, SegmentStyle, build_strip};
 pub use text::{EMPTY_MENU_TEXT, menu_line, tooltip_compact};

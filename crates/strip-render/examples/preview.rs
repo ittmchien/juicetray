@@ -2,7 +2,7 @@
 
 use strip_render::{Bitmap, Theme, render_square, render_strip};
 use tiny_skia::Pixmap;
-use ui_model::{DeviceKind, Segment, SegmentStyle};
+use ui_model::{DeviceKind, IconChoice, IconColor, Segment, SegmentStyle};
 
 const MARGIN: u32 = 12;
 
@@ -12,6 +12,9 @@ fn segment(kind: DeviceKind, caption: Option<&str>, text: &str, style: SegmentSt
         caption: caption.map(str::to_owned),
         text: text.to_owned(),
         style,
+        icon: IconChoice::Kind(kind),
+        color: IconColor::Auto,
+        gauge: None,
     }
 }
 

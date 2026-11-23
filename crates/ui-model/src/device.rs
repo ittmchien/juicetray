@@ -1,4 +1,5 @@
 use std::fmt;
+use std::str::FromStr;
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10,6 +11,40 @@ pub enum DeviceKind {
     Gamepad,
     Other,
 }
+
+impl DeviceKind {
+    /// Stable lowercase name used in config and menu ids.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeviceKind::Headset => "headset",
+            DeviceKind::Earbuds => "earbuds",
+            DeviceKind::Mouse => "mouse",
+            DeviceKind::Keyboard => "keyboard",
+            DeviceKind::Gamepad => "gamepad",
+            DeviceKind::Other => "other",
+        }
+    }
+}
+
+impl FromStr for DeviceKind {
+    type Err = UnknownDeviceKind;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        match name {
+            "headset" => Ok(DeviceKind::Headset),
+            "earbuds" => Ok(DeviceKind::Earbuds),
+            "mouse" => Ok(DeviceKind::Mouse),
+            "keyboard" => Ok(DeviceKind::Keyboard),
+            "gamepad" => Ok(DeviceKind::Gamepad),
+            "other" => Ok(DeviceKind::Other),
+            _ => Err(UnknownDeviceKind),
+        }
+    }
+}
+
+/// A string that names no `DeviceKind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownDeviceKind;
 
 /// How the OS reaches the device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +128,22 @@ mod tests {
 
     fn earbuds(left: Option<u8>, right: Option<u8>, case: Option<u8>) -> DeviceView {
         test_device("AirPods", Level::Earbuds { left, right, case })
+    }
+
+    #[test]
+    fn device_kind_name_roundtrip() {
+        for kind in [
+            DeviceKind::Headset,
+            DeviceKind::Earbuds,
+            DeviceKind::Mouse,
+            DeviceKind::Keyboard,
+            DeviceKind::Gamepad,
+            DeviceKind::Other,
+        ] {
+            assert_eq!(kind.as_str().parse(), Ok(kind));
+        }
+        assert_eq!("mouse".parse(), Ok(DeviceKind::Mouse));
+        assert!("toaster".parse::<DeviceKind>().is_err());
     }
 
     #[test]

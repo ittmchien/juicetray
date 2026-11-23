@@ -423,7 +423,7 @@ fn paint(color: Color) -> Paint<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ui_model::DeviceKind;
+    use ui_model::{DeviceKind, IconChoice, IconColor};
 
     fn segment(style: SegmentStyle) -> Segment {
         Segment {
@@ -431,6 +431,9 @@ mod tests {
             caption: None,
             text: "42%".to_owned(),
             style,
+            icon: IconChoice::Kind(DeviceKind::Headset),
+            color: IconColor::Auto,
+            gauge: None,
         }
     }
 
@@ -502,6 +505,9 @@ mod tests {
             caption: None,
             text: "–".to_owned(),
             style: SegmentStyle::Placeholder,
+            icon: IconChoice::Kind(DeviceKind::Other),
+            color: IconColor::Auto,
+            gauge: None,
         };
         let bitmap = render_strip(&[placeholder], 44, Theme::Light);
         assert!(bitmap.width > 0);

@@ -7,7 +7,9 @@ use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopProxy};
 use tray_icon::menu::{Menu, MenuEvent};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
-use ui_model::{DeviceView, EMPTY_MENU_TEXT, Segment, build_strip, sort_weakest_first};
+use ui_model::{
+    DeviceView, DisplayOptions, EMPTY_MENU_TEXT, Segment, build_strip, sort_weakest_first,
+};
 
 use crate::alerts::{AlertState, notify_low_battery};
 use crate::config::Config;
@@ -267,6 +269,8 @@ impl App {
             self.config.low_battery_percent,
             &self.config.hidden,
             self.config.show_disconnected,
+            // Per-device options arrive with the config wiring.
+            &|_| DisplayOptions::default(),
         );
         let strip = (segments, theme);
         if self.shown_strip.as_ref() != Some(&strip) {
