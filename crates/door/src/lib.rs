@@ -7,7 +7,7 @@ mod write;
 
 pub use enumerate::{Access, HidCollection, Inventory, SerialEntry, inventory};
 pub use transport::Target;
-pub use write::{Door, Exchange, HID_REPLY_TIMEOUT, MAX_KEPT_UNRELATED, SERIAL_REPLY_TIMEOUT};
+pub use write::{Door, Exchange, MAX_KEPT_UNRELATED};
 
 #[cfg(test)]
 mod tests {

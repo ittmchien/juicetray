@@ -8,10 +8,6 @@ use protocol::{Decoded, Family, Link, SERIAL_FRAME_LEN, battery_query, decode, k
 
 use crate::transport::Target;
 
-/// Total wait for a HID reply (spec rule 1).
-pub const HID_REPLY_TIMEOUT: Duration = Duration::from_millis(500);
-/// Total wait for a serial reply (spec rule 1).
-pub const SERIAL_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 /// Reports that are not the reply kept per query; later ones are only counted.
 pub const MAX_KEPT_UNRELATED: usize = 16;
 
@@ -75,10 +71,9 @@ impl Door {
 
     /// Sends the battery query of the target's family once and waits for the reply.
     pub fn send(&mut self, target: &mut Target) -> anyhow::Result<Exchange> {
-        let timeout = match target.link {
-            Link::Hid => HID_REPLY_TIMEOUT,
-            Link::Serial => SERIAL_REPLY_TIMEOUT,
-        };
+        // The deadline is the family's reply timeout; an unknown device is refused in `send_until`.
+        let timeout =
+            known(target.vid, target.pid).map_or(Duration::ZERO, |d| d.family.reply_timeout());
         self.send_until(target, Instant::now() + timeout)
     }
 
@@ -368,12 +363,15 @@ mod tests {
         let reads = bytes(&vec![mchose_notification(); 5]);
         let (mut hid, hid_log) = target(0x3837, 0x6011, Link::Hid, reads);
         Door::new(1).send(&mut hid).expect("hid send");
-        assert_timeouts_bounded(&hid_log.borrow().timeouts, HID_REPLY_TIMEOUT);
+        assert_timeouts_bounded(&hid_log.borrow().timeouts, Family::Mchose.reply_timeout());
 
         let (mut serial, serial_log) =
             target(0x373B, 0x1204, Link::Serial, bytes(&[vec![0x05; 10]]));
         Door::new(1).send(&mut serial).expect("serial send");
-        assert_timeouts_bounded(&serial_log.borrow().timeouts, SERIAL_REPLY_TIMEOUT);
+        assert_timeouts_bounded(
+            &serial_log.borrow().timeouts,
+            Family::AtkSerial.reply_timeout(),
+        );
     }
 
     #[test]

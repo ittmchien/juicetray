@@ -5,7 +5,7 @@
 use std::process::ExitCode;
 use std::time::SystemTime;
 
-use door::{Door, Exchange, HID_REPLY_TIMEOUT, SERIAL_REPLY_TIMEOUT};
+use door::{Door, Exchange};
 use protocol::{Decoded, KNOWN, KnownDevice, Link, battery_query, known};
 
 use crate::query::{
@@ -150,9 +150,12 @@ fn exchange_text(device: &KnownDevice, target_line: &str, exchange: &Exchange) -
             Link::Hid => format!(
                 "no reply within {} ms (asleep? move it or put it on, then run probe once more \
                  after the floor)",
-                HID_REPLY_TIMEOUT.as_millis()
+                exchange.family.reply_timeout().as_millis()
             ),
-            Link::Serial => format!("no reply within {} s", SERIAL_REPLY_TIMEOUT.as_secs()),
+            Link::Serial => format!(
+                "no reply within {} s",
+                exchange.family.reply_timeout().as_secs()
+            ),
         },
     };
     lines.push(format!("result: {result}"));

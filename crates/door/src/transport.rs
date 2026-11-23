@@ -6,11 +6,10 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
 use hidapi::HidDevice;
-use protocol::Link;
+use protocol::{Family, Link};
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits};
 
 use crate::enumerate::{Access, HidCollection, Inventory, SerialEntry};
-use crate::write::SERIAL_REPLY_TIMEOUT;
 
 /// Byte channel to one opened device. Only `write.rs` calls `write`.
 pub(crate) trait Transport {
@@ -82,7 +81,7 @@ impl Inventory {
             .parity(Parity::None)
             .stop_bits(StopBits::One)
             .flow_control(FlowControl::None)
-            .timeout(SERIAL_REPLY_TIMEOUT)
+            .timeout(Family::AtkSerial.reply_timeout())
             .open()
             .with_context(|| {
                 format!("could not open {label}: busy or unavailable (is ATK HUB open?)")

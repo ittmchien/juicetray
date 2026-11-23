@@ -76,6 +76,16 @@ impl Family {
             Family::Mchose | Family::AtkSerial => Duration::from_secs(300),
         }
     }
+
+    /// Total wait for the reply to one query; per-family values taken from the vendor apps.
+    pub fn reply_timeout(self) -> Duration {
+        match self {
+            Family::Compx => Duration::from_millis(3000),
+            Family::Report13 => Duration::from_millis(800),
+            Family::AtkBitmouse | Family::Mchose => Duration::from_millis(500),
+            Family::AtkSerial => Duration::from_millis(1000),
+        }
+    }
 }
 
 /// The battery query frame of a family; HID frames start with the report id.
@@ -142,6 +152,16 @@ fn reading(percent: u8, charging: bool, asleep: bool) -> Decoded {
 mod tests {
     use super::*;
     use std::time::UNIX_EPOCH;
+
+    #[test]
+    fn reply_timeout_values() {
+        let ms = |family: Family| family.reply_timeout().as_millis();
+        assert_eq!(ms(Family::Compx), 3000);
+        assert_eq!(ms(Family::Report13), 800);
+        assert_eq!(ms(Family::AtkBitmouse), 500);
+        assert_eq!(ms(Family::Mchose), 500);
+        assert_eq!(ms(Family::AtkSerial), 1000);
+    }
 
     #[test]
     fn query_floor_values() {
