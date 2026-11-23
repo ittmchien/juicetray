@@ -11,7 +11,8 @@ use door::{
     SerialEntry, Target,
 };
 use protocol::{
-    Decoded, Family, HidShape, KNOWN, KnownDevice, Link, PickError, floor_wait, known, pick_target,
+    Decoded, Family, HidShape, KNOWN, KnownDevice, Link, PickError, battery_query, floor_wait,
+    known, pick_target,
 };
 
 use crate::query_log::{self, QueryLog};
@@ -56,10 +57,9 @@ fn probe(arg: Option<&str>) -> Result<(String, bool), String> {
     };
     claim_query(&mut log, &log_path, family, vid, pid, SystemTime::now())?;
 
-    // Door errors before the write say "nothing was sent"; later ones say the query went out.
     let exchange = Door::new(1)
         .send(&mut target)
-        .map_err(|error| format!("probe {vid:04X}:{pid:04X}: {error:#}"))?;
+        .map_err(|error| send_failed(device, &format!("{error:#}")))?;
     let is_reading = matches!(exchange.reply, Some((_, Decoded::Reading(_))));
     Ok((exchange_text(device, &target_line, &exchange), is_reading))
 }
@@ -134,7 +134,10 @@ fn floor_check(
     }
 }
 
-/// Floor check, then the stamp is saved; only a saved stamp lets the query go out.
+/// Re-reads the log file, checks the floor, then saves the stamp; only a saved stamp lets the
+/// query go out. The re-read catches another probe that claimed since this one loaded the log.
+/// shortcut: re-read narrows but does not close the race between two processes; add a lock
+/// file (`create_new`) before milestone 3's refresh worker shares this log.
 fn claim_query(
     log: &mut QueryLog,
     log_path: &Path,
@@ -143,10 +146,26 @@ fn claim_query(
     pid: u16,
     now: SystemTime,
 ) -> Result<(), String> {
+    *log = QueryLog::load_from(log_path);
     floor_check(log, log_path, family, vid, pid, now)?;
     log.stamp(vid, pid, now);
     log.save_to(log_path)
         .map_err(|error| record_failed(vid, pid, &error))
+}
+
+/// A door error. Door refusals before the write say "nothing was sent"; any other error comes
+/// from the write or the read, so the query went out (or may have) and the floor applies.
+fn send_failed(device: &KnownDevice, error: &str) -> String {
+    let head = format!("probe {:04X}:{:04X}: {error}", device.vid, device.pid);
+    if error.contains("nothing was sent") {
+        return head;
+    }
+    [
+        head,
+        bytes_line("sent", battery_query(device.family)),
+        "the query was (or may have been) sent; the next probe waits for the floor".to_owned(),
+    ]
+    .join("\n")
 }
 
 /// Names the OS error only: the outer contexts carry the data folder path (R10).
@@ -361,7 +380,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::UNIX_EPOCH;
 
-    use protocol::{Reading, battery_query, decode};
+    use protocol::{Reading, decode};
 
     use super::*;
 
@@ -644,6 +663,7 @@ mod tests {
         let (vid, pid) = MCHOSE;
         let mut log = QueryLog::default();
         log.stamp(vid, pid, whole(NOW + 3600));
+        log.save_to(&path).unwrap();
 
         let result = claim_query(&mut log, &path, Family::Mchose, vid, pid, whole(NOW));
         let saved = QueryLog::load_from(&path);
@@ -671,6 +691,47 @@ mod tests {
 
         assert_eq!(result, Ok(()));
         assert_eq!(saved.last(vid, pid), Some(whole(NOW)));
+    }
+
+    #[test]
+    fn claim_rereads_log() {
+        let root = temp_root("reread");
+        let path = root.join("query-log.toml");
+        let (vid, pid) = MCHOSE;
+        // The caller loaded an empty log; another probe has since stamped the file.
+        let mut stale = QueryLog::default();
+        let mut other = QueryLog::default();
+        other.stamp(vid, pid, whole(NOW - 60));
+        other.save_to(&path).unwrap();
+        let before = fs::read(&path).unwrap();
+
+        let result = claim_query(&mut stale, &path, Family::Mchose, vid, pid, whole(NOW));
+        let after = fs::read(&path).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let text = result.expect_err("the other probe's stamp is within the floor");
+        assert!(text.contains("wait 240 s"), "{text}");
+        assert!(text.ends_with("nothing was sent"), "{text}");
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn send_failed_shows_sent_bytes_after_the_write() {
+        let text = send_failed(mchose(), "write failed: boom");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "probe 3837:6011: write failed: boom");
+        assert_eq!(
+            lines[1],
+            format!("sent (64 B): {}", hex(battery_query(Family::Mchose)))
+        );
+        assert!(lines[2].contains("may have been) sent"), "{text}");
+        assert!(lines[2].contains("floor"), "{text}");
+
+        let refused = send_failed(mchose(), "write budget used up; nothing was sent");
+        assert_eq!(
+            refused,
+            "probe 3837:6011: write budget used up; nothing was sent"
+        );
     }
 
     #[test]
