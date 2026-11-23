@@ -181,7 +181,12 @@ impl TaskbarStrip {
             return;
         };
         let primary = find_taskbar();
-        let taskbars: Vec<HWND> = primary.into_iter().chain(secondary_taskbars()).collect();
+        // shortcut: every copy shows the bitmap rendered for the primary taskbar's height and DPI, so
+        // a secondary on another DPI shows a primary-size strip; upgrade by rendering per dock DPI.
+        let taskbars: Vec<HWND> = primary
+            .into_iter()
+            .chain(dockable_secondary_taskbars())
+            .collect();
         // Copies whose taskbar is gone (Explorer restart, display removed or setting off) go first.
         let (live, gone): (Vec<Dock>, Vec<Dock>) = std::mem::take(&mut self.docks)
             .into_iter()
@@ -250,9 +255,9 @@ impl Dock {
     /// Shrinks the task-button container to end at `strip_x` (taskbar client coordinates),
     /// moving it only when its rect differs from the wanted one.
     fn reserve(&mut self, strip_x: i32) {
+        // No container (Windows 11 XAML taskbar) leaves the strip floating as before; `reserved`
+        // stays as it is, since a sibling being recreated hides a container this copy shrank.
         let Some((container, natural, current)) = self.container_layout() else {
-            // No such container (Windows 11 XAML taskbar): the strip floats over it as before.
-            self.reserved = false;
             return;
         };
         let wanted = shrink_to_clear(natural, strip_x).unwrap_or(natural);
@@ -619,12 +624,25 @@ fn window_rect(window: HWND) -> Option<Rect> {
 
 /// Every `Shell_SecondaryTrayWnd`: one per extra display while "Show taskbar on all displays" is on.
 fn secondary_taskbars() -> Vec<HWND> {
+    find_all(None, w!("Shell_SecondaryTrayWnd"))
+}
+
+/// Secondary taskbars that get a strip copy: a Windows 11 secondary draws its clock in XAML (no
+/// `ClockButton` window to dock beside), so a copy there could cover it; unknown builds count as 11.
+fn dockable_secondary_taskbars() -> Vec<HWND> {
+    let before_windows_11 = os_version().is_some_and(|info| info.dwBuildNumber < 22000);
+    secondary_taskbars()
+        .into_iter()
+        .filter(|taskbar| before_windows_11 || find_child(*taskbar, w!("ClockButton")).is_some())
+        .collect()
+}
+
+/// Every window of class `class` among the children of `parent` (top-level windows for `None`).
+fn find_all(parent: Option<HWND>, class: PCWSTR) -> Vec<HWND> {
     let mut found = Vec::new();
     let mut after = None;
-    // SAFETY: the class name is a literal; `after` is the top-level window found last.
-    while let Ok(next) =
-        unsafe { FindWindowExW(None, after, w!("Shell_SecondaryTrayWnd"), PCWSTR::null()) }
-    {
+    // SAFETY: the class name is a literal; `after` is the window found last under `parent`.
+    while let Ok(next) = unsafe { FindWindowExW(parent, after, class, PCWSTR::null()) } {
         found.push(next);
         after = Some(next);
     }
@@ -643,8 +661,10 @@ fn task_container(taskbar: HWND, is_primary: bool) -> Option<HWND> {
     let container = if is_primary {
         find_child(taskbar, w!("ReBarWindow32"))
     } else {
-        find_child(taskbar, w!("WorkerW"))
-            .filter(|worker| find_child(*worker, w!("MSTaskListWClass")).is_some())
+        // Any `WorkerW` child may come first; only the one holding the task list counts.
+        find_all(Some(taskbar), w!("WorkerW"))
+            .into_iter()
+            .find(|worker| find_child(*worker, w!("MSTaskListWClass")).is_some())
     }?;
     // SAFETY: IsWindowVisible accepts any handle value.
     unsafe { IsWindowVisible(container) }
@@ -751,6 +771,19 @@ fn describe_rect(rect: Option<Rect>) -> String {
 }
 
 fn windows_build() -> String {
+    os_version().map_or_else(
+        || "unknown".to_owned(),
+        |info| {
+            format!(
+                "{}.{}.{}",
+                info.dwMajorVersion, info.dwMinorVersion, info.dwBuildNumber
+            )
+        },
+    )
+}
+
+/// The real Windows version (RtlGetVersion ignores the compatibility manifest).
+fn os_version() -> Option<OSVERSIONINFOW> {
     use windows::Wdk::System::SystemServices::RtlGetVersion;
 
     let mut info = OSVERSIONINFOW {
@@ -759,12 +792,5 @@ fn windows_build() -> String {
     };
     // SAFETY: `info` is initialised with its own size, as the call requires.
     let status = unsafe { RtlGetVersion(&mut info) };
-    if status.is_ok() {
-        format!(
-            "{}.{}.{}",
-            info.dwMajorVersion, info.dwMinorVersion, info.dwBuildNumber
-        )
-    } else {
-        "unknown".to_owned()
-    }
+    status.is_ok().then_some(info)
 }
