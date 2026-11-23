@@ -6,6 +6,7 @@ mod config;
 mod dialog;
 mod instance;
 mod interval;
+mod licenses;
 mod login;
 mod menu;
 mod probe;
@@ -26,6 +27,11 @@ fn main() -> ExitCode {
         Some("probe") => {
             attach_parent_console();
             probe::run_probe(std::env::args().nth(2))
+        }
+        Some("licenses") => {
+            attach_parent_console();
+            println!("{}", licenses::licenses_text());
+            ExitCode::SUCCESS
         }
         _ => app::run(),
     }

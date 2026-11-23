@@ -54,7 +54,8 @@ git clone -b dev https://github.com/ittmchien/juicetray
 
 ## License
 
-[GPL-3.0-or-later](LICENSE).
+[GPL-3.0-or-later](LICENSE). The Windows exe prints all bundled licences with
+`juicetray licenses`; the macOS app keeps them in `Contents/Resources/licenses/`.
 
 ## Credits
 
