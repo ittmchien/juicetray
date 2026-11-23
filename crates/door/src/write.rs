@@ -32,8 +32,14 @@ pub struct Exchange {
 
 impl Exchange {
     /// Keeps `bytes` as the reply, or as an unrelated report; true once the reply is in.
+    /// An echo of the request decodes as `Invalid`, so it is filed as unrelated to keep the wait open.
     fn take(&mut self, bytes: Vec<u8>) -> bool {
-        match decode(self.family, &bytes) {
+        let decoded = if bytes == self.sent {
+            Decoded::NotTheReply
+        } else {
+            decode(self.family, &bytes)
+        };
+        match decoded {
             Decoded::NotTheReply if self.unrelated.len() < MAX_KEPT_UNRELATED => {
                 self.unrelated.push(bytes);
                 false
@@ -407,6 +413,28 @@ mod tests {
         );
         assert_eq!(exchange.reply, Some((frame, reading(82, true))));
         assert_eq!(log.borrow().timeouts.len(), 2);
+    }
+
+    #[test]
+    fn echo_is_not_the_reply() {
+        // The device echoes the request before the real reply: the echo must not end the wait.
+        let echo = battery_query(Family::Mchose).to_vec();
+        let reads = bytes(&[echo.clone(), mchose_capture()]);
+        let (mut first, _log) = target(0x3837, 0x6011, Link::Hid, reads);
+        let exchange = Door::new(1).send_until(&mut first, far()).expect("send");
+        assert_eq!(exchange.reply, Some((mchose_capture(), reading(84, false))));
+        assert_eq!(exchange.unrelated, vec![echo.clone()]);
+
+        // Echo only: no reply, the echo is listed as other.
+        let (mut second, _log) = target(
+            0x3837,
+            0x6011,
+            Link::Hid,
+            bytes(std::slice::from_ref(&echo)),
+        );
+        let exchange = Door::new(1).send_until(&mut second, far()).expect("send");
+        assert_eq!(exchange.reply, None);
+        assert_eq!(exchange.unrelated, vec![echo]);
     }
 
     #[test]
