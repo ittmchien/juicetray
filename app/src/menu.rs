@@ -34,6 +34,8 @@ const ADD_DEVICE_ID: &str = "add-device";
 const DETECT_NEW_AVAILABLE: bool = cfg!(windows);
 const ICON_AUTO: &str = "auto";
 const SECONDS_PER_MINUTE: u32 = 60;
+/// The submenu that holds every app option.
+const SETTINGS_LABEL: &str = "Settings";
 /// The icon sits on the taskbar on Windows and in the menu bar on macOS.
 #[cfg(windows)]
 const CUSTOM_LIGHT_LABEL: &str = "Custom (light taskbar)…";
@@ -284,10 +286,26 @@ pub fn menu_entries(
         entries.push(MenuEntry::label(EMPTY_MENU_TEXT));
     }
     entries.extend(devices);
+    entries.push(MenuEntry::separator());
+    if DETECT_NEW_AVAILABLE {
+        entries.push(MenuEntry::item(ADD_DEVICE_ID, "Add unsupported device…"));
+    }
+    // The main menu keeps the devices and everyday commands; every option lives under Settings.
     entries.extend([
+        MenuEntry::submenu(SETTINGS_LABEL, settings_entries(config, login, has_battery)),
+        MenuEntry::item(CHECK_UPDATES_ID, "Check for updates…"),
         MenuEntry::separator(),
-        MenuEntry::submenu("Auto-refresh", refresh_entries(config.refresh_seconds)),
+        MenuEntry::item("quit", "Quit"),
     ]);
+    entries
+}
+
+/// The Settings submenu: refreshing and alerts, then detection and start-up, then updates.
+fn settings_entries(config: &Config, login: LoginState, has_battery: bool) -> Vec<MenuEntry> {
+    let mut entries = vec![MenuEntry::submenu(
+        "Auto-refresh",
+        refresh_entries(config.refresh_seconds),
+    )];
     if has_battery {
         entries.push(MenuEntry::check(
             REFRESH_ON_BATTERY_ID.to_owned(),
@@ -318,31 +336,27 @@ pub fn menu_entries(
                 format_minutes,
             ),
         ),
-        login_entry(login),
+        MenuEntry::separator(),
     ]);
     if DETECT_NEW_AVAILABLE {
-        entries.extend([
-            MenuEntry::check(
-                DETECT_NEW_DEVICES_ID.to_owned(),
-                "Detect new devices",
-                config.detect_new_devices,
-            ),
-            MenuEntry::item(ADD_DEVICE_ID, "Add unsupported device…"),
-        ]);
-    }
-    // Only a build that can check on its own offers the switch.
-    if AUTO_CHECK_AVAILABLE {
         entries.push(MenuEntry::check(
-            AUTO_UPDATE_ID.to_owned(),
-            "Check for updates automatically",
-            config.check_updates,
+            DETECT_NEW_DEVICES_ID.to_owned(),
+            "Detect new devices",
+            config.detect_new_devices,
         ));
     }
-    entries.extend([
-        MenuEntry::item(CHECK_UPDATES_ID, "Check for updates…"),
-        MenuEntry::separator(),
-        MenuEntry::item("quit", "Quit"),
-    ]);
+    entries.push(login_entry(login));
+    // Only a build that can check on its own offers the switch.
+    if AUTO_CHECK_AVAILABLE {
+        entries.extend([
+            MenuEntry::separator(),
+            MenuEntry::check(
+                AUTO_UPDATE_ID.to_owned(),
+                "Check for updates automatically",
+                config.check_updates,
+            ),
+        ]);
+    }
     entries
 }
 
@@ -729,7 +743,24 @@ mod tests {
     fn entries(devices: &[DeviceView], config: &Config, login: LoginState) -> Vec<MenuEntry> {
         let mut all = menu_entries(devices, config, login, false, SystemTime::UNIX_EPOCH);
         all.drain(..2);
-        all
+        // Settings items inline, so lookups find them beside the devices.
+        all.into_iter()
+            .flat_map(|e| {
+                if e.text == SETTINGS_LABEL {
+                    e.children
+                } else {
+                    vec![e]
+                }
+            })
+            .collect()
+    }
+
+    /// The Settings submenu's entries.
+    fn settings_of(all: Vec<MenuEntry>) -> Vec<MenuEntry> {
+        all.into_iter()
+            .find(|e| e.text == SETTINGS_LABEL)
+            .expect("a Settings submenu")
+            .children
     }
 
     #[test]
@@ -759,13 +790,13 @@ mod tests {
             ..Config::default()
         };
         let find = |config: &Config, has_battery| {
-            menu_entries(
+            settings_of(menu_entries(
                 &[],
                 config,
                 LoginState::Disabled,
                 has_battery,
                 SystemTime::UNIX_EPOCH,
-            )
+            ))
             .into_iter()
             .find(|e| e.id.as_deref() == Some(REFRESH_ON_BATTERY_ID))
         };
@@ -782,13 +813,13 @@ mod tests {
 
     #[test]
     fn battery_refresh_item_sits_right_after_auto_refresh() {
-        let entries = menu_entries(
+        let entries = settings_of(menu_entries(
             &[],
             &Config::default(),
             LoginState::Disabled,
             true,
             SystemTime::UNIX_EPOCH,
-        );
+        ));
         let auto = entries
             .iter()
             .position(|e| e.text == "Auto-refresh")
@@ -797,7 +828,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_new_devices_item_follows_start_at_login_on_windows() {
+    fn add_device_sits_above_settings_and_detect_precedes_login_on_windows() {
         let build = |config: &Config| {
             menu_entries(
                 &[],
@@ -807,7 +838,20 @@ mod tests {
                 SystemTime::UNIX_EPOCH,
             )
         };
-        let entries = build(&Config::default());
+        let all = build(&Config::default());
+        let settings = all.iter().position(|e| e.text == SETTINGS_LABEL).unwrap();
+        // The Add device window sits right above Settings, on Windows only.
+        let add = all
+            .iter()
+            .position(|e| e.id.as_deref() == Some(ADD_DEVICE_ID));
+        assert_eq!(add.is_some(), cfg!(windows));
+        if let Some(add) = add {
+            assert_eq!(add + 1, settings);
+            assert_eq!(all[add].text, "Add unsupported device…");
+            assert!(all[add - 1].is_separator());
+        }
+
+        let entries = settings_of(all);
         let detect = entries
             .iter()
             .position(|e| e.id.as_deref() == Some(DETECT_NEW_DEVICES_ID));
@@ -815,15 +859,13 @@ mod tests {
         if let Some(detect) = detect {
             assert_eq!(entries[detect].text, "Detect new devices");
             assert_eq!(entries[detect].checked, Some(true));
-            assert_eq!(entries[detect - 1].id.as_deref(), Some("login"));
-            // The Add device window follows it, on Windows only.
-            assert_eq!(entries[detect + 1].id.as_deref(), Some(ADD_DEVICE_ID));
-            assert_eq!(entries[detect + 1].text, "Add unsupported device…");
+            assert!(entries[detect - 1].is_separator());
+            assert_eq!(entries[detect + 1].id.as_deref(), Some("login"));
             let off = Config {
                 detect_new_devices: false,
                 ..Config::default()
             };
-            let unticked = build(&off)
+            let unticked = settings_of(build(&off))
                 .into_iter()
                 .find(|e| e.id.as_deref() == Some(DETECT_NEW_DEVICES_ID))
                 .unwrap();
@@ -853,7 +895,7 @@ mod tests {
 
         // The automatic-check switch exists only where the build can check on its own.
         let auto = |config: &Config| {
-            build(config)
+            settings_of(build(config))
                 .into_iter()
                 .find(|e| e.id.as_deref() == Some("update-auto"))
         };
@@ -1222,13 +1264,13 @@ mod tests {
         assert_eq!(child(auto, "Custom… (1h30m)").checked, Some(true));
 
         let quick = Config::default();
-        let quick_entries = menu_entries(
+        let quick_entries = settings_of(menu_entries(
             &[],
             &quick,
             LoginState::Disabled,
             false,
             SystemTime::UNIX_EPOCH,
-        );
+        ));
         let auto = quick_entries
             .iter()
             .find(|e| e.text == "Auto-refresh")
@@ -1431,9 +1473,15 @@ mod tests {
                 (false, false, "Pad — BT · 50%"),
             ]
         );
-        // The existing separator between devices and settings stays.
+        // A separator ends the devices; Add device (Windows) then the Settings items follow.
         assert!(entries[9].is_separator());
-        assert_eq!(entries[10].text, "Auto-refresh");
+        let next = if cfg!(windows) {
+            assert_eq!(entries[10].id.as_deref(), Some(ADD_DEVICE_ID));
+            11
+        } else {
+            10
+        };
+        assert_eq!(entries[next].text, "Auto-refresh");
     }
 
     #[test]

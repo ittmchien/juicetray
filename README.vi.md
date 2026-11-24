@@ -45,7 +45,7 @@ cài phần mềm của từng hãng.**
    [bản phát hành mới nhất](https://github.com/ittmchien/juicetray/releases/latest).
 2. Đặt vào một thư mục ghi được (ví dụ `%LOCALAPPDATA%\Programs\Juicetray`) rồi chạy. App là
    bản portable: không cần cài, không cần thiết lập gì thêm.
-3. Chuột phải vào dải icon hoặc icon khay → **Start at login** để chạy cùng Windows.
+3. Chuột phải vào dải icon hoặc icon khay → **Settings → Start at login** để chạy cùng Windows.
 
 Cài đặt lưu ở `%APPDATA%\ittmchien\juicetray\config\config.toml`, nên thay file exe không mất
 cài đặt. Windows SmartScreen có thể cảnh báo app chưa ký số: bấm **More info → Run anyway**.
@@ -103,7 +103,7 @@ allow = ["391D:1A05"]
 
 Juicetray kiểm tra [GitHub Releases](https://github.com/ittmchien/juicetray/releases) mỗi ngày
 tối đa một lần (mở lại app cũng không kiểm thêm). Tắt bằng mục **Check for updates automatically** trong
-menu, hoặc kiểm tay bằng **Check for updates…**. Yêu cầu chỉ gửi số phiên bản trong User-Agent
+**Settings**, hoặc kiểm tay bằng **Check for updates…**. Yêu cầu chỉ gửi số phiên bản trong User-Agent
 (`juicetray/<version>`).
 
 **Update now** tải exe mới, kiểm SHA-256 với `SHA256SUMS.txt` của bản phát hành, thay file rồi

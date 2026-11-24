@@ -47,7 +47,7 @@ without each vendor's software.**
    [latest release](https://github.com/ittmchien/juicetray/releases/latest).
 2. Put it in a folder you can write to (for example `%LOCALAPPDATA%\Programs\Juicetray`) and run
    it. It is portable: no installer, nothing else to set up.
-3. Right-click the strip or tray icon → **Start at login** to start it with Windows.
+3. Right-click the strip or tray icon → **Settings → Start at login** to start it with Windows.
 
 Settings live in `%APPDATA%\ittmchien\juicetray\config\config.toml`, so replacing the exe keeps
 them. Windows SmartScreen may warn about an unsigned app: **More info → Run anyway**.
@@ -104,7 +104,7 @@ allow = ["391D:1A05"]
 
 Juicetray checks [GitHub Releases](https://github.com/ittmchien/juicetray/releases) for a newer
 version at most once a day (restarting the app does not check again). Turn it off with **Check for updates
-automatically** in the menu, or check by hand with **Check for updates…**. The request sends
+automatically** under **Settings**, or check by hand with **Check for updates…**. The request sends
 nothing but the version in the User-Agent (`juicetray/<version>`).
 
 **Update now** downloads the new exe, checks its SHA-256 against the release's
