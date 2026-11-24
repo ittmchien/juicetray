@@ -1,6 +1,6 @@
 //! Native dialogs opened from a menu click: a one-line text prompt, the SVG file picker and, on
-//! Windows, the colour picker. All run modally on the main thread and return when the owner
-//! closes them.
+//! Windows, the colour picker and a yes/no confirmation. All run modally and return when the
+//! owner closes them; the confirmation runs on its own thread, the others on the main thread.
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -43,6 +43,13 @@ pub fn prompt_parsed<T>(
 #[cfg(windows)]
 pub fn pick_color(initial: (u8, u8, u8)) -> Option<(u8, u8, u8)> {
     platform::pick_color(initial)
+}
+
+/// Asks a yes/no question with `ok_label` on the default button; blocks the calling thread until
+/// the owner answers, so it runs on its own thread, never the event loop's. Windows only.
+#[cfg(windows)]
+pub fn confirm(title: &str, message: &str, ok_label: &str) -> bool {
+    platform::confirm(title, message, ok_label)
 }
 
 /// The owner's choice of one `.svg` file; `None` when cancelled.

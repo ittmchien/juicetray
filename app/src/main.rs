@@ -15,6 +15,7 @@ mod listen;
 mod log;
 mod login;
 mod menu;
+mod pause;
 mod probe;
 mod query;
 mod query_log;

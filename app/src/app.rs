@@ -3,6 +3,8 @@ use std::process::ExitCode;
 #[cfg(windows)]
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
+#[cfg(windows)]
+use std::time::Instant;
 use std::time::{Duration, SystemTime};
 
 #[cfg(target_os = "macos")]
@@ -24,7 +26,8 @@ use crate::config::{Config, parse_hide_offline_minutes, parse_low_percent};
 use crate::interval::{format_interval, parse_interval};
 use crate::login::{self, LoginState};
 use crate::menu::{self, MenuAction, MenuEntry};
-use crate::refresh::{self, Command};
+use crate::pause::{self, PowerSource, PowerState};
+use crate::refresh::{self, Command, ReadScope};
 use crate::svg_cache::SvgCache;
 #[cfg(windows)]
 use crate::taskbar::{self, StripContent, TaskbarHandle};
@@ -53,8 +56,16 @@ const COLOR_PROMPT: &str = "Type a colour as #RRGGBB, for example #FF8800.";
 #[cfg(not(windows))]
 const COLOR_HINT: &str = "That is not a colour. Type #RRGGBB, for example #FF8800.";
 
+#[cfg(windows)]
+const BATTERY_CONFIRM_TITLE: &str = "Refresh on battery power";
+#[cfg(windows)]
+const BATTERY_CONFIRM: &str =
+    "Auto-refresh while on battery power uses more of your laptop's battery. Turn it on?";
+#[cfg(windows)]
+const BATTERY_CONFIRM_OK: &str = "Turn on";
+
 pub enum UserEvent {
-    Devices(Vec<DeviceView>),
+    Devices(Vec<DeviceView>, ReadScope),
     /// A menu check got a valid reading from this unconfirmed `VID:PID`.
     Allowed(u16, u16),
     Menu(MenuEvent),
@@ -65,23 +76,32 @@ pub enum UserEvent {
     /// A left or right click released on the tray icon: opens the menu thread's menu.
     #[cfg(windows)]
     TrayClick,
+    /// The owner confirmed "Refresh on battery power" in its dialog, which runs off this thread.
+    #[cfg(windows)]
+    EnableRefreshOnBattery,
 }
 
 impl UserEvent {
     /// The variant name, for the trace.
     fn name(&self) -> &'static str {
         match self {
-            Self::Devices(_) => "Devices",
+            Self::Devices(..) => "Devices",
             Self::Allowed(..) => "Allowed",
             Self::Menu(_) => "Menu",
             #[cfg(target_os = "macos")]
             Self::ThemeChanged => "ThemeChanged",
             #[cfg(windows)]
-            Self::Taskbar(taskbar::Signal::KeeperTick) => "Taskbar::KeeperTick",
+            Self::Taskbar(taskbar::Signal::ThemeChanged) => "Taskbar::ThemeChanged",
+            #[cfg(windows)]
+            Self::Taskbar(taskbar::Signal::Fullscreen(_)) => "Taskbar::Fullscreen",
+            #[cfg(windows)]
+            Self::Taskbar(taskbar::Signal::PowerChanged) => "Taskbar::PowerChanged",
             #[cfg(windows)]
             Self::Taskbar(taskbar::Signal::Click) => "Taskbar::Click",
             #[cfg(windows)]
             Self::TrayClick => "TrayClick",
+            #[cfg(windows)]
+            Self::EnableRefreshOnBattery => "EnableRefreshOnBattery",
         }
     }
 }
@@ -161,8 +181,19 @@ struct App {
     worker: Sender<Command>,
     shown_strip: Option<(Vec<Segment>, Theme)>,
     shown_tooltip: String,
+    /// Windows builds the menu from fresh entries on each show, so only macOS compares them.
+    #[cfg(target_os = "macos")]
     shown_entries: Vec<MenuEntry>,
     svgs: SvgCache,
+    /// A fullscreen app has the screen: the worker reads nothing until it closes.
+    fullscreen: bool,
+    power_source: PowerSource,
+    /// For the confirm dialog's thread, which answers with a `UserEvent`.
+    #[cfg(windows)]
+    proxy: EventLoopProxy<UserEvent>,
+    /// When the last full refresh arrived; opening the menu skips its refresh while this is fresh.
+    #[cfg(windows)]
+    last_refresh: Option<Instant>,
     /// The menu bar font, read once at start.
     #[cfg(target_os = "macos")]
     text: TextStyle,
@@ -196,7 +227,13 @@ impl App {
         crate::watchdog::start();
         #[cfg(windows)]
         let taskbar = new_taskbar_strip(proxy.clone());
-        let worker = refresh::spawn_worker(proxy, config.refresh_seconds)?;
+        let power = PowerState {
+            fullscreen: pause::fullscreen_now(),
+            source: pause::current_power_source(),
+            refresh_on_battery: config.refresh_on_battery,
+        };
+        log::trace(format_args!("power at start {power:?}"));
+        let worker = refresh::spawn_worker(proxy.clone(), config.refresh_seconds, power)?;
         let mut app = Self {
             tray,
             #[cfg(target_os = "macos")]
@@ -208,8 +245,15 @@ impl App {
             worker,
             shown_strip: None,
             shown_tooltip: String::new(),
+            #[cfg(target_os = "macos")]
             shown_entries: Vec::new(),
             svgs: SvgCache::default(),
+            fullscreen: power.fullscreen,
+            power_source: power.source,
+            #[cfg(windows)]
+            proxy,
+            #[cfg(windows)]
+            last_refresh: None,
             #[cfg(target_os = "macos")]
             text: ui_font::menu_bar_text(MAC_STRIP_HEIGHT_PX),
             #[cfg(target_os = "macos")]
@@ -230,7 +274,7 @@ impl App {
         crate::watchdog::beat(crate::watchdog::Watched::Ui);
         let _span = log::span_fmt(format_args!("handle {}", event.name()));
         match event {
-            UserEvent::Devices(devices) => self.on_devices(devices),
+            UserEvent::Devices(devices, scope) => self.on_devices(devices, scope),
             // Config writes stay on this thread, so a check never races a settings save.
             UserEvent::Allowed(vid, pid) => {
                 if let Err(error) = self.config.allow_and_save(vid, pid) {
@@ -239,6 +283,7 @@ impl App {
             }
             UserEvent::Menu(event) => {
                 // muda flips check items on click; a forced rebuild restores the config's ticks.
+                #[cfg(target_os = "macos")]
                 self.shown_entries.clear();
                 if let Some(action) = menu::action_for(event.id.as_ref()) {
                     log::trace(format_args!("menu action {action:?}"));
@@ -253,20 +298,30 @@ impl App {
             // `apply` below re-reads the theme.
             #[cfg(target_os = "macos")]
             UserEvent::ThemeChanged => {}
-            // The keeper tick only needs the strip side; the menu and tooltip cannot have changed.
+            // The theme changed; `apply` below re-reads it and sends the strip again.
             #[cfg(windows)]
-            UserEvent::Taskbar(taskbar::Signal::KeeperTick) => {
-                self.keep_taskbar();
+            UserEvent::Taskbar(taskbar::Signal::ThemeChanged) => {}
+            #[cfg(windows)]
+            UserEvent::Taskbar(taskbar::Signal::Fullscreen(on)) => {
+                self.on_fullscreen(on);
+                return ControlFlow::Wait;
+            }
+            #[cfg(windows)]
+            UserEvent::Taskbar(taskbar::Signal::PowerChanged) => {
+                self.on_power_changed();
                 return ControlFlow::Wait;
             }
             #[cfg(windows)]
             UserEvent::Taskbar(taskbar::Signal::Click) | UserEvent::TrayClick => self.show_menu(),
+            // Config writes stay on this thread, so the dialog's thread only reports the answer.
+            #[cfg(windows)]
+            UserEvent::EnableRefreshOnBattery => self.set_refresh_on_battery(true),
         }
         self.apply();
         ControlFlow::Wait
     }
 
-    fn on_devices(&mut self, mut devices: Vec<DeviceView>) {
+    fn on_devices(&mut self, mut devices: Vec<DeviceView>, scope: ReadScope) {
         log::trace(format_args!("devices received {}", devices.len()));
         // Same-kind devices sit together in the strip and menu, highest level first and offline last within a kind.
         sort_grouped(&mut devices);
@@ -279,8 +334,15 @@ impl App {
         }
         self.devices = devices;
         self.has_read = true;
-        // Hand edits change `allow` in the file; the menu's "Check battery now" items follow it.
-        self.config.allow = Config::load().allow;
+        // Hand edits change `allow` in the file; the worker read it for this cycle, so the menu's
+        // "Check battery now" items follow it without a second read.
+        if let ReadScope::Full { allow } = scope {
+            self.config.allow = allow;
+            #[cfg(windows)]
+            {
+                self.last_refresh = Some(Instant::now());
+            }
+        }
     }
 
     fn on_action(&mut self, action: MenuAction) {
@@ -325,7 +387,67 @@ impl App {
             }
             // Handled by the caller, which stops the loop.
             MenuAction::Quit => {}
+            MenuAction::ToggleRefreshOnBattery => {
+                if self.config.refresh_on_battery {
+                    self.set_refresh_on_battery(false);
+                } else {
+                    self.confirm_refresh_on_battery();
+                }
+            }
         }
+    }
+
+    /// Saves the battery option and tells the worker, which restarts or stops its timer.
+    fn set_refresh_on_battery(&mut self, on: bool) {
+        self.config.refresh_on_battery = on;
+        self.save_config();
+        self.send_power();
+    }
+
+    /// Asks before turning the option on; the dialog blocks, so it runs on its own thread and
+    /// answers with `UserEvent::EnableRefreshOnBattery`. One dialog at a time.
+    #[cfg(windows)]
+    fn confirm_refresh_on_battery(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        static OPEN: AtomicBool = AtomicBool::new(false);
+        if OPEN.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new()
+            .name("confirm".into())
+            .spawn(move || {
+                let _span = log::span("dialog battery refresh confirm");
+                if dialog::confirm(BATTERY_CONFIRM_TITLE, BATTERY_CONFIRM, BATTERY_CONFIRM_OK) {
+                    // A closed event loop means the app is exiting.
+                    let _ = proxy.send_event(UserEvent::EnableRefreshOnBattery);
+                }
+                OPEN.store(false, Ordering::Relaxed);
+            });
+        if let Err(error) = spawned {
+            OPEN.store(false, Ordering::Relaxed);
+            eprintln!("confirm dialog unavailable: {error}");
+        }
+    }
+
+    /// Only Windows detects a battery, so the menu never offers the option elsewhere.
+    #[cfg(not(windows))]
+    fn confirm_refresh_on_battery(&mut self) {
+        self.set_refresh_on_battery(true);
+    }
+
+    /// The inputs the worker's pause rules read.
+    fn power_state(&self) -> PowerState {
+        PowerState {
+            fullscreen: self.fullscreen,
+            source: self.power_source,
+            refresh_on_battery: self.config.refresh_on_battery,
+        }
+    }
+
+    fn send_power(&self) {
+        self.tell_worker(Command::SetPower(self.power_state()));
     }
 
     fn set_refresh(&mut self, seconds: Option<u32>) {
@@ -478,17 +600,18 @@ impl App {
             self.shown_tooltip = tooltip;
         }
 
-        let entries = self.entries(SystemTime::now());
-        // Only macOS keeps a built menu; Windows builds it from the entries on each show.
-        if entries != self.shown_entries {
-            #[cfg(target_os = "macos")]
-            {
+        // Only macOS keeps a built menu; Windows builds it from fresh entries on each show, so
+        // building them here would only be compared and dropped.
+        #[cfg(target_os = "macos")]
+        {
+            let entries = self.entries(SystemTime::now());
+            if entries != self.shown_entries {
                 let _span = log::span("menu rebuild");
                 self.current_menu = menu::build_menu(&entries);
                 self.tray
                     .set_menu(Some(Box::new(self.current_menu.clone())));
+                self.shown_entries = entries;
             }
-            self.shown_entries = entries;
         }
 
         #[cfg(windows)]
@@ -539,8 +662,14 @@ impl App {
     /// The menu, plus a permission hint when a bundled app reads no device at all.
     fn entries(&self, now: SystemTime) -> Vec<MenuEntry> {
         let _span = log::span("menu entries");
-        let mut entries =
-            menu::menu_entries(&self.devices, &self.config, login::login_state(), now);
+        let has_battery = self.power_source != PowerSource::NoBattery;
+        let mut entries = menu::menu_entries(
+            &self.devices,
+            &self.config,
+            login::login_state(),
+            has_battery,
+            now,
+        );
         if self.has_read && self.devices.is_empty() && instance::is_bundled() {
             entries.insert(1, MenuEntry::label(BLUETOOTH_PERMISSION_HINT));
         }
@@ -591,12 +720,25 @@ impl App {
 
 #[cfg(windows)]
 impl App {
-    /// Keeper tick (the taskbar thread has already re-docked its windows): re-reads the theme,
-    /// which re-renders the tray icon too, and sends the strip again when it changed.
-    fn keep_taskbar(&mut self) {
-        let _span = log::span("keep_taskbar");
-        self.apply_strip();
-        self.sync_taskbar();
+    /// A fullscreen app opened or closed; the worker pauses or, on close, reads once.
+    fn on_fullscreen(&mut self, on: bool) {
+        log::trace(format_args!("game mode {}", if on { "on" } else { "off" }));
+        self.fullscreen = on;
+        self.send_power();
+    }
+
+    /// The power status changed; the worker hears of it only when AC or battery actually flipped.
+    fn on_power_changed(&mut self) {
+        let source = pause::current_power_source();
+        if source == self.power_source {
+            return;
+        }
+        log::trace(format_args!(
+            "power source {:?} -> {source:?}",
+            self.power_source
+        ));
+        self.power_source = source;
+        self.send_power();
     }
 
     /// Hands the strip to the taskbar thread, only when strip, theme or tooltip differ from
@@ -627,8 +769,11 @@ impl App {
     /// Opens the live menu (from a strip or tray click) on the menu thread, so this thread keeps
     /// running even when the menu's modal loop gets stuck on another process's hung window.
     fn show_menu(&self) {
-        // Opening the menu also refreshes; per-device floors still limit what is queried.
-        self.tell_worker(Command::RefreshNow);
+        // Opening the menu also refreshes unless a refresh just finished; per-device floors still
+        // limit what is queried.
+        if pause::menu_refresh_due(self.last_refresh, Instant::now()) {
+            self.tell_worker(Command::RefreshNow);
+        }
         crate::context_menu::show(self.entries(SystemTime::now()));
     }
 

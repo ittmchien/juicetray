@@ -33,6 +33,10 @@ const MESSAGE_RECT: [i16; 4] = [7, 7, 206, 26];
 const INPUT_RECT: [i16; 4] = [7, 38, 206, 14];
 const OK_RECT: [i16; 4] = [109, 62, 50, 14];
 const CANCEL_RECT: [i16; 4] = [163, 62, 50, 14];
+/// The confirm dialog has no input, so its buttons sit right under the message.
+const CONFIRM_RECT: [i16; 4] = [0, 0, 220, 58];
+const CONFIRM_OK_RECT: [i16; 4] = [109, 38, 50, 14];
+const CONFIRM_CANCEL_RECT: [i16; 4] = [163, 38, 50, 14];
 
 /// The colour dialog's 16 custom slots, kept for the session; white marks an unused slot.
 static CUSTOM_COLORS: Mutex<[COLORREF; 16]> = Mutex::new([COLORREF(0x00FF_FFFF); 16]);
@@ -76,6 +80,38 @@ pub fn prompt_text(title: &str, message: &str, default: &str) -> Option<String> 
         );
     }
     prompt.answer
+}
+
+/// A modal yes/no dialog with `ok_label` as the default button; Enter confirms, Esc and Cancel
+/// answer no. Blocks the calling thread, so callers run it off the event-loop thread.
+pub fn confirm(title: &str, message: &str, ok_label: &str) -> bool {
+    // SAFETY: a null module name asks for this executable's own handle, which never fails here.
+    let instance = match unsafe { GetModuleHandleW(None) } {
+        Ok(module) => HINSTANCE::from(module),
+        Err(error) => {
+            eprintln!("confirm dialog failed: {error}");
+            return false;
+        }
+    };
+    let template = confirm_template(title, message, ok_label);
+    // SAFETY: the template is DWORD-aligned and well formed; the dialog procedure reads no
+    // creation data.
+    let result = unsafe {
+        DialogBoxIndirectParamW(
+            Some(instance),
+            template.as_ptr().cast::<DLGTEMPLATE>(),
+            None,
+            Some(confirm_proc),
+            LPARAM(0),
+        )
+    };
+    if result == -1 {
+        eprintln!(
+            "confirm dialog failed: {}",
+            windows::core::Error::from_thread()
+        );
+    }
+    result == IDOK.0 as isize
 }
 
 /// The system colour dialog, opened in full (custom colour) form on `initial`; `None` when the
@@ -152,6 +188,31 @@ unsafe extern "system" fn dialog_proc(
     }
 }
 
+/// Closes the confirm dialog with the id of the button pressed (OK or Cancel).
+unsafe extern "system" fn confirm_proc(
+    dialog: HWND,
+    message: u32,
+    wparam: WPARAM,
+    _lparam: LPARAM,
+) -> isize {
+    match message {
+        // TRUE lets the dialog manager focus the first tab stop, the default button.
+        WM_INITDIALOG => 1,
+        WM_COMMAND => {
+            let id = i32::from(wparam.0 as u16);
+            if id != IDOK.0 && id != IDCANCEL.0 {
+                return 0;
+            }
+            // SAFETY: `dialog` is the live modal dialog.
+            if let Err(error) = unsafe { EndDialog(dialog, id as isize) } {
+                eprintln!("closing the confirm dialog failed: {error}");
+            }
+            1
+        }
+        _ => 0,
+    }
+}
+
 /// The input control's current text.
 fn input_text(dialog: HWND) -> String {
     // SAFETY: `dialog` is the live dialog; the buffer holds the text plus its terminator.
@@ -204,6 +265,44 @@ fn dialog_template(title: &str, message: &str) -> Vec<u32> {
     words.item(
         control | WS_TABSTOP | dialog_style(BS_PUSHBUTTON),
         CANCEL_RECT,
+        IDCANCEL.0 as u16,
+        BUTTON_CLASS,
+        "Cancel",
+    );
+    words.into_dwords()
+}
+
+/// An in-memory `DLGTEMPLATE` for the confirm dialog: caption, font, message, `ok_label` and Cancel.
+fn confirm_template(title: &str, message: &str, ok_label: &str) -> Vec<u32> {
+    let mut words = TemplateWords::default();
+    let style = WS_POPUP
+        | WS_CAPTION
+        | WS_SYSMENU
+        | dialog_style(DS_MODALFRAME | DS_SETFONT | DS_CENTER | DS_SETFOREGROUND);
+    words.dword(style.0);
+    words.dword(0);
+    let item_count = 3;
+    words.word(item_count);
+    words.rect(CONFIRM_RECT);
+    // No menu, default dialog class.
+    words.word(0);
+    words.word(0);
+    words.text(title);
+    words.word(FONT_POINTS);
+    words.text(FONT_FACE);
+
+    let control = WS_CHILD | WS_VISIBLE;
+    words.item(control, MESSAGE_RECT, MESSAGE_ID, STATIC_CLASS, message);
+    words.item(
+        control | WS_TABSTOP | dialog_style(BS_DEFPUSHBUTTON),
+        CONFIRM_OK_RECT,
+        IDOK.0 as u16,
+        BUTTON_CLASS,
+        ok_label,
+    );
+    words.item(
+        control | WS_TABSTOP | dialog_style(BS_PUSHBUTTON),
+        CONFIRM_CANCEL_RECT,
         IDCANCEL.0 as u16,
         BUTTON_CLASS,
         "Cancel",
@@ -278,6 +377,21 @@ mod tests {
         assert_eq!(words[4], 4);
         // The first item follows the header (11 fixed words, "Odd\0", point size, "Segoe UI\0"),
         // padded to an even word index, and begins with its style.
+        let header_words = 11 + 4 + 1 + 9;
+        let first_item = header_words + header_words % 2;
+        let style = u32::from(words[first_item]) | (u32::from(words[first_item + 1]) << 16);
+        assert_eq!(style, (WS_CHILD | WS_VISIBLE).0);
+    }
+
+    #[test]
+    fn confirm_template_has_three_aligned_items() {
+        let template = confirm_template("Odd", "x", "Turn on");
+        let words: Vec<u16> = template
+            .iter()
+            .flat_map(|dword| [*dword as u16, (dword >> 16) as u16])
+            .collect();
+        assert_eq!(words[4], 3);
+        // Same header as the text prompt: 11 fixed words, "Odd\0", point size, "Segoe UI\0".
         let header_words = 11 + 4 + 1 + 9;
         let first_item = header_words + header_words % 2;
         let style = u32::from(words[first_item]) | (u32::from(words[first_item + 1]) << 16);

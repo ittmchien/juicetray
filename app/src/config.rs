@@ -58,6 +58,8 @@ pub struct Config {
     pub devices: BTreeMap<String, DeviceConfig>,
     /// Hand-edited `VID:PID` entries that let unconfirmed receivers be queried; kept verbatim.
     pub allow: Vec<String>,
+    /// Keep auto-refreshing while a laptop runs on battery; off by default.
+    pub refresh_on_battery: bool,
 }
 
 impl Default for Config {
@@ -70,6 +72,7 @@ impl Default for Config {
             hide_offline_minutes: DEFAULT_HIDE_OFFLINE_MINUTES,
             devices: BTreeMap::new(),
             allow: Vec::new(),
+            refresh_on_battery: false,
         }
     }
 }
@@ -97,6 +100,10 @@ impl Config {
             ),
             devices: devices(&table),
             allow: string_items(&table, "allow"),
+            refresh_on_battery: table
+                .get("refresh_on_battery")
+                .and_then(Value::as_bool)
+                .unwrap_or(defaults.refresh_on_battery),
         }
     }
 
@@ -110,6 +117,10 @@ impl Config {
         table.insert(
             "low_battery_percent".into(),
             Value::Integer(self.low_battery_percent.map_or(0, i64::from)),
+        );
+        table.insert(
+            "refresh_on_battery".into(),
+            Value::Boolean(self.refresh_on_battery),
         );
         table.insert("hidden".into(), string_array(&self.hidden));
         table.insert("hidden_ids".into(), string_array(&self.hidden_ids));
@@ -479,8 +490,26 @@ mod tests {
             hide_offline_minutes: Some(30),
             devices: BTreeMap::new(),
             allow: vec!["373B:1204".into(), "junk".into()],
+            refresh_on_battery: true,
         };
         assert_eq!(Config::parse(&config.to_toml()), config);
+    }
+
+    #[test]
+    fn refresh_on_battery_defaults_off_and_round_trips() {
+        let flag = |text: &str| Config::parse(text).refresh_on_battery;
+        // An old file without the key, or a wrongly typed value, keeps the default.
+        assert!(!flag("refresh_seconds = 300"));
+        assert!(!flag("refresh_on_battery = \"yes\""));
+        assert!(flag("refresh_on_battery = true"));
+
+        let on = Config {
+            refresh_on_battery: true,
+            ..Config::default()
+        };
+        assert!(on.to_toml().contains("refresh_on_battery = true"));
+        assert!(Config::parse(&on.to_toml()).refresh_on_battery);
+        assert!(!Config::parse(&Config::default().to_toml()).refresh_on_battery);
     }
 
     #[test]

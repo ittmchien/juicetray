@@ -24,6 +24,7 @@ const CHECK_BATTERY_TEXT: &str = "Check battery now";
 const CUSTOM_REFRESH_ID: &str = "auto:custom";
 const CUSTOM_LOW_ID: &str = "low:custom";
 const CUSTOM_OFFLINE_ID: &str = "offline:custom";
+const REFRESH_ON_BATTERY_ID: &str = "refresh-battery";
 const ICON_AUTO: &str = "auto";
 const SECONDS_PER_MINUTE: u32 = 60;
 
@@ -101,6 +102,8 @@ pub enum MenuAction {
     SetHideOffline(Option<u32>),
     CustomHideOffline,
     ToggleStartAtLogin,
+    /// Turning it on is confirmed first; turning it off is not.
+    ToggleRefreshOnBattery,
     Quit,
 }
 
@@ -166,6 +169,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
     match id {
         "refresh" => return Some(MenuAction::Refresh),
         "login" => return Some(MenuAction::ToggleStartAtLogin),
+        REFRESH_ON_BATTERY_ID => return Some(MenuAction::ToggleRefreshOnBattery),
         "quit" => return Some(MenuAction::Quit),
         CUSTOM_REFRESH_ID => return Some(MenuAction::CustomRefresh),
         CUSTOM_LOW_ID => return Some(MenuAction::CustomLow),
@@ -234,11 +238,13 @@ pub fn listed_devices(devices: &[DeviceView]) -> impl Iterator<Item = &DeviceVie
         .filter(|device| device.connected || device.shown_percent().is_some())
 }
 
-/// The whole menu as plain data, rebuilt after every result or action.
+/// The whole menu as plain data, rebuilt after every result or action. `has_battery` shows the
+/// battery-refresh check, which means nothing on a machine without a battery.
 pub fn menu_entries(
     devices: &[DeviceView],
     config: &Config,
     login: LoginState,
+    has_battery: bool,
     now: SystemTime,
 ) -> Vec<MenuEntry> {
     let mut entries = device_entries(devices, config, now);
@@ -249,6 +255,15 @@ pub fn menu_entries(
         MenuEntry::separator(),
         MenuEntry::item("refresh", "Refresh now"),
         MenuEntry::submenu("Auto-refresh", refresh_entries(config.refresh_seconds)),
+    ]);
+    if has_battery {
+        entries.push(MenuEntry::check(
+            REFRESH_ON_BATTERY_ID.to_owned(),
+            "Refresh on battery power",
+            config.refresh_on_battery,
+        ));
+    }
+    entries.extend([
         MenuEntry::submenu(
             "Low-battery alert",
             choice_entries_with_custom(
@@ -632,7 +647,51 @@ mod tests {
     }
 
     fn entries(devices: &[DeviceView], config: &Config, login: LoginState) -> Vec<MenuEntry> {
-        menu_entries(devices, config, login, SystemTime::UNIX_EPOCH)
+        menu_entries(devices, config, login, false, SystemTime::UNIX_EPOCH)
+    }
+
+    #[test]
+    fn battery_refresh_item_shows_only_with_a_battery() {
+        let on = Config {
+            refresh_on_battery: true,
+            ..Config::default()
+        };
+        let find = |config: &Config, has_battery| {
+            menu_entries(
+                &[],
+                config,
+                LoginState::Disabled,
+                has_battery,
+                SystemTime::UNIX_EPOCH,
+            )
+            .into_iter()
+            .find(|e| e.id.as_deref() == Some(REFRESH_ON_BATTERY_ID))
+        };
+        assert!(find(&on, false).is_none());
+        let item = find(&on, true).unwrap();
+        assert_eq!(item.text, "Refresh on battery power");
+        assert_eq!(item.checked, Some(true));
+        assert_eq!(find(&Config::default(), true).unwrap().checked, Some(false));
+        assert_eq!(
+            action_for(REFRESH_ON_BATTERY_ID),
+            Some(MenuAction::ToggleRefreshOnBattery)
+        );
+    }
+
+    #[test]
+    fn battery_refresh_item_sits_right_after_auto_refresh() {
+        let entries = menu_entries(
+            &[],
+            &Config::default(),
+            LoginState::Disabled,
+            true,
+            SystemTime::UNIX_EPOCH,
+        );
+        let auto = entries
+            .iter()
+            .position(|e| e.text == "Auto-refresh")
+            .unwrap();
+        assert_eq!(entries[auto + 1].id.as_deref(), Some(REFRESH_ON_BATTERY_ID));
     }
 
     fn child<'a>(entry: &'a MenuEntry, text: &str) -> &'a MenuEntry {
@@ -982,8 +1041,17 @@ mod tests {
         assert_eq!(child(auto, "Custom… (1h30m)").checked, Some(true));
 
         let quick = Config::default();
-        let entries = menu_entries(&[], &quick, LoginState::Disabled, SystemTime::UNIX_EPOCH);
-        let auto = entries.iter().find(|e| e.text == "Auto-refresh").unwrap();
+        let quick_entries = menu_entries(
+            &[],
+            &quick,
+            LoginState::Disabled,
+            false,
+            SystemTime::UNIX_EPOCH,
+        );
+        let auto = quick_entries
+            .iter()
+            .find(|e| e.text == "Auto-refresh")
+            .unwrap();
         assert_eq!(child(auto, "Custom…").checked, Some(false));
     }
 

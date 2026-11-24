@@ -2,10 +2,13 @@
 //! It runs on its own "taskbar" thread: a child of Explorer's taskbar attaches its thread's input
 //! queue to Explorer's, so that thread does no modal UI and the app's menus and dialogs stay on
 //! the main thread, where a stuck menu loop cannot freeze the taskbar.
+//! The thread's hidden top-level keeper window also hears the system's own events: theme changes,
+//! power-status changes and fullscreen apps (as an appbar that never reserves space).
 
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -28,20 +31,25 @@ use windows::Win32::UI::Controls::{
     TTM_ADDTOOLW, TTM_DELTOOLW, TTM_SETMAXTIPWIDTH, TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Shell::{
+    ABM_NEW, ABM_REMOVE, ABN_FULLSCREENAPP, APPBARDATA, SHAppBarMessage,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowExW,
     FindWindowW, GW_HWNDPREV, GetClientRect, GetMessageW, GetWindow, GetWindowRect, HWND_TOP,
-    IsWindow, IsWindowVisible, MA_NOACTIVATE, MSG, PostMessageW, RegisterClassExW, SW_HIDE,
-    SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW,
-    SetTimer, SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA, UpdateLayeredWindow,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_RBUTTONUP, WM_TIMER,
+    IsWindow, IsWindowVisible, MA_NOACTIVATE, MSG, PBT_APMPOWERSTATUSCHANGE, PostMessageW,
+    RegisterClassExW, RegisterWindowMessageW, SW_HIDE, SWP_NOACTIVATE, SWP_NOSENDCHANGING,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW, SetTimer, SetWindowPos, ShowWindow,
+    TranslateMessage, ULW_ALPHA, UpdateLayeredWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
+    WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_POWERBROADCAST, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
     WNDCLASSEXW, WNDPROC, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_NOACTIVATE,
     WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
+use crate::pause::PowerSource;
 use crate::watchdog::{self, Watched};
-use crate::{log, ui_font};
+use crate::{log, pause, theme, ui_font};
 
 use super::layout::{
     Placement, Rect, natural_container, place_secondary_strip, place_strip, placement_stale,
@@ -58,12 +66,29 @@ const TOOLTIP_TOOL_ID: usize = 1;
 const TOOLTIP_MAX_WIDTH_PX: isize = 600;
 /// Posted to the keeper window after a command is queued, so the taskbar thread wakes for it.
 const WAKE_MESSAGE: u32 = WM_APP + 1;
+/// The appbar notification the shell sends the keeper window (`ABN_*` code in `wParam`).
+const APPBAR_CALLBACK: u32 = WM_APP + 2;
+/// `WM_SETTINGCHANGE`'s `lParam` names the changed setting; this one is the light/dark theme.
+const THEME_SETTING: &str = "ImmersiveColorSet";
 
-/// What a window procedure tells the event loop.
+/// A fullscreen app has the screen: the keeper tick and strip painting stand still.
+static FULLSCREEN: AtomicBool = AtomicBool::new(false);
+/// The theme last seen, so a settings broadcast that did not change it wakes nobody.
+static DARK_THEME: AtomicBool = AtomicBool::new(false);
+/// Whether the laptop was last seen on battery, for the same reason.
+static ON_BATTERY: AtomicBool = AtomicBool::new(false);
+/// Id of the "TaskbarCreated" broadcast Explorer sends after a restart; 0 until registered.
+static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+
+/// What a window procedure tells the event loop; each one is sent only on a real change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
-    /// The 2 s keeper timer fired.
-    KeeperTick,
+    /// The light/dark theme changed.
+    ThemeChanged,
+    /// A fullscreen app opened (`true`) or closed (`false`).
+    Fullscreen(bool),
+    /// The laptop switched between AC and battery power.
+    PowerChanged,
     /// The strip was clicked with the left or right button.
     Click,
 }
@@ -229,6 +254,8 @@ fn run_taskbar_thread(
     // The keeper timer beats every 2 s on this thread, so silence means a hang here.
     watchdog::watch_current(Watched::Taskbar);
     let mut content: Option<StripContent> = None;
+    // Content that arrived but is not painted yet, because a fullscreen app had the screen.
+    let mut unpainted = false;
     // The status-bar font per (taskbar DPI, strip height) it was read for.
     let mut texts: HashMap<(u32, u32), TextStyle> = HashMap::new();
     let mut message = MSG::default();
@@ -236,27 +263,37 @@ fn run_taskbar_thread(
     while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {
         if message.hwnd == keeper {
             if message.message == WM_TIMER && message.wParam.0 == KEEPER_TIMER_ID {
+                // The beat stays on during game mode, so the watchdog keeps seeing a live thread.
                 watchdog::beat(Watched::Taskbar);
-                if let Some(content) = &content {
+                // Re-docking and re-rendering are the whole tick; the theme arrives as an event.
+                if !FULLSCREEN.load(Ordering::Relaxed)
+                    && let Some(content) = &content
+                {
                     strip.keep(&mut |height, dpi| render(content, &mut texts, height, dpi));
                 }
-                // The app re-reads the theme and sends new content when it changed.
-                notify(Signal::KeeperTick);
                 continue;
             }
             if message.message == WAKE_MESSAGE {
                 for command in commands.try_iter() {
                     match command {
                         Command::Show(shown) => {
-                            strip.show(
-                                &mut |height, dpi| render(&shown, &mut texts, height, dpi),
-                                &shown.tooltip,
-                            );
                             content = Some(shown);
+                            unpainted = true;
                         }
                         // Dropping `strip` restores the containers; thread exit destroys the keeper.
                         Command::Stop => return,
                     }
+                }
+                // Also posted when a fullscreen app closes, which paints what arrived meanwhile.
+                if unpainted
+                    && !FULLSCREEN.load(Ordering::Relaxed)
+                    && let Some(shown) = &content
+                {
+                    strip.show(
+                        &mut |height, dpi| render(shown, &mut texts, height, dpi),
+                        &shown.tooltip,
+                    );
+                    unpainted = false;
                 }
                 continue;
             }
@@ -345,6 +382,19 @@ impl TaskbarStrip {
             let _ = unsafe { DestroyWindow(keeper) };
             bail!("SetTimer failed: {}", windows::core::Error::from_thread());
         }
+        // Start-up state of what the keeper window then keeps current by events.
+        FULLSCREEN.store(pause::fullscreen_now(), Ordering::Relaxed);
+        DARK_THEME.store(theme::system_theme() == Theme::Dark, Ordering::Relaxed);
+        ON_BATTERY.store(
+            pause::current_power_source() == PowerSource::Battery,
+            Ordering::Relaxed,
+        );
+        // SAFETY: the name is a static literal; 0 (failure) leaves the restart hook off.
+        TASKBAR_CREATED.store(
+            unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
+            Ordering::Relaxed,
+        );
+        register_appbar(keeper);
         Ok(Self {
             instance,
             keeper,
@@ -465,6 +515,7 @@ impl Drop for TaskbarStrip {
     /// Explorer keeps a shrunk task-button container until its next layout, so give it back.
     fn drop(&mut self) {
         self.hide();
+        appbar_message(ABM_REMOVE, self.keeper);
     }
 }
 
@@ -845,15 +896,99 @@ unsafe extern "system" fn strip_proc(
     }
 }
 
-/// Keeper window: its timer and wake messages are handled in the taskbar thread's loop.
+/// Keeper window: its timer and wake messages are handled in the taskbar thread's loop; the
+/// system's broadcasts and the appbar callback arrive here, sent or posted, and each tells the
+/// event loop only when something really changed.
 unsafe extern "system" fn keeper_proc(
     hwnd: HWND,
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    match message {
+        APPBAR_CALLBACK => {
+            if wparam.0 == ABN_FULLSCREENAPP as usize {
+                set_fullscreen(hwnd, lparam.0 != 0);
+            }
+            return LRESULT(0);
+        }
+        WM_SETTINGCHANGE if is_theme_setting(lparam) => notify_theme_if_changed(),
+        WM_POWERBROADCAST if wparam.0 == PBT_APMPOWERSTATUSCHANGE as usize => {
+            notify_power_if_changed();
+        }
+        // Explorer restarted and forgot the appbar registration.
+        _ if message != 0 && message == TASKBAR_CREATED.load(Ordering::Relaxed) => {
+            register_appbar(hwnd);
+        }
+        _ => {}
+    }
     // SAFETY: forwards the unchanged message arguments of this window procedure.
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+}
+
+/// Records a fullscreen change; the change back to normal also wakes the thread's loop, which
+/// paints what arrived during game mode.
+fn set_fullscreen(keeper: HWND, on: bool) {
+    if FULLSCREEN.swap(on, Ordering::Relaxed) == on {
+        return;
+    }
+    notify(Signal::Fullscreen(on));
+    if !on {
+        // SAFETY: posting only queues a message to a window of this thread.
+        if let Err(error) =
+            unsafe { PostMessageW(Some(keeper), WAKE_MESSAGE, WPARAM(0), LPARAM(0)) }
+        {
+            eprintln!("waking the taskbar thread failed: {error}");
+        }
+    }
+}
+
+/// Whether a `WM_SETTINGCHANGE` names the theme setting.
+fn is_theme_setting(lparam: LPARAM) -> bool {
+    let name = lparam.0 as *const u16;
+    if name.is_null() {
+        return false;
+    }
+    // SAFETY: for this message `lParam` is null or a NUL-terminated string valid during the call.
+    unsafe { PCWSTR(name).to_string() }.is_ok_and(|name| name == THEME_SETTING)
+}
+
+/// Tells the event loop about a theme that differs from the one last seen.
+fn notify_theme_if_changed() {
+    let dark = theme::system_theme() == Theme::Dark;
+    if DARK_THEME.swap(dark, Ordering::Relaxed) != dark {
+        notify(Signal::ThemeChanged);
+    }
+}
+
+/// Tells the event loop when the laptop flips between AC and battery; the status event also
+/// fires for every battery-level step, which must wake nobody.
+fn notify_power_if_changed() {
+    let on_battery = pause::current_power_source() == PowerSource::Battery;
+    if ON_BATTERY.swap(on_battery, Ordering::Relaxed) != on_battery {
+        notify(Signal::PowerChanged);
+    }
+}
+
+/// Registers the keeper as an appbar so the shell reports fullscreen apps to it. No position is
+/// ever set, so it reserves no screen space.
+fn register_appbar(keeper: HWND) {
+    if !appbar_message(ABM_NEW, keeper) {
+        eprintln!("appbar registration failed; game mode only follows the state at start");
+    }
+}
+
+/// Sends `ABM_NEW` or `ABM_REMOVE` for the keeper; the result is the shell's success flag.
+fn appbar_message(message: u32, keeper: HWND) -> bool {
+    let mut data = APPBARDATA {
+        cbSize: size_of::<APPBARDATA>() as u32,
+        hWnd: keeper,
+        uCallbackMessage: APPBAR_CALLBACK,
+        ..Default::default()
+    };
+    // SAFETY: `data` is initialised with its own size and outlives the call; the shell only
+    // reads it for these two messages.
+    unsafe { SHAppBarMessage(message, &mut data) != 0 }
 }
 
 /// (strip height px, DPI) for `taskbar`'s own monitor, or `None` while it cannot be measured.
