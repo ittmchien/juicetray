@@ -6,20 +6,30 @@ use crate::scan::redact_path;
 const NEW_ISSUE_URL: &str = "https://github.com/ittmchien/juicetray/issues/new";
 /// Longest prefilled URL; GitHub and browsers refuse much longer ones.
 pub const MAX_URL_LEN: usize = 7000;
+/// Ends a body cut to fit the URL, so the owner knows the full text is on the clipboard path.
+const TRUNCATED: &str = "…(truncated, use Copy)";
 
-/// The new-issue page with `title` and `body` filled in, percent-encoded. The body is cut a whole
-/// encoded character at a time, so the URL stays within `MAX_URL_LEN` and never ends inside a
-/// `%XX` escape or a multi-byte character.
+/// The new-issue page with `title` and `body` filled in, percent-encoded. A body too long is cut
+/// a whole encoded character at a time and ends with `TRUNCATED`, so the URL stays within
+/// `MAX_URL_LEN` and never ends inside a `%XX` escape or a multi-byte character.
 pub fn issue_url(title: &str, body: &str) -> String {
     let mut url = format!("{NEW_ISSUE_URL}?title={}&body=", encode(title));
+    let whole = encode(body);
+    if url.len() + whole.len() <= MAX_URL_LEN {
+        url.push_str(&whole);
+        return url;
+    }
+    let note = encode(TRUNCATED);
+    let limit = MAX_URL_LEN.saturating_sub(note.len());
     let mut buffer = [0u8; 4];
     for character in body.chars() {
         let piece = encode(character.encode_utf8(&mut buffer));
-        if url.len() + piece.len() > MAX_URL_LEN {
+        if url.len() + piece.len() > limit {
             break;
         }
         url.push_str(&piece);
     }
+    url.push_str(&note);
     url
 }
 
@@ -82,11 +92,12 @@ impl Identity {
 pub fn redact(text: &str, identity: &Identity) -> String {
     let mut text = redact_device_paths(text);
     for profile in &identity.profiles {
-        text = replace_ignoring_case(&text, profile, "%USERPROFILE%");
+        text = replace_ignoring_case(&text, profile, "%USERPROFILE%", false);
     }
     text = redact_users_folders(&text);
+    // Whole words only: a short computer name also spells hex digits inside ids and bytes.
     if let Some(computer) = &identity.computer {
-        text = replace_ignoring_case(&text, computer, "<pc>");
+        text = replace_ignoring_case(&text, computer, "<pc>", true);
     }
     redact_addresses(&text)
 }
@@ -107,7 +118,8 @@ fn redact_device_paths(text: &str) -> String {
     out
 }
 
-/// `<drive>:\Users\<name>` in any spelling (an 8.3 short name too) becomes `%USERPROFILE%`.
+/// `<drive>:\Users\<name>` in any spelling (an 8.3 short name too) becomes `%USERPROFILE%`. A
+/// name may hold spaces, so it runs to the next separator, quote or line end.
 fn redact_users_folders(text: &str) -> String {
     const USERS: &str = r":\users\";
     let lower = text.to_ascii_lowercase();
@@ -121,7 +133,7 @@ fn redact_users_folders(text: &str) -> String {
             continue;
         }
         let name_end = text[from..]
-            .find(|c: char| matches!(c, '\\' | '/' | '"' | '\'') || c.is_whitespace())
+            .find(['\\', '/', '"', '\'', '\n', '\r'])
             .map_or(text.len(), |end| from + end);
         out.push_str(&text[copied..found - 1]);
         out.push_str("%USERPROFILE%");
@@ -164,18 +176,24 @@ fn redact_addresses(text: &str) -> String {
     out
 }
 
-/// Replaces every ASCII-case-insensitive match of `needle`.
-fn replace_ignoring_case(text: &str, needle: &str, with: &str) -> String {
+/// Replaces every ASCII-case-insensitive match of `needle`; with `whole_word`, only matches no
+/// ASCII letter or digit touches on either side.
+fn replace_ignoring_case(text: &str, needle: &str, with: &str, whole_word: bool) -> String {
     if needle.is_empty() {
         return text.to_owned();
     }
     // ASCII lowering keeps every byte offset, so matches map back onto `text`.
     let lower = text.to_ascii_lowercase();
     let needle = needle.to_ascii_lowercase();
+    let is_word_byte = |at: Option<usize>| {
+        at.and_then(|at| lower.as_bytes().get(at))
+            .is_some_and(u8::is_ascii_alphanumeric)
+    };
     let mut out = String::with_capacity(text.len());
     let mut copied = 0;
     for (at, _) in lower.match_indices(&needle) {
-        if at < copied {
+        let inside_word = is_word_byte(at.checked_sub(1)) || is_word_byte(Some(at + needle.len()));
+        if at < copied || (whole_word && inside_word) {
             continue;
         }
         out.push_str(&text[copied..at]);
@@ -248,11 +266,39 @@ mod tests {
         let long = "đ".repeat(5000);
         let url = issue_url("t", &long);
         assert!(url.len() <= MAX_URL_LEN);
-        // Each `đ` is two escapes; the cut never leaves half of one.
+        // A cut body says so; each `đ` is two escapes and the cut never leaves half of one.
         let body = url.split("&body=").nth(1).unwrap();
+        let body = body
+            .strip_suffix(&encode(TRUNCATED))
+            .expect("truncation note");
         assert_eq!(body.len() % 6, 0);
-        assert!(body.len() > MAX_URL_LEN - 100);
+        assert!(body.len() > MAX_URL_LEN - 150);
         let short = issue_url("t", "x");
         assert!(short.ends_with("&body=x"));
+        // A body that just fits gets no note.
+        let fits = "x".repeat(MAX_URL_LEN - issue_url("t", "").len());
+        assert_eq!(issue_url("t", &fits).len(), MAX_URL_LEN);
+        assert!(issue_url("t", &fits).ends_with('x'));
+    }
+
+    #[test]
+    fn profile_names_with_spaces_and_short_computer_names() {
+        let other_user = redact(
+            "log C:\\Users\\John Smith\\AppData\\x.log\nnext C:\\Users\\Ann\nInterfaces:",
+            &Identity::default(),
+        );
+        assert_eq!(
+            other_user,
+            "log %USERPROFILE%\\AppData\\x.log\nnext %USERPROFILE%\nInterfaces:"
+        );
+        // A short computer name is replaced as a word, never inside hex.
+        let short = Identity {
+            profiles: Vec::new(),
+            computer: Some("AB12".into()),
+        };
+        assert_eq!(
+            redact("bytes 0xFFAB12 AB12CD on ab12.", &short),
+            "bytes 0xFFAB12 AB12CD on <pc>."
+        );
     }
 }

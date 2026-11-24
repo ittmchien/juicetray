@@ -122,9 +122,10 @@ pub enum UserEvent {
     /// The Add device window closed; waiting popups may show.
     #[cfg(windows)]
     AddDeviceClosed,
-    /// The owner pressed [Add] in the Add device window: this thread writes the config.
+    /// The owner pressed [Add] in the Add device window: this thread writes the config and
+    /// answers on the sender, so the window never says "added" for a failed save.
     #[cfg(windows)]
-    AddDevice(add_device::AddRequest),
+    AddDevice(add_device::AddRequest, Sender<Result<(), String>>),
 }
 
 impl UserEvent {
@@ -168,7 +169,7 @@ impl UserEvent {
             #[cfg(windows)]
             Self::AddDeviceClosed => "AddDeviceClosed",
             #[cfg(windows)]
-            Self::AddDevice(_) => "AddDevice",
+            Self::AddDevice(..) => "AddDevice",
         }
     }
 }
@@ -488,8 +489,8 @@ impl App {
             }
             // The next read shows the device; its row changes the screen then.
             #[cfg(windows)]
-            UserEvent::AddDevice(request) => {
-                self.add_device(request);
+            UserEvent::AddDevice(request, reply) => {
+                self.add_device(request, &reply);
                 return ControlFlow::Wait;
             }
         }
@@ -613,17 +614,19 @@ impl App {
     #[cfg(not(windows))]
     fn open_add_device(&self, _id: Option<(u16, u16)>) {}
 
-    /// Saves what the owner added (catalogue id to `allow`, other ids to `custom_devices`) and
-    /// reads at once, so the device shows up.
+    /// Saves what the owner added (catalogue id to `allow`, other ids to `custom_devices`), tells
+    /// the window how the save went and reads at once, so the device shows up.
     #[cfg(windows)]
-    fn add_device(&mut self, request: add_device::AddRequest) {
+    fn add_device(&mut self, request: add_device::AddRequest, reply: &Sender<Result<(), String>>) {
         let saved = match request {
             add_device::AddRequest::Allow((vid, pid)) => self.config.allow_and_save(vid, pid),
             add_device::AddRequest::Custom(entry) => self.config.add_custom_and_save(entry),
         };
-        if let Err(error) = saved {
+        if let Err(error) = &saved {
             log::line(&format!("saving an added device failed: {error:#}"));
         }
+        // A closed window no longer waits for the answer.
+        let _ = reply.send(saved.map_err(|error| format!("{error:#}")));
         self.tell_worker(Command::RefreshNow);
     }
 

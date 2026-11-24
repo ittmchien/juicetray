@@ -2,13 +2,14 @@
 //! that shows the flow's view and feeds it buttons, its timer and its own plug-in events. Device
 //! work goes to the refresh worker; the answer comes back on a channel the timer checks.
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use tao::event_loop::EventLoopProxy;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::EM_SETSEL;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -16,10 +17,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CBN_SELCHANGE, CBS_DROPDOWNLIST, DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE, DLGTEMPLATE,
     DialogBoxIndirectParamW, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, EndDialog,
     GWLP_USERDATA, GetDlgItem, GetDlgItemTextW, GetWindowLongPtrW, GetWindowTextLengthW, IDCANCEL,
-    IDOK, KillTimer, PostMessageW, SW_HIDE, SW_SHOW, SendDlgItemMessageW, SetDlgItemTextW,
-    SetForegroundWindow, SetTimer, SetWindowLongPtrW, ShowWindow, WINDOW_STYLE, WM_APP, WM_COMMAND,
-    WM_COPY, WM_DESTROY, WM_DEVICECHANGE, WM_INITDIALOG, WM_TIMER, WS_BORDER, WS_CHILD, WS_TABSTOP,
-    WS_VISIBLE, WS_VSCROLL,
+    IDOK, KillTimer, MapDialogRect, PostMessageW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
+    SendDlgItemMessageW, SetDlgItemTextW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_COPY, WM_DESTROY,
+    WM_DEVICECHANGE, WM_INITDIALOG, WM_TIMER, WS_BORDER, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
+    WS_VSCROLL,
 };
 use windows::core::HSTRING;
 
@@ -70,6 +72,10 @@ const NAME_LABEL_RECT: [i16; 4] = [7, 114, 44, 10];
 const NAME_RECT: [i16; 4] = [54, 112, 199, 14];
 const DETAILS_RECT: [i16; 4] = [7, 58, 246, 68];
 const PRIMARY_RECT: [i16; 4] = [55, 132, 62, 14];
+/// The primary button over the [Alt] button's room, for a label `PRIMARY_RECT` cannot hold.
+const PRIMARY_WIDE_RECT: [i16; 4] = [55, 132, 146, 14];
+/// Longest primary label `PRIMARY_RECT` holds ("Try in 10 s").
+const SHORT_LABEL: usize = 12;
 const ALT_RECT: [i16; 4] = [121, 132, 80, 14];
 const CLOSE_RECT: [i16; 4] = [205, 132, 48, 14];
 
@@ -95,10 +101,16 @@ pub fn is_open() -> bool {
 /// `UserEvent::AddDeviceClosed` when it closes. While it is open, a call focuses it and hands
 /// the id over.
 pub fn open(proxy: EventLoopProxy<UserEvent>, worker: Sender<Command>, id: Option<Id>) {
-    if let Some(id) = id {
-        *HANDOVER.lock().unwrap_or_else(PoisonError::into_inner) = Some(id);
-    }
-    if OPEN.swap(true, Ordering::Relaxed) {
+    // OPEN is read under the HANDOVER lock the closing thread holds while it clears both, so an
+    // id handed over after that clear starts a new window instead of waiting in the slot.
+    let running = {
+        let mut handover = HANDOVER.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(id) = id {
+            *handover = Some(id);
+        }
+        OPEN.swap(true, Ordering::Relaxed)
+    };
+    if running {
         let window = WINDOW.load(Ordering::Relaxed);
         // A window still starting takes the id at WM_INITDIALOG instead.
         if window != 0 {
@@ -122,11 +134,12 @@ pub fn open(proxy: EventLoopProxy<UserEvent>, worker: Sender<Command>, id: Optio
         .name("add device".into())
         .spawn(move || {
             run(proxy.clone(), worker);
-            HANDOVER
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take();
-            OPEN.store(false, Ordering::Relaxed);
+            // Cleared together under the lock `open` takes, so it sees both or neither.
+            {
+                let mut handover = HANDOVER.lock().unwrap_or_else(PoisonError::into_inner);
+                handover.take();
+                OPEN.store(false, Ordering::Relaxed);
+            }
             // A closed event loop means the app is exiting.
             let _ = proxy.send_event(UserEvent::AddDeviceClosed);
         });
@@ -140,6 +153,8 @@ pub fn open(proxy: EventLoopProxy<UserEvent>, worker: Sender<Command>, id: Optio
 enum Pending {
     Inspect(Receiver<Inspection>),
     Try(Receiver<TryOutcome>),
+    /// The UI thread's config save after [Add].
+    Save(Receiver<Result<(), String>>),
 }
 
 /// What the dialog procedure works on; it lives on the thread's stack for the modal call.
@@ -233,9 +248,19 @@ impl Session {
                     self.handle(dialog, Event::Tried(TryOutcome::Failed(stopped())));
                 }
             }
-            // A closed event loop means the app is exiting.
+            // The UI thread answers with the save result; a closed event loop means the app is
+            // exiting, so nothing was saved.
             Effect::Add(request) => {
-                let _ = self.proxy.send_event(UserEvent::AddDevice(request));
+                let (reply, answer) = mpsc::channel();
+                if self
+                    .proxy
+                    .send_event(UserEvent::AddDevice(request, reply))
+                    .is_ok()
+                {
+                    self.pending = Some(Pending::Save(answer));
+                } else {
+                    self.handle(dialog, Event::Saved(Err(app_closing())));
+                }
             }
             Effect::Copy => {
                 // The details box holds the full text: select it all and copy it.
@@ -250,23 +275,31 @@ impl Session {
         }
     }
 
-    /// Takes the worker's reply when it is in; a dropped sender counts as a failure.
-    fn poll(&mut self, dialog: HWND) {
+    /// Takes the worker's (or the save's) reply when it is in, true then; a dropped sender
+    /// counts as a failure.
+    fn poll(&mut self, dialog: HWND) -> bool {
         let event = match &self.pending {
             Some(Pending::Inspect(answer)) => match answer.try_recv() {
                 Ok(inspection) => Event::Inspected(inspection),
-                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Empty) => return false,
                 Err(TryRecvError::Disconnected) => Event::Inspected(Inspection::Failed(stopped())),
             },
+            // A worker gone mid-try gave no answer to report: it failed, not "no reply".
             Some(Pending::Try(answer)) => match answer.try_recv() {
                 Ok(outcome) => Event::Tried(outcome),
-                Err(TryRecvError::Empty) => return,
-                Err(TryRecvError::Disconnected) => Event::Tried(TryOutcome::NoReply),
+                Err(TryRecvError::Empty) => return false,
+                Err(TryRecvError::Disconnected) => Event::Tried(TryOutcome::Failed(stopped())),
             },
-            None => return,
+            Some(Pending::Save(answer)) => match answer.try_recv() {
+                Ok(saved) => Event::Saved(saved),
+                Err(TryRecvError::Empty) => return false,
+                Err(TryRecvError::Disconnected) => Event::Saved(Err(app_closing())),
+            },
+            None => return false,
         };
         self.pending = None;
         self.handle(dialog, event);
+        true
     }
 
     /// Shows the flow's view and sets the timer to its next tick.
@@ -334,13 +367,39 @@ fn stopped() -> String {
     "the reader has stopped".to_owned()
 }
 
-/// Routes the dialog's messages to its `Session`.
+fn app_closing() -> String {
+    "Juicetray is closing".to_owned()
+}
+
+thread_local! {
+    /// Set while a message handler holds the `Session`.
+    static IN_HANDLER: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Routes the dialog's messages to its `Session`. A message sent from inside a handler (the
+/// name box's EN_CHANGE while `render` sets its text, say) gets the default answer: taking a
+/// second `&mut Session` then would alias the one the handler holds.
 unsafe extern "system" fn window_proc(
     dialog: HWND,
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> isize {
+    if IN_HANDLER.replace(true) {
+        return 0;
+    }
+    // SAFETY: the dialog manager calls this for the Add device dialog on its own thread, and the
+    // flag above keeps `on_message` from running nested.
+    let answer = unsafe { on_message(dialog, message, wparam, lparam) };
+    IN_HANDLER.set(false);
+    answer
+}
+
+/// The dialog procedure proper.
+///
+/// # Safety
+/// Only for the Add device dialog's messages on its thread, never nested.
+unsafe fn on_message(dialog: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> isize {
     if message == WM_INITDIALOG {
         // SAFETY: `lparam` is the `Session` pointer handed to DialogBoxIndirectParamW, valid
         // until it returns; the window keeps it for later messages.
@@ -381,9 +440,11 @@ unsafe extern "system" fn window_proc(
             }
             1
         }
+        // A reply that came in already rendered the new step; a tick then would render it twice.
         WM_TIMER if wparam.0 == TIMER_ID => {
-            session.poll(dialog);
-            session.handle(dialog, Event::Tick);
+            if !session.poll(dialog) {
+                session.handle(dialog, Event::Tick);
+            }
             1
         }
         WM_DEVICECHANGE => {
@@ -436,12 +497,20 @@ fn render(dialog: HWND, view: &View, shown: Option<&View>) {
         set_text(dialog, DETAILS_ID, &text.replace('\n', "\r\n"));
         show(dialog, DETAILS_ID, view.details.is_some());
     }
-    if changed(&|old| old.primary != view.primary) {
-        set_text(
+    if changed(&|old| old.primary != view.primary || old.alt != view.alt) {
+        let label = view.primary.as_deref().unwrap_or_default();
+        // A long label (the receiver confirmation) takes the hidden [Alt] button's room too.
+        let wide = view.alt.is_none() && label.chars().count() > SHORT_LABEL;
+        place(
             dialog,
             IDOK.0 as u16,
-            view.primary.as_deref().unwrap_or_default(),
+            if wide {
+                PRIMARY_WIDE_RECT
+            } else {
+                PRIMARY_RECT
+            },
         );
+        set_text(dialog, IDOK.0 as u16, label);
         show(dialog, IDOK.0 as u16, view.primary.is_some());
     }
     if changed(&|old| old.alt != view.alt) {
@@ -500,6 +569,32 @@ fn set_text(dialog: HWND, id: u16, text: &str) {
         log::trace(format_args!(
             "add device: control {id} text not set: {error}"
         ));
+    }
+}
+
+/// Moves control `id` to `[x, y, width, height]` in dialog units.
+fn place(dialog: HWND, id: u16, [x, y, width, height]: [i16; 4]) {
+    let mut rect = RECT {
+        left: x.into(),
+        top: y.into(),
+        right: (x + width).into(),
+        bottom: (y + height).into(),
+    };
+    // SAFETY: `dialog` is the live dialog; a missing control or failed mapping leaves it as is.
+    unsafe {
+        if MapDialogRect(dialog, &mut rect).is_ok()
+            && let Ok(control) = GetDlgItem(Some(dialog), i32::from(id))
+        {
+            let _ = SetWindowPos(
+                control,
+                None,
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
     }
 }
 

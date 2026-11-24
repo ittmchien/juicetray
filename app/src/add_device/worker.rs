@@ -106,7 +106,8 @@ pub fn try_as((vid, pid): Id, family: Family) -> TryOutcome {
             return TryOutcome::Failed(format!("could not record the query time ({cause})"));
         }
     }
-    let exchange = match Door::new(1).send_as(&mut target, family) {
+    let mut door = Door::new(1);
+    let exchange = match door.send_as(&mut target, family) {
         Ok(exchange) => exchange,
         Err(error) => {
             log::line(&format!(
@@ -116,7 +117,13 @@ pub fn try_as((vid, pid): Id, family: Family) -> TryOutcome {
             if door::present(&[(vid, pid)]).is_empty() {
                 return TryOutcome::Gone;
             }
-            return TryOutcome::Failed(format!("{error:#}"));
+            // The door spends its budget right before the write, so a spent budget means the
+            // query went out (or may have); an unspent one means a refusal before any I/O.
+            return if door.writes_left() == 0 {
+                TryOutcome::Interrupted(format!("{error:#}"))
+            } else {
+                TryOutcome::Failed(format!("{error:#}"))
+            };
         }
     };
     let outcome = match exchange.reply {

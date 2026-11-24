@@ -324,9 +324,7 @@ impl Config {
 
     /// The file's device keys (hand edits win) with `entry` in place of any entry naming its id.
     fn add_custom_and_save_to(&mut self, path: &Path, entry: CustomEntry) -> Result<()> {
-        if let Ok(text) = fs::read_to_string(path) {
-            self.take_device_lists(Self::parse(&text));
-        }
+        self.take_file_device_lists(path)?;
         let id = parse_vid_pid(&entry.id).ok();
         self.custom_devices
             .retain(|old| id.is_none() || parse_vid_pid(&old.id).ok() != id);
@@ -356,9 +354,7 @@ impl Config {
         vid: u16,
         pid: u16,
     ) -> Result<()> {
-        if let Ok(text) = fs::read_to_string(path) {
-            self.take_device_lists(Self::parse(&text));
-        }
+        self.take_file_device_lists(path)?;
         if !add_id(list(self), vid, pid) {
             return Ok(());
         }
@@ -369,10 +365,24 @@ impl Config {
     /// in-memory ones.
     fn save_to(&self, path: &Path) -> Result<()> {
         let mut config = self.clone();
-        if let Ok(text) = fs::read_to_string(path) {
-            config.take_device_lists(Self::parse(&text));
-        }
+        config.take_file_device_lists(path)?;
         write_atomically(path, &config.to_toml())
+    }
+
+    /// Takes the device keys of the file at `path` (none when it is missing). A file that is not
+    /// valid TOML is an error: parsing it would give empty lists, and the write would erase them.
+    fn take_file_device_lists(&mut self, path: &Path) -> Result<()> {
+        let Ok(text) = fs::read_to_string(path) else {
+            return Ok(());
+        };
+        text.parse::<Table>().with_context(|| {
+            format!(
+                "{} is not valid TOML; fix it first, nothing was saved",
+                path.display()
+            )
+        })?;
+        self.take_device_lists(Self::parse(&text));
+        Ok(())
     }
 }
 
@@ -938,6 +948,37 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
 
         assert_eq!(loaded.allow, ["373B:1204"]);
+    }
+
+    #[test]
+    fn saves_refuse_to_overwrite_a_file_that_is_not_toml() {
+        let root =
+            std::env::temp_dir().join(format!("juicetray-broken-test-{}", std::process::id()));
+        let path = root.join("config.toml");
+        fs::create_dir_all(&root).unwrap();
+        // A hand edit left the file broken; its lists must survive every save path.
+        let broken = "allow = [\"373B:1204\"\ndeclined = [\"3554:FA09\"]\n";
+        fs::write(&path, broken).unwrap();
+        let mut config = Config::default();
+        let entry = CustomEntry {
+            id: "3554:7777".into(),
+            name: "My board".into(),
+            family: "Compx".into(),
+            kind: "keyboard".into(),
+            connection: "receiver".into(),
+        };
+
+        let saved = config.save_to(&path);
+        let allowed = config.add_id_and_save_to(&path, |config| &mut config.allow, 0x373B, 0x1216);
+        let custom = config.add_custom_and_save_to(&path, entry);
+        let on_disk = fs::read_to_string(&path).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        for result in [saved, allowed, custom] {
+            let error = format!("{:#}", result.unwrap_err());
+            assert!(error.contains("not valid TOML"), "{error}");
+        }
+        assert_eq!(on_disk, broken);
     }
 
     #[test]

@@ -21,6 +21,9 @@ const INSPECT_TRIES: u8 = 20;
 /// How often the window checks for the worker's reply.
 const REPLY_POLL: Duration = Duration::from_millis(100);
 const SECOND: Duration = Duration::from_secs(1);
+/// [Add] ignores presses this long after the reading, so a double-click or held Enter on [Try]
+/// never adds before the owner checked the level.
+const ADD_GUARD: Duration = SECOND;
 
 const WARNING: &str = "This device is not officially supported yet. Reading its battery may not \
                        work. If it does not, please report an issue at \
@@ -30,6 +33,11 @@ const BLUETOOTH_HINT: &str = "A Bluetooth device connected. Juicetray reads Blue
                               on its own; this window adds USB receivers and cables only.";
 const RECOVERY: &str = "The device is in recovery or update mode; Juicetray never talks to it.";
 const NO_FAMILY: &str = "None of its interfaces matches a battery protocol Juicetray knows.";
+const NEEDS_CAPTURE: &str = "Its catalogue model needs a capture of its own app's traffic before \
+                             Juicetray may query it.";
+const BITMOUSE_CABLE: &str = "It is a BITMOUSE cable model; a BITMOUSE cable is never queried.";
+/// The [Try] label of an off-catalogue BITMOUSE id: pressing it confirms a USB receiver.
+const RECEIVER_TRY: &str = "It is a USB receiver — Try";
 const UNSTABLE: &str = "Its interfaces kept changing, so they could not be read.";
 
 /// The kind choices of a custom device: label and config value.
@@ -74,8 +82,10 @@ pub enum TryOutcome {
     /// Inside the family's query floor; nothing was sent.
     Waiting(Duration),
     Gone,
-    /// Nothing or not all of it was sent: the channel could not be opened or the write failed.
+    /// Refused before the write: nothing was sent.
     Failed(String),
+    /// The write was attempted, so the query went out (or may have), then the exchange failed.
+    Interrupted(String),
 }
 
 /// What the owner adds, sent to the UI thread, which writes the config.
@@ -125,6 +135,8 @@ pub enum Event {
     Handover(Id),
     Inspected(Inspection),
     Tried(TryOutcome),
+    /// The UI thread's answer to `Effect::Add`: the config was written, or why not.
+    Saved(Result<(), String>),
     Tick,
 }
 
@@ -181,8 +193,13 @@ enum Step {
         id: Id,
         family: Family,
         reading: Reading,
+        /// When the reading came in; [Add] sits where [Try] was, so it waits `ADD_GUARD`.
+        since: Instant,
     },
+    /// [Add] was pressed; the UI thread writes the config and answers with `Event::Saved`.
+    Saving(Id),
     Added(Id),
+    SaveFailed(Id, String),
     Unplugged(Id),
     Unsupported(Id),
 }
@@ -254,6 +271,16 @@ impl Flow {
                 self.tried(outcome, now);
                 None
             }
+            // Only the window that pressed [Add] waits for the save; the result is shown as is.
+            Event::Saved(result) => {
+                if let Step::Saving(id) = self.step {
+                    self.step = match result {
+                        Ok(()) => Step::Added(id),
+                        Err(why) => Step::SaveFailed(id, why),
+                    };
+                }
+                None
+            }
             Event::Select(index) => {
                 if let Step::Choose {
                     choices, picked, ..
@@ -269,11 +296,11 @@ impl Flow {
         }
     }
 
-    /// Whether a worker reply is due, so the window keeps polling for it.
+    /// Whether a worker (or config save) reply is due, so the window keeps polling for it.
     pub fn awaits_worker(&self) -> bool {
         matches!(
             self.step,
-            Step::Inspecting { again_at: None, .. } | Step::Trying { .. }
+            Step::Inspecting { again_at: None, .. } | Step::Trying { .. } | Step::Saving(_)
         )
     }
 
@@ -287,7 +314,7 @@ impl Flow {
             Step::Inspecting {
                 again_at: Some(at), ..
             } => Some(until(*at)),
-            Step::Inspecting { .. } | Step::Trying { .. } => Some(REPLY_POLL),
+            Step::Inspecting { .. } | Step::Trying { .. } | Step::Saving(_) => Some(REPLY_POLL),
             Step::Choose {
                 choices, picked, ..
             } => choices[*picked]
@@ -358,6 +385,7 @@ impl Flow {
                 id,
                 family,
                 reading,
+                ..
             } => {
                 let mut state = String::new();
                 if reading.charging {
@@ -385,11 +413,16 @@ impl Flow {
                 view.alt = Some("Not right");
                 view.close = "Cancel";
             }
+            Step::Saving(_) => view.text = "Saving…".to_owned(),
             Step::Added(id) => {
                 view.text = format!(
                     "{} was added. Juicetray reads its battery from now on.",
                     self.name(*id)
                 );
+            }
+            // A failed config write is shown, never reported as added.
+            Step::SaveFailed(id, why) => {
+                view.text = format!("{} was not added: saving failed: {why}", self.name(*id));
             }
             Step::Unplugged(id) => {
                 view.text = format!(
@@ -442,17 +475,21 @@ impl Flow {
             "\n\nClose the device's own app, then press Try: Juicetray sends that one \
              read-only query, once.",
         );
-        if family == Family::AtkBitmouse && known(id.0, id.1).is_none() {
-            view.text.push_str(
-                " Press Try only if this is a USB receiver: BITMOUSE never goes to a cable.",
-            );
-        }
+        // Off the catalogue, nothing tells a BITMOUSE receiver from a cable mouse: the button's
+        // own label is the owner's confirmation that it is a receiver.
+        let label = if family == Family::AtkBitmouse && known(id.0, id.1).is_none() {
+            view.text
+                .push_str(" Never try a mouse on its cable: BITMOUSE goes to USB receivers only.");
+            RECEIVER_TRY
+        } else {
+            "Try"
+        };
         let wait = ready.map_or(Duration::ZERO, |at| at.saturating_duration_since(now));
         view.primary = Some(if wait.is_zero() {
-            "Try".to_owned()
+            label.to_owned()
         } else {
             // Whole seconds, rounded up, so it never shows 0 while waiting.
-            format!("Try in {} s", wait.as_millis().div_ceil(1000))
+            format!("{label} in {} s", wait.as_millis().div_ceil(1000))
         });
         view.close = "Cancel";
     }
@@ -560,7 +597,7 @@ impl Flow {
                 let offered = choices(id, &interfaces.families);
                 self.facts.interfaces = Some(interfaces);
                 if offered.is_empty() {
-                    self.unsupported(id, NO_FAMILY.to_owned());
+                    self.unsupported(id, no_choice_reason(id).to_owned());
                 } else {
                     self.step = Step::Choose {
                         id,
@@ -578,32 +615,12 @@ impl Flow {
             return;
         };
         let name = family.name();
-        let (result, reason) = match &outcome {
-            TryOutcome::Reading(reading) => (format!("read {} %", reading.percent), String::new()),
-            TryOutcome::NoReply => (
-                "no reply".to_owned(),
-                format!("It did not answer the {name} battery query."),
-            ),
-            TryOutcome::Invalid(why) => (
-                format!("invalid reply ({why})"),
-                format!("Its answer to the {name} battery query is not a battery level ({why})."),
-            ),
-            TryOutcome::Failed(why) => (
-                format!("not sent ({why})"),
-                format!("The {name} battery query could not be sent: {why}"),
-            ),
-            TryOutcome::Waiting(_) | TryOutcome::Gone => (String::new(), String::new()),
-        };
-        if !result.is_empty() {
-            self.facts.tried = Some((family, result));
-        }
-        self.step = match outcome {
-            TryOutcome::Reading(reading) => Step::Found {
-                id,
-                family,
-                reading,
-            },
-            TryOutcome::Gone => Step::Unplugged(id),
+        // Unplugged and floor answers leave no report line; every other answer is recorded.
+        let (result, reason) = match outcome {
+            TryOutcome::Gone => {
+                self.step = Step::Unplugged(id);
+                return;
+            }
             TryOutcome::Waiting(wait) => {
                 let families = self
                     .facts
@@ -620,17 +637,45 @@ impl Flow {
                         timed.len() - 1
                     });
                 timed[picked].1 = Some(now + wait);
-                Step::Choose {
+                self.step = Step::Choose {
                     id,
                     choices: timed,
                     picked,
-                }
+                };
+                return;
             }
-            TryOutcome::NoReply | TryOutcome::Invalid(_) | TryOutcome::Failed(_) => {
-                self.facts.reason = reason;
-                Step::Unsupported(id)
+            TryOutcome::Reading(reading) => {
+                self.facts.tried = Some((family, format!("read {} %", reading.percent)));
+                self.step = Step::Found {
+                    id,
+                    family,
+                    reading,
+                    since: now,
+                };
+                return;
             }
+            TryOutcome::NoReply => (
+                "no reply".to_owned(),
+                format!("It did not answer the {name} battery query."),
+            ),
+            TryOutcome::Invalid(why) => (
+                format!("invalid reply ({why})"),
+                format!("Its answer to the {name} battery query is not a battery level ({why})."),
+            ),
+            TryOutcome::Failed(why) => (
+                format!("not sent ({why})"),
+                format!("The {name} battery query could not be sent: {why}"),
+            ),
+            // The write was attempted, so "not sent" would be untrue.
+            TryOutcome::Interrupted(why) => (
+                format!("sent, then failed ({why})"),
+                format!(
+                    "The {name} battery query may have been sent, but no answer was read: {why}"
+                ),
+            ),
         };
+        self.facts.tried = Some((family, result));
+        self.unsupported(id, reason);
     }
 
     fn primary(&mut self, input: Input, now: Instant) -> Option<Effect> {
@@ -656,10 +701,12 @@ impl Flow {
                 self.step = Step::Trying { id, family };
                 Some(Effect::TryAs(id, family))
             }
+            // A press right after the reading is the [Try] press repeating, not a confirmation.
+            Step::Found { since, .. } if now < *since + ADD_GUARD => None,
             Step::Found { id, family, .. } => {
                 let id = *id;
                 let request = add_request(id, *family, &input, &self.name(id));
-                self.step = Step::Added(id);
+                self.step = Step::Saving(id);
                 Some(Effect::Add(request))
             }
             Step::Unplugged(id) => self.begin(*id),
@@ -680,8 +727,12 @@ impl Flow {
                 );
                 None
             }
+            // The title carries the USB product string, so it is redacted like the body.
             Step::Unsupported(id) => Some(Effect::OpenUrl(report::issue_url(
-                &format!("Device report: {}", self.labelled(id)),
+                &report::redact(
+                    &format!("Device report: {}", self.labelled(id)),
+                    &self.identity,
+                ),
                 &self.details(id),
             ))),
             _ => None,
@@ -728,7 +779,11 @@ impl Flow {
     /// The report text, redacted: what the device is, what matched, what the try gave.
     fn details(&self, id: Id) -> String {
         let (vid, pid) = id;
-        let mut lines = vec![format!("Device: {}", self.labelled(id))];
+        // The environment leads, so a cut issue URL loses interface lines, not the app version.
+        let mut lines = vec![
+            self.environment.clone(),
+            format!("Device: {}", self.labelled(id)),
+        ];
         lines.push(match known(vid, pid) {
             Some(device) if device.verified => format!("Catalogue: {}, verified", device.name),
             Some(device) => format!("Catalogue: {}, not verified", device.name),
@@ -764,8 +819,16 @@ impl Flow {
                 lines.push("  serial port".to_owned());
             }
         }
-        lines.push(self.environment.clone());
         report::redact(&lines.join("\n"), &self.identity)
+    }
+}
+
+/// Why nothing is offered: a catalogue model its row blocks, else no matching interface.
+fn no_choice_reason((vid, pid): Id) -> &'static str {
+    match known(vid, pid) {
+        Some(device) if device.needs_capture => NEEDS_CAPTURE,
+        Some(device) if device.family == Family::AtkBitmouse && device.cable => BITMOUSE_CABLE,
+        _ => NO_FAMILY,
     }
 }
 
@@ -1213,16 +1276,34 @@ mod tests {
         assert_eq!(form.name, "Gaming Mouse");
         assert_eq!(form.connections.len(), 2);
 
-        for (outcome, text) in [
-            (TryOutcome::NoReply, "did not answer"),
-            (TryOutcome::Invalid("level 0xFF".into()), "level 0xFF"),
-            (TryOutcome::Failed("busy".into()), "could not be sent: busy"),
+        // A refusal before the write says "not sent"; a failure after it never does.
+        for (outcome, text, tried_line) in [
+            (TryOutcome::NoReply, "did not answer", "no reply"),
+            (
+                TryOutcome::Invalid("level 0xFF".into()),
+                "level 0xFF",
+                "invalid reply",
+            ),
+            (
+                TryOutcome::Failed("busy".into()),
+                "could not be sent: busy",
+                "not sent (busy)",
+            ),
+            (
+                TryOutcome::Interrupted("read failed".into()),
+                "may have been sent, but no answer was read: read failed",
+                "sent, then failed (read failed)",
+            ),
         ] {
             let flow = tried(outcome);
             let view = flow.view(now);
             assert!(view.text.starts_with("Not supported yet."), "{}", view.text);
             assert!(view.text.contains(text), "{}", view.text);
-            assert!(view.details.unwrap().contains("Tried: Compx report 8: "));
+            let details = view.details.unwrap();
+            assert!(
+                details.contains(&format!("Tried: Compx report 8: {tried_line}")),
+                "{details}"
+            );
         }
         let flow = tried(TryOutcome::Gone);
         assert!(flow.view(now).text.contains("was unplugged"));
@@ -1250,8 +1331,9 @@ mod tests {
             connection: 1,
             name: "  My board ".to_owned(),
         };
+        let checked = now + ADD_GUARD;
         assert_eq!(
-            flow.on(Event::Primary(input), now),
+            flow.on(Event::Primary(input), checked),
             Some(Effect::Add(AddRequest::Custom(CustomEntry {
                 id: "3554:7777".into(),
                 name: "My board".into(),
@@ -1260,7 +1342,17 @@ mod tests {
                 connection: "cable".into(),
             })))
         );
-        assert!(flow.view(now).text.starts_with("Gaming Mouse was added."));
+        // "Added" only once the UI thread says the config was written.
+        assert_eq!(flow.view(checked).text, "Saving…");
+        assert!(flow.awaits_worker());
+        assert_eq!(flow.next_tick(checked), Some(REPLY_POLL));
+        flow.on(Event::Saved(Ok(())), checked);
+        assert!(!flow.awaits_worker());
+        assert!(
+            flow.view(checked)
+                .text
+                .starts_with("Gaming Mouse was added.")
+        );
 
         let (row, family) = unverified();
         let mut flow = choosing(row, &[(family, None)], now);
@@ -1268,9 +1360,17 @@ mod tests {
         flow.on(Event::Tried(TryOutcome::Reading(reading(80))), now);
         assert_eq!(flow.view(now).form, None);
         assert_eq!(
-            press(&mut flow, now),
+            press(&mut flow, checked),
             Some(Effect::Add(AddRequest::Allow(row)))
         );
+        // A failed save is shown, never reported as added.
+        flow.on(
+            Event::Saved(Err("config.toml is not valid TOML".into())),
+            checked,
+        );
+        let text = flow.view(checked).text;
+        assert!(text.contains("was not added"), "{text}");
+        assert!(text.contains("config.toml is not valid TOML"), "{text}");
 
         // BITMOUSE: receiver only, and a blank name takes the default.
         let blank = Input {
@@ -1334,7 +1434,102 @@ mod tests {
         );
         let details = flow.view(now).details.unwrap();
         assert!(details.contains(r"%USERPROFILE%\x on <pc>"), "{details}");
-        assert!(details.ends_with("Juicetray v0.0.0, Windows 10.0.19045"));
+        // The environment leads, so URL truncation never drops it.
+        assert!(details.starts_with("Juicetray v0.0.0, Windows 10.0.19045\nDevice: "));
+
+        // The title's product string is redacted too.
+        let mut flow = new_flow();
+        flow.on(Event::Handover(UNKNOWN), now);
+        flow.on(
+            Event::Inspected(Inspection::Ready(Interfaces {
+                product: Some("Mouse of JANE-PC".into()),
+                ..Interfaces::default()
+            })),
+            now,
+        );
+        let Some(Effect::OpenUrl(url)) = flow.on(Event::Alt, now) else {
+            panic!("report url");
+        };
+        let title = url.split("&body=").next().unwrap();
+        assert!(!title.contains("JANE"), "{title}");
+        assert!(title.contains("%3Cpc%3E"), "{title}");
+    }
+
+    #[test]
+    fn add_ignores_presses_right_after_the_reading() {
+        let now = Instant::now();
+        let mut flow = choosing(UNKNOWN, &[(Family::Compx, None)], now);
+        assert_eq!(
+            press(&mut flow, now),
+            Some(Effect::TryAs(UNKNOWN, Family::Compx))
+        );
+        flow.on(Event::Tried(TryOutcome::Reading(reading(52))), now);
+        // A double-click or held Enter on [Try] lands on [Add] at the same spot.
+        assert_eq!(press(&mut flow, now), None);
+        assert_eq!(press(&mut flow, now + ADD_GUARD / 2), None);
+        assert_eq!(
+            flow.view(now).primary.as_deref(),
+            Some("Add"),
+            "still waiting for the owner"
+        );
+        assert!(matches!(
+            press(&mut flow, now + ADD_GUARD),
+            Some(Effect::Add(_))
+        ));
+    }
+
+    #[test]
+    fn off_catalogue_bitmouse_try_confirms_a_receiver() {
+        let now = Instant::now();
+        let flow = choosing(UNKNOWN, &[(Family::AtkBitmouse, None)], now);
+        let view = flow.view(now);
+        assert_eq!(view.primary.as_deref(), Some("It is a USB receiver — Try"));
+        assert!(
+            view.text.contains("Never try a mouse on its cable"),
+            "{}",
+            view.text
+        );
+        // The floor countdown keeps the confirmation.
+        let mut flow = choosing(
+            UNKNOWN,
+            &[(Family::AtkBitmouse, Some(Duration::from_secs(3)))],
+            now,
+        );
+        assert_eq!(
+            flow.view(now).primary.as_deref(),
+            Some("It is a USB receiver — Try in 3 s")
+        );
+        let late = now + Duration::from_secs(3);
+        assert_eq!(
+            press(&mut flow, late),
+            Some(Effect::TryAs(UNKNOWN, Family::AtkBitmouse))
+        );
+        // Any other family is plain Try.
+        let view = choosing(UNKNOWN, &[(Family::Compx, None)], now).view(now);
+        assert_eq!(view.primary.as_deref(), Some("Try"));
+        assert!(!view.text.contains("cable"), "{}", view.text);
+    }
+
+    #[test]
+    fn blocked_catalogue_rows_say_why() {
+        let now = Instant::now();
+        let cable = protocol::KNOWN
+            .iter()
+            .find(|device| {
+                device.family == Family::AtkBitmouse
+                    && device.cable
+                    && !device.verified
+                    && !is_recovery(device.vid, device.pid)
+            })
+            .expect("an unverified BITMOUSE cable row");
+        let id = (cable.vid, cable.pid);
+        let view = choosing(id, &[(Family::AtkBitmouse, None)], now).view(now);
+        assert!(view.text.contains(BITMOUSE_CABLE), "{}", view.text);
+        assert_eq!(no_choice_reason(UNKNOWN), NO_FAMILY);
+        // No catalogue row needs a capture today; any that does gets its own reason.
+        for device in protocol::KNOWN.iter().filter(|device| device.needs_capture) {
+            assert_eq!(no_choice_reason((device.vid, device.pid)), NEEDS_CAPTURE);
+        }
     }
 
     #[test]

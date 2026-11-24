@@ -1,6 +1,6 @@
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use tao::event_loop::EventLoopProxy;
@@ -66,6 +66,8 @@ fn run(
     let mut read_now = true;
     // The last Bluetooth list that was read; a failed Bluetooth read sends it again.
     let mut bluetooth_devices = Vec::new();
+    // The timer counts from here, so commands that read nothing never push the next read back.
+    let mut timer_from = Instant::now();
     // Shapes the Add window read, kept until their device leaves.
     #[cfg(windows)]
     let mut shapes = door::ShapeCache::default();
@@ -94,23 +96,27 @@ fn run(
                 log::trace(format_args!("worker exit: event loop gone"));
                 return;
             }
+            timer_from = Instant::now();
         }
         read_now = true;
         // While the timer may not read, the wait has no timeout and only a command wakes it.
         let timer = interval.filter(|_| pause::timer_may_read(power));
-        let command = wait(commands, timer);
+        let command = wait(commands, timer, timer_from);
         log::trace(format_args!("worker woke: {}", wake_reason(&command)));
         match command {
             Ok(Command::RefreshNow) => {}
             Err(RecvTimeoutError::Timeout) => {}
+            // A new interval or power state restarts the timer.
             Ok(Command::SetInterval(seconds)) => {
                 interval = seconds;
                 read_now = false;
+                timer_from = Instant::now();
             }
             Ok(Command::SetPower(next)) => {
                 log::trace(format_args!("power {power:?} -> {next:?}"));
                 read_now = pause::reads_on_change(power, next);
                 power = next;
+                timer_from = Instant::now();
             }
             #[cfg(windows)]
             Ok(Command::FindOffers(ids)) => {
@@ -170,10 +176,16 @@ fn send_devices(
         .is_ok()
 }
 
-/// Auto-refresh Off waits for a command forever.
-fn wait(commands: &Receiver<Command>, interval: Option<u32>) -> Result<Command, RecvTimeoutError> {
+/// Waits until `interval` after `from` (a fixed deadline, whatever wakes it meanwhile); auto-refresh
+/// Off waits for a command forever.
+fn wait(
+    commands: &Receiver<Command>,
+    interval: Option<u32>,
+    from: Instant,
+) -> Result<Command, RecvTimeoutError> {
     match interval {
-        Some(seconds) => commands.recv_timeout(Duration::from_secs(u64::from(seconds))),
+        Some(seconds) => commands
+            .recv_timeout(Duration::from_secs(u64::from(seconds)).saturating_sub(from.elapsed())),
         None => commands.recv().map_err(|_| RecvTimeoutError::Disconnected),
     }
 }
