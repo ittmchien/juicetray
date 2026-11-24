@@ -17,7 +17,11 @@ use crate::config::{Config, HIDE_OFFLINE_CHOICES, LOW_CHOICES, REFRESH_CHOICES, 
 use crate::interval::format_interval;
 use crate::login::LoginState;
 use crate::receivers::can_check;
+use crate::update::AUTO_CHECK_AVAILABLE;
 
+const CHECK_UPDATES_ID: &str = "check-updates";
+const AUTO_UPDATE_ID: &str = "update-auto";
+const OPEN_UPDATE_ID: &str = "update-open";
 const CHOICE_OFF: &str = "off";
 const CHOICE_OFF_LABEL: &str = "Off";
 const MINUTES_PER_HOUR: u32 = 60;
@@ -105,6 +109,11 @@ pub enum MenuAction {
     ToggleStartAtLogin,
     /// Turning it on is confirmed first; turning it off is not.
     ToggleRefreshOnBattery,
+    /// Check GitHub Releases now and say the result (macOS opens the releases page instead).
+    CheckForUpdates,
+    ToggleCheckUpdates,
+    /// Open the download page of the update the menu announces.
+    OpenUpdate,
     Quit,
 }
 
@@ -171,6 +180,9 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         "refresh" => return Some(MenuAction::Refresh),
         "login" => return Some(MenuAction::ToggleStartAtLogin),
         REFRESH_ON_BATTERY_ID => return Some(MenuAction::ToggleRefreshOnBattery),
+        CHECK_UPDATES_ID => return Some(MenuAction::CheckForUpdates),
+        AUTO_UPDATE_ID => return Some(MenuAction::ToggleCheckUpdates),
+        OPEN_UPDATE_ID => return Some(MenuAction::OpenUpdate),
         "quit" => return Some(MenuAction::Quit),
         CUSTOM_REFRESH_ID => return Some(MenuAction::CustomRefresh),
         CUSTOM_LOW_ID => return Some(MenuAction::CustomLow),
@@ -293,10 +305,30 @@ pub fn menu_entries(
             ),
         ),
         login_entry(login),
+    ]);
+    // Only a build that can check on its own offers the switch.
+    if AUTO_CHECK_AVAILABLE {
+        entries.push(MenuEntry::check(
+            AUTO_UPDATE_ID.to_owned(),
+            "Check for updates automatically",
+            config.check_updates,
+        ));
+    }
+    entries.extend([
+        MenuEntry::item(CHECK_UPDATES_ID, "Check for updates…"),
         MenuEntry::separator(),
         MenuEntry::item("quit", "Quit"),
     ]);
     entries
+}
+
+/// The line that announces a newer release; the caller puts it above "Refresh now".
+#[cfg(any(windows, test))]
+pub fn update_available_entries(version: &str) -> [MenuEntry; 2] {
+    [
+        MenuEntry::item(OPEN_UPDATE_ID, format!("Update available: v{version}…")),
+        MenuEntry::separator(),
+    ]
 }
 
 /// Device lines indented under a disabled group header, a separator between groups; `devices`
@@ -729,6 +761,64 @@ mod tests {
             .position(|e| e.text == "Auto-refresh")
             .unwrap();
         assert_eq!(entries[auto + 1].id.as_deref(), Some(REFRESH_ON_BATTERY_ID));
+    }
+
+    #[test]
+    fn update_items_sit_above_quit_and_map_to_actions() {
+        let build = |config: &Config| {
+            menu_entries(
+                &[],
+                config,
+                LoginState::Disabled,
+                false,
+                SystemTime::UNIX_EPOCH,
+            )
+        };
+        let entries = build(&Config::default());
+        let ids: Vec<Option<&str>> = entries.iter().map(|e| e.id.as_deref()).collect();
+        let check = ids.iter().position(|id| *id == Some("check-updates"));
+        let quit = ids.iter().position(|id| *id == Some("quit")).unwrap();
+        // "Check for updates…" is the last item before the separator and Quit.
+        assert_eq!(check, Some(quit - 2));
+        assert!(entries[quit - 1].is_separator());
+        assert_eq!(entries[quit - 2].text, "Check for updates…");
+
+        // The automatic-check switch exists only where the build can check on its own.
+        let auto = |config: &Config| {
+            build(config)
+                .into_iter()
+                .find(|e| e.id.as_deref() == Some("update-auto"))
+        };
+        assert_eq!(auto(&Config::default()).is_some(), cfg!(windows));
+        if cfg!(windows) {
+            let on = auto(&Config::default()).unwrap();
+            assert_eq!(on.text, "Check for updates automatically");
+            assert_eq!(on.checked, Some(true));
+            let off = Config {
+                check_updates: false,
+                ..Config::default()
+            };
+            assert_eq!(auto(&off).unwrap().checked, Some(false));
+        }
+
+        assert_eq!(
+            action_for("check-updates"),
+            Some(MenuAction::CheckForUpdates)
+        );
+        assert_eq!(
+            action_for("update-auto"),
+            Some(MenuAction::ToggleCheckUpdates)
+        );
+        assert_eq!(action_for("update-open"), Some(MenuAction::OpenUpdate));
+    }
+
+    #[test]
+    fn update_available_line_is_one_clickable_item_and_a_separator() {
+        let [line, separator] = update_available_entries("0.2.0");
+        assert_eq!(line.id.as_deref(), Some("update-open"));
+        assert_eq!(line.text, "Update available: v0.2.0…");
+        assert!(line.enabled && line.children.is_empty());
+        assert!(separator.is_separator());
     }
 
     fn child<'a>(entry: &'a MenuEntry, text: &str) -> &'a MenuEntry {

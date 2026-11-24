@@ -9,8 +9,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BS_DEFPUSHBUTTON, BS_PUSHBUTTON, DLGTEMPLATE, DS_CENTER, DS_MODALFRAME, DS_SETFONT,
     DS_SETFOREGROUND, DialogBoxIndirectParamW, ES_AUTOHSCROLL, EndDialog, GWLP_USERDATA,
     GetDlgItem, GetDlgItemTextW, GetWindowLongPtrW, GetWindowTextLengthW, IDCANCEL, IDOK,
-    SetDlgItemTextW, SetWindowLongPtrW, WINDOW_STYLE, WM_COMMAND, WM_INITDIALOG, WS_BORDER,
-    WS_CAPTION, WS_CHILD, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MessageBoxW, SetDlgItemTextW, SetWindowLongPtrW,
+    WINDOW_STYLE, WM_COMMAND, WM_INITDIALOG, WS_BORDER, WS_CAPTION, WS_CHILD, WS_POPUP, WS_SYSMENU,
+    WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::HSTRING;
 
@@ -82,9 +83,10 @@ pub fn prompt_text(title: &str, message: &str, default: &str) -> Option<String> 
     prompt.answer
 }
 
-/// A modal yes/no dialog with `ok_label` as the default button; Enter confirms, Esc and Cancel
-/// answer no. Blocks the calling thread, so callers run it off the event-loop thread.
-pub fn confirm(title: &str, message: &str, ok_label: &str) -> bool {
+/// A modal yes/no dialog with `ok_label` as the default button; Enter confirms, Esc and the
+/// `cancel_label` button answer no. Blocks the calling thread, so callers run it off the
+/// event-loop thread.
+pub fn confirm(title: &str, message: &str, ok_label: &str, cancel_label: &str) -> bool {
     // SAFETY: a null module name asks for this executable's own handle, which never fails here.
     let instance = match unsafe { GetModuleHandleW(None) } {
         Ok(module) => HINSTANCE::from(module),
@@ -93,7 +95,7 @@ pub fn confirm(title: &str, message: &str, ok_label: &str) -> bool {
             return false;
         }
     };
-    let template = confirm_template(title, message, ok_label);
+    let template = confirm_template(title, message, ok_label, cancel_label);
     // SAFETY: the template is DWORD-aligned and well formed; the dialog procedure reads no
     // creation data.
     let result = unsafe {
@@ -112,6 +114,20 @@ pub fn confirm(title: &str, message: &str, ok_label: &str) -> bool {
         );
     }
     result == IDOK.0 as isize
+}
+
+/// A modal message box with one OK button. Blocks the calling thread, so callers run it off the
+/// event-loop thread.
+pub fn notice(title: &str, message: &str) {
+    // SAFETY: both strings are NUL-terminated and live until the call returns; no owner window.
+    let _ = unsafe {
+        MessageBoxW(
+            None,
+            &HSTRING::from(message),
+            &HSTRING::from(title),
+            MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
+        )
+    };
 }
 
 /// The system colour dialog, opened in full (custom colour) form on `initial`; `None` when the
@@ -272,8 +288,9 @@ fn dialog_template(title: &str, message: &str) -> Vec<u32> {
     words.into_dwords()
 }
 
-/// An in-memory `DLGTEMPLATE` for the confirm dialog: caption, font, message, `ok_label` and Cancel.
-fn confirm_template(title: &str, message: &str, ok_label: &str) -> Vec<u32> {
+/// An in-memory `DLGTEMPLATE` for the confirm dialog: caption, font, message, `ok_label` and
+/// `cancel_label`.
+fn confirm_template(title: &str, message: &str, ok_label: &str, cancel_label: &str) -> Vec<u32> {
     let mut words = TemplateWords::default();
     let style = WS_POPUP
         | WS_CAPTION
@@ -305,7 +322,7 @@ fn confirm_template(title: &str, message: &str, ok_label: &str) -> Vec<u32> {
         CONFIRM_CANCEL_RECT,
         IDCANCEL.0 as u16,
         BUTTON_CLASS,
-        "Cancel",
+        cancel_label,
     );
     words.into_dwords()
 }
@@ -385,7 +402,7 @@ mod tests {
 
     #[test]
     fn confirm_template_has_three_aligned_items() {
-        let template = confirm_template("Odd", "x", "Turn on");
+        let template = confirm_template("Odd", "x", "Turn on", "Cancel");
         let words: Vec<u16> = template
             .iter()
             .flat_map(|dword| [*dword as u16, (dword >> 16) as u16])

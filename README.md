@@ -67,6 +67,14 @@ allow = ["391D:1A05"]
 - Windows 10/11 (x86_64)
 - macOS (Apple silicon and Intel)
 
+## Updates
+
+On Windows, Juicetray checks [GitHub Releases](https://github.com/ittmchien/juicetray/releases)
+for a newer version once a day (and a minute after start); turn it off with **Check for updates
+automatically** in the menu, or check by hand with **Check for updates…**. The request sends
+nothing but the version in the User-Agent (`juicetray/<version>`). On macOS **Check for
+updates…** just opens the releases page.
+
 ## Safety
 
 Juicetray only sends read-only battery and online-status queries, one at a time, with no retry loops. It never

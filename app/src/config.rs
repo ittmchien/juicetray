@@ -60,6 +60,10 @@ pub struct Config {
     pub allow: Vec<String>,
     /// Keep auto-refreshing while a laptop runs on battery; off by default.
     pub refresh_on_battery: bool,
+    /// Ask GitHub Releases for a newer version once a day (Windows); on by default.
+    pub check_updates: bool,
+    /// The newest version already announced, so one release is never announced twice.
+    pub notified_update: Option<String>,
 }
 
 impl Default for Config {
@@ -73,6 +77,8 @@ impl Default for Config {
             devices: BTreeMap::new(),
             allow: Vec::new(),
             refresh_on_battery: false,
+            check_updates: true,
+            notified_update: None,
         }
     }
 }
@@ -104,6 +110,15 @@ impl Config {
                 .get("refresh_on_battery")
                 .and_then(Value::as_bool)
                 .unwrap_or(defaults.refresh_on_battery),
+            check_updates: table
+                .get("check_updates")
+                .and_then(Value::as_bool)
+                .unwrap_or(defaults.check_updates),
+            notified_update: table
+                .get("notified_update")
+                .and_then(Value::as_str)
+                .filter(|version| !version.is_empty())
+                .map(str::to_owned),
         }
     }
 
@@ -122,6 +137,10 @@ impl Config {
             "refresh_on_battery".into(),
             Value::Boolean(self.refresh_on_battery),
         );
+        table.insert("check_updates".into(), Value::Boolean(self.check_updates));
+        if let Some(version) = &self.notified_update {
+            table.insert("notified_update".into(), Value::String(version.clone()));
+        }
         table.insert("hidden".into(), string_array(&self.hidden));
         table.insert("hidden_ids".into(), string_array(&self.hidden_ids));
         table.insert(
@@ -491,8 +510,39 @@ mod tests {
             devices: BTreeMap::new(),
             allow: vec!["373B:1204".into(), "junk".into()],
             refresh_on_battery: true,
+            check_updates: false,
+            notified_update: Some("0.2.0".into()),
         };
         assert_eq!(Config::parse(&config.to_toml()), config);
+    }
+
+    #[test]
+    fn update_keys_default_for_old_files_and_round_trip() {
+        // An old file without the keys, or with wrongly typed ones, keeps the defaults.
+        for text in [
+            "refresh_seconds = 300",
+            "check_updates = \"no\"\nnotified_update = 3",
+        ] {
+            let config = Config::parse(text);
+            assert!(config.check_updates, "{text}");
+            assert_eq!(config.notified_update, None, "{text}");
+        }
+        assert!(!Config::parse("check_updates = false").check_updates);
+        assert_eq!(
+            Config::parse("notified_update = \"\"").notified_update,
+            None
+        );
+
+        // Nothing announced yet writes no `notified_update` line.
+        let written = Config::default().to_toml();
+        assert!(written.contains("check_updates = true"));
+        assert!(!written.contains("notified_update"));
+        let announced = Config {
+            notified_update: Some("0.3.1".into()),
+            ..Config::default()
+        };
+        assert!(announced.to_toml().contains("notified_update = \"0.3.1\""));
+        assert_eq!(Config::parse(&announced.to_toml()), announced);
     }
 
     #[test]

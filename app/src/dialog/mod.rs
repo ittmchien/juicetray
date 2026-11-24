@@ -1,6 +1,7 @@
 //! Native dialogs opened from a menu click: a one-line text prompt, the SVG file picker and, on
-//! Windows, the colour picker and a yes/no confirmation. All run modally and return when the
-//! owner closes them; the confirmation runs on its own thread, the others on the main thread.
+//! Windows, the colour picker, a yes/no confirmation and a one-button notice. All run modally
+//! and return when the owner closes them; the confirmation and the notice run on their own
+//! threads, the others on the main thread.
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -45,11 +46,19 @@ pub fn pick_color(initial: (u8, u8, u8)) -> Option<(u8, u8, u8)> {
     platform::pick_color(initial)
 }
 
-/// Asks a yes/no question with `ok_label` on the default button; blocks the calling thread until
-/// the owner answers, so it runs on its own thread, never the event loop's. Windows only.
+/// Asks a yes/no question with `ok_label` on the default button and `cancel_label` as the other;
+/// blocks the calling thread until the owner answers, so it runs on its own thread, never the
+/// event loop's. Windows only.
 #[cfg(windows)]
-pub fn confirm(title: &str, message: &str, ok_label: &str) -> bool {
-    platform::confirm(title, message, ok_label)
+pub fn confirm(title: &str, message: &str, ok_label: &str, cancel_label: &str) -> bool {
+    platform::confirm(title, message, ok_label, cancel_label)
+}
+
+/// Shows `message` with an OK button; blocks the calling thread until it is closed, so it runs
+/// on its own thread, never the event loop's. Windows only.
+#[cfg(windows)]
+pub fn notice(title: &str, message: &str) {
+    platform::notice(title, message);
 }
 
 /// The owner's choice of one `.svg` file; `None` when cancelled.

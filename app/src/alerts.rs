@@ -43,21 +43,33 @@ impl AlertState {
     }
 }
 
-/// Posts the notification from a short-lived thread so the event loop never waits on the OS.
+/// Tells the owner a battery is low.
 pub fn notify_low_battery(device: &DeviceView) {
     let Some(percent) = device.shown_percent() else {
         return;
     };
-    let name = device.name.clone();
+    let name = &device.name;
     log::trace(format_args!("notification spawn {name} {percent}%"));
+    post(format!("{name} battery low"), format!("{percent}% left"));
+}
+
+/// Tells the owner a newer release exists; the tray menu line opens its download page.
+#[cfg(windows)]
+pub fn notify_update_available(version: &str) {
+    log::trace(format_args!("notification spawn update {version}"));
+    post(
+        format!("Juicetray v{version} is available"),
+        "Open the tray menu to download it.".to_owned(),
+    );
+}
+
+/// Posts the notification from a short-lived thread so the event loop never waits on the OS.
+fn post(summary: String, body: String) {
     let spawned = std::thread::Builder::new()
         .name("notify".into())
         .spawn(move || {
             let _span = log::span("notification show");
-            let shown = Notification::new()
-                .summary(&format!("{name} battery low"))
-                .body(&format!("{percent}% left"))
-                .show();
+            let shown = Notification::new().summary(&summary).body(&body).show();
             if let Err(error) = shown {
                 eprintln!("notification failed: {error}");
             }

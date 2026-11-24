@@ -21,6 +21,8 @@ use ui_model::{
     sort_grouped,
 };
 
+#[cfg(windows)]
+use crate::alerts::notify_update_available;
 use crate::alerts::{AlertState, notify_low_battery};
 use crate::config::{Config, parse_hide_offline_minutes, parse_low_percent};
 use crate::interval::{format_interval, parse_interval};
@@ -33,7 +35,9 @@ use crate::svg_cache::SvgCache;
 use crate::taskbar::{self, StripContent, TaskbarHandle};
 #[cfg(target_os = "macos")]
 use crate::ui_font;
-use crate::{dialog, instance, log, theme};
+#[cfg(windows)]
+use crate::update::check::{UpdateCheck, UpdateInfo};
+use crate::{dialog, instance, log, theme, update};
 
 /// The tray icon reads at 22 pt; twice that gives sharp pixels on Retina bars.
 #[cfg(target_os = "macos")]
@@ -79,6 +83,15 @@ pub enum UserEvent {
     /// The owner confirmed "Refresh on battery power" in its dialog, which runs off this thread.
     #[cfg(windows)]
     EnableRefreshOnBattery,
+    /// The update scheduler's tick: time for an automatic check.
+    #[cfg(windows)]
+    UpdateDue,
+    /// An update check finished on its own thread; `manual` ones show their own dialog there.
+    #[cfg(windows)]
+    UpdateChecked {
+        manual: bool,
+        outcome: Result<UpdateCheck, String>,
+    },
 }
 
 impl UserEvent {
@@ -101,6 +114,10 @@ impl UserEvent {
             Self::TrayClick => "TrayClick",
             #[cfg(windows)]
             Self::EnableRefreshOnBattery => "EnableRefreshOnBattery",
+            #[cfg(windows)]
+            Self::UpdateDue => "UpdateDue",
+            #[cfg(windows)]
+            Self::UpdateChecked { .. } => "UpdateChecked",
         }
     }
 }
@@ -203,6 +220,12 @@ struct App {
     /// Strip, theme and tooltip last handed to the taskbar strip.
     #[cfg(windows)]
     shown_taskbar: Option<(Vec<Segment>, Theme, String)>,
+    /// The newer release the last check found; the menu announces it on its first line.
+    #[cfg(windows)]
+    update: Option<UpdateInfo>,
+    /// An automatic check was skipped on battery power and runs when AC returns.
+    #[cfg(windows)]
+    update_check_waits_for_ac: bool,
 }
 
 impl App {
@@ -230,6 +253,8 @@ impl App {
         };
         log::trace(format_args!("power at start {power:?}"));
         let worker = refresh::spawn_worker(proxy.clone(), config.refresh_seconds, power)?;
+        #[cfg(windows)]
+        update::spawn_scheduler(proxy.clone());
         let mut app = Self {
             tray,
             #[cfg(target_os = "macos")]
@@ -257,6 +282,10 @@ impl App {
             taskbar,
             #[cfg(windows)]
             shown_taskbar: None,
+            #[cfg(windows)]
+            update: None,
+            #[cfg(windows)]
+            update_check_waits_for_ac: false,
         };
         app.apply();
         Ok(app)
@@ -306,6 +335,17 @@ impl App {
             // Config writes stay on this thread, so the dialog's thread only reports the answer.
             #[cfg(windows)]
             UserEvent::EnableRefreshOnBattery => self.set_refresh_on_battery(true),
+            // Nothing on screen changes, so no `apply`.
+            #[cfg(windows)]
+            UserEvent::UpdateDue => {
+                self.on_update_due();
+                return ControlFlow::Wait;
+            }
+            #[cfg(windows)]
+            UserEvent::UpdateChecked { manual, outcome } => {
+                self.on_update_checked(manual, outcome);
+                return ControlFlow::Wait;
+            }
         }
         self.apply();
         ControlFlow::Wait
@@ -384,8 +424,37 @@ impl App {
                     self.confirm_refresh_on_battery();
                 }
             }
+            MenuAction::CheckForUpdates => self.check_for_updates(),
+            MenuAction::ToggleCheckUpdates => {
+                self.config.check_updates = !self.config.check_updates;
+                self.save_config();
+            }
+            MenuAction::OpenUpdate => self.open_update(),
         }
     }
+
+    /// Windows checks GitHub on its own thread, which then shows the answer.
+    #[cfg(windows)]
+    fn check_for_updates(&self) {
+        update::spawn_check(self.proxy.clone(), true);
+    }
+
+    /// macOS sends nothing: the releases page is the check.
+    #[cfg(not(windows))]
+    fn check_for_updates(&self) {
+        update::open_url(update::RELEASES_URL);
+    }
+
+    #[cfg(windows)]
+    fn open_update(&self) {
+        if let Some(info) = &self.update {
+            update::open_url(&info.url);
+        }
+    }
+
+    /// macOS never announces an update, so its menu has no such line.
+    #[cfg(not(windows))]
+    fn open_update(&self) {}
 
     /// Saves the battery option and tells the worker, which restarts or stops its timer.
     fn set_refresh_on_battery(&mut self, on: bool) {
@@ -409,7 +478,12 @@ impl App {
             .name("confirm".into())
             .spawn(move || {
                 let _span = log::span("dialog battery refresh confirm");
-                if dialog::confirm(BATTERY_CONFIRM_TITLE, BATTERY_CONFIRM, BATTERY_CONFIRM_OK) {
+                if dialog::confirm(
+                    BATTERY_CONFIRM_TITLE,
+                    BATTERY_CONFIRM,
+                    BATTERY_CONFIRM_OK,
+                    "Cancel",
+                ) {
                     // A closed event loop means the app is exiting.
                     let _ = proxy.send_event(UserEvent::EnableRefreshOnBattery);
                 }
@@ -664,6 +738,11 @@ impl App {
         if let Some(at) = empty_line.filter(|_| self.has_read && instance::is_bundled()) {
             entries.insert(at + 1, MenuEntry::label(BLUETOOTH_PERMISSION_HINT));
         }
+        // The update line leads the menu, above "Refresh now".
+        #[cfg(windows)]
+        if let Some(info) = &self.update {
+            entries.splice(0..0, menu::update_available_entries(&info.version));
+        }
         entries
     }
 
@@ -723,6 +802,47 @@ impl App {
         ));
         self.power_source = source;
         self.send_power();
+        if self.update_check_waits_for_ac && pause::timer_may_read(self.power_state()) {
+            self.on_update_due();
+        }
+    }
+
+    /// An automatic check, unless the owner turned them off; on battery power it waits for AC
+    /// (the same rule as the auto-refresh timer).
+    fn on_update_due(&mut self) {
+        self.update_check_waits_for_ac = false;
+        if !self.config.check_updates {
+            return;
+        }
+        if !pause::timer_may_read(self.power_state()) {
+            self.update_check_waits_for_ac = true;
+            return;
+        }
+        update::spawn_check(self.proxy.clone(), false);
+    }
+
+    /// Remembers the newest release for the menu line. The owner is told once per version: by a
+    /// notification after an automatic check, silently after a manual one (its dialog already did).
+    fn on_update_checked(&mut self, manual: bool, outcome: Result<UpdateCheck, String>) {
+        match outcome {
+            Ok(UpdateCheck::Available(info)) => {
+                let is_new = update::check::should_notify(
+                    self.config.notified_update.as_deref(),
+                    &info.version,
+                );
+                if is_new {
+                    self.config.notified_update = Some(info.version.clone());
+                    self.save_config();
+                    if !manual {
+                        notify_update_available(&info.version);
+                    }
+                }
+                self.update = Some(info);
+            }
+            Ok(UpdateCheck::UpToDate) => self.update = None,
+            // The owner sees a manual check's error in its dialog; an automatic one retries tomorrow.
+            Err(error) => log::line(&format!("update check failed: {error}")),
+        }
     }
 
     /// Hands the strip to the taskbar thread, only when strip, theme or tooltip differ from

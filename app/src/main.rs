@@ -26,6 +26,7 @@ mod svg_cache;
 mod taskbar;
 mod theme;
 mod ui_font;
+mod update;
 // Windows-only hang dump; the stall bookkeeping is also tested on other hosts.
 #[cfg(any(windows, test))]
 mod watchdog;

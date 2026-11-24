@@ -66,6 +66,14 @@ allow = ["391D:1A05"]
 - Windows 10/11 (x86_64)
 - macOS (Apple silicon và Intel)
 
+## Cập nhật
+
+Trên Windows, Juicetray kiểm tra [GitHub Releases](https://github.com/ittmchien/juicetray/releases)
+xem có bản mới không mỗi ngày một lần (và một phút sau khi khởi động); tắt bằng mục **Check for
+updates automatically** trong menu, hoặc tự kiểm bằng **Check for updates…**. Yêu cầu gửi đi
+không kèm gì ngoài số phiên bản trong User-Agent (`juicetray/<version>`). Trên macOS, **Check
+for updates…** chỉ mở trang releases.
+
 ## An toàn
 
 Juicetray chỉ gửi lệnh hỏi pin và hỏi trạng thái kết nối dạng chỉ-đọc, mỗi lần một lệnh, không
