@@ -1,7 +1,7 @@
 //! Family detection from what a device exposes: its VID, its HID collection shapes and whether
 //! it has a serial port. Nothing is sent; a family is named only when its query has a target.
 
-use crate::{Family, HidShape, is_recovery, known, pick_target};
+use crate::{Family, HidShape, KnownDevice, is_recovery, known, pick_target};
 
 /// VIDs whose vendor report-0x08 17/17 collection speaks Compx report 8.
 const COMPX_VIDS: [u16; 6] = [0x373B, 0x3554, 0x391D, 0x3710, 0x260D, 0x33E4];
@@ -30,8 +30,19 @@ pub fn family_vid(vid: u16, pid: u16) -> bool {
 /// `pick_target` collection among `collections`; ATK serial needs a port and a catalogue ATK
 /// serial PID; RongYuan F7 and Driveall need a catalogue PID of their own family, since other
 /// protocols share their shape (Driveall's FF60:0061 is also QMK raw HID on the shared Sonix VID).
-/// A recovery id has none.
+/// Generic exists only as a catalogue row's own family. A recovery id has none.
 pub fn families_for(
+    vid: u16,
+    pid: u16,
+    collections: &[HidShape],
+    serial_present: bool,
+) -> Vec<Family> {
+    families_in(known(vid, pid), vid, pid, collections, serial_present)
+}
+
+/// `families_for` with the catalogue row of `vid:pid` (`None` = not listed) passed in.
+fn families_in(
+    catalogue: Option<&KnownDevice>,
     vid: u16,
     pid: u16,
     collections: &[HidShape],
@@ -41,7 +52,11 @@ pub fn families_for(
         return Vec::new();
     }
     let has_target = |family| pick_target(family, collections).is_ok();
-    let catalogue_is = |family| known(vid, pid).is_some_and(|device| device.family == family);
+    let catalogue_is = |family| catalogue.is_some_and(|device| device.family == family);
+    // A Generic family carries its row's spec, so only the row itself can name it.
+    let generic = catalogue
+        .map(|device| device.family)
+        .filter(|family| matches!(family, Family::Generic(_)));
     let atk_serial = vid == ATK_VID && serial_present && catalogue_is(Family::AtkSerial);
     [
         (
@@ -73,6 +88,7 @@ pub fn families_for(
     ]
     .into_iter()
     .filter_map(|(family, matches)| matches.then_some(family))
+    .chain(generic.filter(|&family| has_target(family)))
     .collect()
 }
 
@@ -258,6 +274,32 @@ mod tests {
         // Other Sonix ids and QMK raw HID boards share the shape: never Driveall until listed.
         assert!(families_for(0x0C45, 0x1234, &[driveall()], false).is_empty());
         assert!(families_for(0xFEED, 0xFEF9, &[driveall()], false).is_empty());
+    }
+
+    #[test]
+    fn generic_only_for_its_catalogue_row() {
+        let generic = Family::Generic(&crate::generic::tests::OUTPUT);
+        let row = KnownDevice {
+            vid: 0x1234,
+            pid: 0x5678,
+            name: "Generic test row",
+            family: generic,
+            kind: crate::Kind::Keyboard,
+            verified: false,
+            cable: false,
+            needs_capture: false,
+        };
+        let shapes = [system_mouse(), driveall()];
+        assert_eq!(
+            families_in(Some(&row), 0x1234, 0x5678, &shapes, false),
+            [generic]
+        );
+        // Without the row's collection, or for any id outside the catalogue: never Generic.
+        assert!(families_in(Some(&row), 0x1234, 0x5678, &[system_mouse()], false).is_empty());
+        assert!(families_in(None, 0x1234, 0x5678, &shapes, false).is_empty());
+        assert!(families_for(0x1234, 0x5678, &shapes, false).is_empty());
+        // A recovery id never gets one, even with a row.
+        assert!(families_in(Some(&row), 0x3554, 0xF2FF, &shapes, false).is_empty());
     }
 
     #[test]

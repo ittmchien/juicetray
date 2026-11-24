@@ -197,6 +197,10 @@ fn check_as(target: &Target, family: Family) -> anyhow::Result<()> {
     if is_recovery(vid, pid) {
         bail!("{vid:04X}:{pid:04X} is a recovery id; nothing was sent");
     }
+    // A Generic spec is one catalogue row's own frame; no other id is ever sent it.
+    if matches!(family, Family::Generic(_)) && known(vid, pid).map(|d| d.family) != Some(family) {
+        bail!("{vid:04X}:{pid:04X} has no catalogue Generic row; nothing was sent");
+    }
     if !target.families.contains(&family) {
         bail!("{vid:04X}:{pid:04X} does not expose {name}; nothing was sent");
     }
@@ -264,7 +268,7 @@ fn await_reply(
 mod tests {
     use super::*;
     use crate::transport::Transport;
-    use protocol::{HidShape, Reading, ReportKind, ReportSize};
+    use protocol::{GenericReport, GenericSpec, HidShape, Reading, ReportKind, ReportSize};
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::rc::Rc;
@@ -1037,6 +1041,102 @@ mod tests {
             exchange.reply,
             Some((driveall_reply(64, 1), reading(64, true)))
         );
+    }
+
+    /// A Generic output row shaped like Driveall: report 0, reply `55 10 …` read without id 0.
+    static GENERIC_OUTPUT: GenericSpec = GenericSpec {
+        usage_page: 0xFF60,
+        usage: 0x0061,
+        report: GenericReport::Output,
+        report_bytes: 64,
+        request: &[0x00, 0xAA, 0x10, 0x30, 0, 0, 0, 0x01, 0],
+        reply_prefix: &[0x00, 0x55, 0x10],
+        level_byte: 26,
+        charging: None,
+        scale: 100,
+    };
+
+    /// A Generic feature row on report 0 whose reply carries the level at [2].
+    static GENERIC_FEATURE: GenericSpec = GenericSpec {
+        usage_page: 0xFFFF,
+        usage: 0x0002,
+        report: GenericReport::Feature,
+        report_bytes: 64,
+        request: &[0x00, 0xF7, 0, 0],
+        reply_prefix: &[0x00],
+        level_byte: 2,
+        charging: None,
+        scale: 100,
+    };
+
+    #[test]
+    fn generic_output_is_one_write_and_no_retry() {
+        let family = Family::Generic(&GENERIC_OUTPUT);
+        let notice = padded(&[0x55, 0xFC, 0x06], 64);
+        let mut reply = padded(&[0x55, 0x10, 0x30], 64);
+        reply[25] = 64;
+        let reads = bytes(&[notice.clone(), reply.clone()]);
+        let (mut device, log) = target(0x1234, 0x5678, Link::Hid, reads);
+        let mut door = Door::new(1);
+        let exchange = door
+            .exchange_until(&mut device, family, Query::Battery, far())
+            .expect("send");
+        assert_eq!(log.borrow().writes, vec![GENERIC_OUTPUT.request.to_vec()]);
+        assert!(log.borrow().features.is_empty());
+        assert_eq!(exchange.reply, Some((reply, reading(64, false))));
+        assert_eq!(exchange.unrelated, vec![notice]);
+        // The budget of 1 is spent: a second query is refused before any I/O.
+        let again = door.exchange_until(&mut device, family, Query::Battery, far());
+        assert!(error_text(again).contains("budget"));
+        assert_eq!(log.borrow().writes.len(), 1);
+        // No reply is no reading, and still one write.
+        let (mut silent, log) = target(0x1234, 0x5678, Link::Hid, Vec::new());
+        let exchange = Door::new(1)
+            .exchange_until(&mut silent, family, Query::Battery, far())
+            .expect("send");
+        assert_eq!(exchange.reply, None);
+        assert_eq!(log.borrow().writes.len(), 1);
+        let online = Door::new(1).exchange_until(&mut silent, family, Query::Online, far());
+        assert!(error_text(online).contains("no online query"));
+    }
+
+    #[test]
+    fn generic_feature_is_one_set_get_pair() {
+        let family = Family::Generic(&GENERIC_FEATURE);
+        let reply = padded(&[0x00, 0x01, 0x57], 4);
+        let (mut target, log) = target(
+            0x1234,
+            0x5678,
+            Link::Hid,
+            bytes(std::slice::from_ref(&reply)),
+        );
+        let mut door = Door::new(1);
+        let exchange = door
+            .exchange_until(&mut target, family, Query::Battery, far())
+            .expect("send");
+        assert!(log.borrow().writes.is_empty());
+        assert_eq!(
+            log.borrow().features,
+            vec![(GENERIC_FEATURE.request.to_vec(), Duration::from_millis(100))]
+        );
+        assert_eq!(exchange.reply, Some((reply, reading(87, false))));
+        assert!(
+            error_text(door.exchange_until(&mut target, family, Query::Battery, far()))
+                .contains("budget")
+        );
+        assert_eq!(log.borrow().features.len(), 1);
+    }
+
+    #[test]
+    fn send_as_never_sends_generic_outside_its_catalogue_row() {
+        let family = Family::Generic(&GENERIC_OUTPUT);
+        let shapes = vec![shape(0xFF60, 0x0061, both(0, 64))];
+        // Even a target claiming the family and opened on its collection is refused.
+        let (mut target, log) = opened_as(0x1234, 0x5678, &[family], shapes, Some(0));
+        let mut door = Door::new(1);
+        let result = door.send_as(&mut target, family);
+        assert_refused(&door, result, &log, "no catalogue Generic row");
+        assert!(log.borrow().features.is_empty());
     }
 
     #[test]
