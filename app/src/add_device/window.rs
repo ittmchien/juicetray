@@ -133,12 +133,16 @@ pub fn open(proxy: EventLoopProxy<UserEvent>, worker: Sender<Command>, id: Optio
     let spawned = std::thread::Builder::new()
         .name("add device".into())
         .spawn(move || {
-            run(proxy.clone(), worker);
+            run(proxy.clone(), worker.clone());
             // Cleared together under the lock `open` takes, so it sees both or neither.
-            {
+            let late = {
                 let mut handover = HANDOVER.lock().unwrap_or_else(PoisonError::into_inner);
-                handover.take();
                 OPEN.store(false, Ordering::Relaxed);
+                handover.take()
+            };
+            // An id handed over after WM_DESTROY found no window to take it: open a new one for it.
+            if let Some(id) = late {
+                open(proxy.clone(), worker, Some(id));
             }
             // A closed event loop means the app is exiting.
             let _ = proxy.send_event(UserEvent::AddDeviceClosed);
@@ -284,11 +288,11 @@ impl Session {
                 Err(TryRecvError::Empty) => return false,
                 Err(TryRecvError::Disconnected) => Event::Inspected(Inspection::Failed(stopped())),
             },
-            // A worker gone mid-try gave no answer to report: it failed, not "no reply".
+            // A worker gone mid-try may have died after its write, so the query may have been sent.
             Some(Pending::Try(answer)) => match answer.try_recv() {
                 Ok(outcome) => Event::Tried(outcome),
                 Err(TryRecvError::Empty) => return false,
-                Err(TryRecvError::Disconnected) => Event::Tried(TryOutcome::Failed(stopped())),
+                Err(TryRecvError::Disconnected) => Event::Tried(TryOutcome::Interrupted(stopped())),
             },
             Some(Pending::Save(answer)) => match answer.try_recv() {
                 Ok(saved) => Event::Saved(saved),

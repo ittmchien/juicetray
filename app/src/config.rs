@@ -372,8 +372,15 @@ impl Config {
     /// Takes the device keys of the file at `path` (none when it is missing). A file that is not
     /// valid TOML is an error: parsing it would give empty lists, and the write would erase them.
     fn take_file_device_lists(&mut self, path: &Path) -> Result<()> {
-        let Ok(text) = fs::read_to_string(path) else {
-            return Ok(());
+        // Only a missing file has no lists; an unreadable one (e.g. UTF-16) would be erased too.
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("{} could not be read; nothing was saved", path.display())
+                });
+            }
         };
         text.parse::<Table>().with_context(|| {
             format!(

@@ -870,7 +870,8 @@ impl App {
 
     fn save_config(&self) {
         if let Err(error) = self.config.save() {
-            eprintln!("saving config failed: {error:#}");
+            // The tray app has no console, so a refused save goes to the log file.
+            log::line(&format!("saving config failed: {error:#}"));
         }
     }
 

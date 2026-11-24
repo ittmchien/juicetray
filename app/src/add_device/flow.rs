@@ -292,7 +292,7 @@ impl Flow {
                 None
             }
             Event::Primary(input) => self.primary(input, now),
-            Event::Alt => self.alt(),
+            Event::Alt => self.alt(now),
         }
     }
 
@@ -715,8 +715,10 @@ impl Flow {
         }
     }
 
-    fn alt(&mut self) -> Option<Effect> {
+    fn alt(&mut self, now: Instant) -> Option<Effect> {
         match self.step {
+            // A wide [Try] overlaps [Not right], so a double-click on it must not dismiss the reading.
+            Step::Found { since, .. } if now < since + ADD_GUARD => None,
             Step::Found { id, reading, .. } => {
                 self.unsupported(
                     id,
@@ -1414,6 +1416,10 @@ mod tests {
         let mut flow = choosing(UNKNOWN, &[(Family::Compx, None)], now);
         press(&mut flow, now);
         flow.on(Event::Tried(TryOutcome::Reading(reading(52))), now);
+        // [Not right] waits out the same guard as [Add].
+        assert_eq!(flow.on(Event::Alt, now), None);
+        assert_eq!(flow.view(now).primary.as_deref(), Some("Add"));
+        let now = now + ADD_GUARD;
         assert_eq!(flow.on(Event::Alt, now), None);
         let view = flow.view(now);
         assert!(view.text.contains("(52 %) does not match"), "{}", view.text);
