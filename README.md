@@ -16,7 +16,7 @@ Juicetray only reads the value the OS stores; it sends nothing to the device.
 
 ### Verified on real hardware
 
-The level matches the vendor app; these are read automatically.
+Battery read correctly on the owner's devices; these are read automatically.
 
 **Headsets**
 
