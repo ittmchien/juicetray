@@ -2,6 +2,7 @@ use std::fmt::Display;
 use std::str::FromStr;
 use std::time::SystemTime;
 
+use strip_render::Theme;
 use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use ui_model::{
     DeviceKind, DeviceView, EMPTY_MENU_TEXT, IconChoice, IconColor, group_label, menu_line,
@@ -51,10 +52,12 @@ pub enum MenuAction {
     SetLow(Option<u8>),
     ToggleHidden(String),
     TogglePercent(String),
+    ToggleLabel(String),
     SetIcon(String, IconChoice),
     PickSvg(String),
-    SetColor(String, IconColor),
-    CustomColor(String),
+    /// The colour for one taskbar theme.
+    SetColor(String, Theme, IconColor),
+    CustomColor(String, Theme),
     /// One battery query for an unconfirmed receiver; carries only the row id.
     CheckBattery(String),
     /// Minutes before an offline device leaves the strip; `None` = never.
@@ -137,8 +140,10 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         "offline" => choice_from_id(rest, &HIDE_OFFLINE_CHOICES).map(MenuAction::SetHideOffline),
         "hide" => Some(MenuAction::ToggleHidden(device)),
         "pct" => Some(MenuAction::TogglePercent(device)),
+        "label" => Some(MenuAction::ToggleLabel(device)),
         "svg" => Some(MenuAction::PickSvg(device)),
-        "ccolor" => Some(MenuAction::CustomColor(device)),
+        "ccolor-light" => Some(MenuAction::CustomColor(device, Theme::Light)),
+        "ccolor-dark" => Some(MenuAction::CustomColor(device, Theme::Dark)),
         "check" => Some(MenuAction::CheckBattery(device)),
         "icon" => {
             let (value, device) = rest.split_once(':')?;
@@ -149,9 +154,18 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
             };
             Some(MenuAction::SetIcon(device.to_owned(), icon))
         }
-        "color" => {
+        "color-light" | "color-dark" => {
+            let theme = if action == "color-light" {
+                Theme::Light
+            } else {
+                Theme::Dark
+            };
             let (value, device) = rest.split_once(':')?;
-            Some(MenuAction::SetColor(device.to_owned(), parse_color(value)?))
+            Some(MenuAction::SetColor(
+                device.to_owned(),
+                theme,
+                parse_color(value)?,
+            ))
         }
         _ => None,
     }
@@ -258,8 +272,16 @@ fn device_entry(device: &DeviceView, config: &Config, now: SystemTime) -> MenuEn
             !config.is_hidden(id, &device.name),
         ),
         MenuEntry::check(format!("pct:{id}"), "Show percentage", options.show_percent),
+        MenuEntry::check(format!("label:{id}"), "Show label", options.show_label),
         MenuEntry::submenu("Icon", icon_entries(id, &options.icon)),
-        MenuEntry::submenu("Icon colour", color_entries(id, options.color, is_svg)),
+        MenuEntry::submenu(
+            "Light theme",
+            color_entries(id, Theme::Light, options.color_light, is_svg),
+        ),
+        MenuEntry::submenu(
+            "Dark theme",
+            color_entries(id, Theme::Dark, options.color_dark, is_svg),
+        ),
     ]);
     // An offline device's line (disconnected, or a stale receiver) is greyed out.
     MenuEntry {
@@ -287,15 +309,29 @@ fn icon_entries(id: &str, current: &IconChoice) -> Vec<MenuEntry> {
     entries
 }
 
-/// Auto, Original (SVG icons only), the palette, then `Custom…` showing a non-palette colour.
-fn color_entries(id: &str, current: IconColor, is_svg: bool) -> Vec<MenuEntry> {
+/// Id prefixes of one theme colour entries: the plain choices and the `Custom…` item.
+fn color_id_prefixes(theme: Theme) -> (&'static str, &'static str) {
+    match theme {
+        Theme::Light => ("color-light", "ccolor-light"),
+        Theme::Dark => ("color-dark", "ccolor-dark"),
+    }
+}
+
+/// One theme colours: Auto, Original (SVG icons only), the palette, then `Custom…` showing a
+/// non-palette colour.
+fn color_entries(id: &str, theme: Theme, current: IconColor, is_svg: bool) -> Vec<MenuEntry> {
+    let (color_prefix, custom_prefix) = color_id_prefixes(theme);
     let color_entry = |label: &str, color: IconColor| {
         let value = match color {
             IconColor::Auto => "auto".to_owned(),
             IconColor::Original => "original".to_owned(),
             IconColor::Rgb(red, green, blue) => hex(red, green, blue),
         };
-        MenuEntry::check(format!("color:{value}:{id}"), label, current == color)
+        MenuEntry::check(
+            format!("{color_prefix}:{value}:{id}"),
+            label,
+            current == color,
+        )
     };
     let mut entries = vec![
         color_entry("Auto", IconColor::Auto),
@@ -316,7 +352,7 @@ fn color_entries(id: &str, current: IconColor, is_svg: bool) -> Vec<MenuEntry> {
         _ => None,
     };
     entries.push(MenuEntry::check(
-        format!("ccolor:{id}"),
+        format!("{custom_prefix}:{id}"),
         custom
             .as_ref()
             .map_or_else(|| "Custom…".to_owned(), |hex| format!("Custom… (#{hex})")),
@@ -491,7 +527,8 @@ mod tests {
         assert_eq!(action_for("login"), Some(MenuAction::ToggleStartAtLogin));
         assert_eq!(action_for("auto:7"), None);
         assert_eq!(action_for("icon:toaster:bt:x"), None);
-        assert_eq!(action_for("color:zzz:bt:x"), None);
+        assert_eq!(action_for("color-light:zzz:bt:x"), None);
+        assert_eq!(action_for("color:3E8EED:bt:x"), None);
         assert_eq!(action_for("nope"), None);
     }
 
@@ -512,8 +549,16 @@ mod tests {
                 Some(MenuAction::PickSvg(owned.clone()))
             );
             assert_eq!(
-                action_for(&format!("ccolor:{id}")),
-                Some(MenuAction::CustomColor(owned.clone()))
+                action_for(&format!("label:{id}")),
+                Some(MenuAction::ToggleLabel(owned.clone()))
+            );
+            assert_eq!(
+                action_for(&format!("ccolor-light:{id}")),
+                Some(MenuAction::CustomColor(owned.clone(), Theme::Light))
+            );
+            assert_eq!(
+                action_for(&format!("ccolor-dark:{id}")),
+                Some(MenuAction::CustomColor(owned.clone(), Theme::Dark))
             );
             assert_eq!(
                 action_for(&format!("icon:mouse:{id}")),
@@ -527,15 +572,20 @@ mod tests {
                 Some(MenuAction::SetIcon(owned.clone(), IconChoice::Auto))
             );
             assert_eq!(
-                action_for(&format!("color:3E8EED:{id}")),
+                action_for(&format!("color-light:3E8EED:{id}")),
                 Some(MenuAction::SetColor(
                     owned.clone(),
+                    Theme::Light,
                     IconColor::Rgb(0x3E, 0x8E, 0xED)
                 ))
             );
             assert_eq!(
-                action_for(&format!("color:original:{id}")),
-                Some(MenuAction::SetColor(owned, IconColor::Original))
+                action_for(&format!("color-dark:original:{id}")),
+                Some(MenuAction::SetColor(
+                    owned,
+                    Theme::Dark,
+                    IconColor::Original
+                ))
             );
         }
     }
@@ -552,8 +602,8 @@ mod tests {
             ids.extend(entry.id.as_deref());
             stack.extend(&entry.children);
         }
-        // Show on strip, Show percentage, 8 icon and 10 colour entries.
-        assert_eq!(ids.len(), 20);
+        // Show on strip, Show percentage, Show label, 8 icon and 10 colour entries per theme.
+        assert_eq!(ids.len(), 31);
         for id in ids {
             assert!(action_for(id).is_some(), "{id}");
             assert!(id.ends_with(MAC_ID), "{id}");
@@ -612,8 +662,10 @@ mod tests {
         config.update_device(HEX_ID, "MX Master", |options| {
             *options = DisplayOptions {
                 show_percent: false,
+                show_label: false,
                 icon: IconChoice::Kind(DeviceKind::Mouse),
-                color: IconColor::Rgb(0x3E, 0x8E, 0xED),
+                color_light: IconColor::Rgb(0x3E, 0x8E, 0xED),
+                color_dark: IconColor::Rgb(0x30, 0xA4, 0x6C),
             };
         });
         let entries = entries(&[device], &config, LoginState::Disabled);
@@ -625,10 +677,13 @@ mod tests {
             ticked_ids(child(submenu, "Icon")),
             [format!("icon:mouse:{HEX_ID}")]
         );
-        let colors = child(submenu, "Icon colour");
-        assert_eq!(ticked_ids(colors), [format!("color:3E8EED:{HEX_ID}")]);
-        assert!(!child(colors, "Original").enabled);
-        assert_eq!(child(colors, "Custom…").checked, Some(false));
+        assert_eq!(child(submenu, "Show label").checked, Some(false));
+        let light = child(submenu, "Light theme");
+        assert_eq!(ticked_ids(light), [format!("color-light:3E8EED:{HEX_ID}")]);
+        assert!(!child(light, "Original").enabled);
+        assert_eq!(child(light, "Custom…").checked, Some(false));
+        let dark = child(submenu, "Dark theme");
+        assert_eq!(ticked_ids(dark), [format!("color-dark:30A46C:{HEX_ID}")]);
     }
 
     #[test]
@@ -638,7 +693,7 @@ mod tests {
         let mut config = Config::default();
         config.update_device(MAC_ID, "Atom", |options| {
             options.icon = IconChoice::Svg("a.svg".into());
-            options.color = IconColor::Rgb(0xFF, 0x88, 0x00);
+            options.color_light = IconColor::Rgb(0xFF, 0x88, 0x00);
         });
         let entries = entries(&[device], &config, LoginState::Disabled);
         let submenu = first_device(&entries);
@@ -647,10 +702,13 @@ mod tests {
             ticked_ids(child(submenu, "Icon")),
             [format!("svg:{MAC_ID}")]
         );
-        let colors = child(submenu, "Icon colour");
-        assert!(child(colors, "Original").enabled);
-        assert_eq!(ticked_ids(colors), [format!("ccolor:{MAC_ID}")]);
-        assert_eq!(child(colors, "Custom… (#FF8800)").checked, Some(true));
+        let light = child(submenu, "Light theme");
+        assert!(child(light, "Original").enabled);
+        assert_eq!(ticked_ids(light), [format!("ccolor-light:{MAC_ID}")]);
+        assert_eq!(child(light, "Custom… (#FF8800)").checked, Some(true));
+        // The dark theme keeps its own choice.
+        let dark = child(submenu, "Dark theme");
+        assert_eq!(ticked_ids(dark), [format!("color-dark:auto:{MAC_ID}")]);
     }
 
     #[test]

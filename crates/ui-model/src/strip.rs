@@ -22,8 +22,9 @@ pub struct Segment {
     pub style: SegmentStyle,
     /// Never `Auto`: resolved to `Kind(kind)` when the strip is built.
     pub icon: IconChoice,
-    /// `Original` only with an SVG icon.
-    pub color: IconColor,
+    /// `Original` only with an SVG icon; the renderer picks the one for its theme.
+    pub color_light: IconColor,
+    pub color_dark: IconColor,
     /// Battery level to draw; `None` only for the placeholder.
     pub gauge: Option<u8>,
 }
@@ -55,7 +56,8 @@ pub fn build_strip(
         .into_iter()
         .zip(device_captions)
         .map(|((device, percent, options), caption)| Segment {
-            caption,
+            // A device with its label switched off never shows a caption.
+            caption: caption.filter(|_| options.show_label),
             text: if options.show_percent {
                 format!("{percent}%")
             } else {
@@ -63,26 +65,28 @@ pub fn build_strip(
             },
             style: style_for(device, percent, threshold),
             icon: options.icon,
-            color: options.color,
+            color_light: options.color_light,
+            color_dark: options.color_dark,
             gauge: Some(percent),
         })
         .collect()
 }
 
-/// Replaces `Auto` icon by the device kind and drops `Original` colour without an SVG.
+/// Replaces `Auto` icon by the device kind and drops `Original` colours without an SVG.
 fn resolve_options(kind: DeviceKind, options: DisplayOptions) -> DisplayOptions {
     let icon = match options.icon {
         IconChoice::Auto => IconChoice::Kind(kind),
         chosen => chosen,
     };
-    let color = match (&icon, options.color) {
-        (IconChoice::Svg(_), color) => color,
-        (_, IconColor::Original) => IconColor::Auto,
-        (_, color) => color,
+    let is_svg = matches!(icon, IconChoice::Svg(_));
+    let resolve = |color| match color {
+        IconColor::Original if !is_svg => IconColor::Auto,
+        color => color,
     };
     DisplayOptions {
         icon,
-        color,
+        color_light: resolve(options.color_light),
+        color_dark: resolve(options.color_dark),
         ..options
     }
 }
@@ -93,7 +97,8 @@ fn placeholder() -> Segment {
         text: "–".to_owned(),
         style: SegmentStyle::Placeholder,
         icon: IconChoice::Kind(DeviceKind::Other),
-        color: IconColor::Auto,
+        color_light: IconColor::Auto,
+        color_dark: IconColor::Auto,
         gauge: None,
     }
 }
@@ -211,7 +216,8 @@ mod tests {
                 text: "–".to_owned(),
                 style: SegmentStyle::Placeholder,
                 icon: IconChoice::Kind(DeviceKind::Other),
-                color: IconColor::Auto,
+                color_light: IconColor::Auto,
+                color_dark: IconColor::Auto,
                 gauge: None,
             }]
         );
@@ -267,28 +273,31 @@ mod tests {
     fn original_color_needs_svg() {
         let original = |icon| DisplayOptions {
             icon,
-            color: IconColor::Original,
+            color_light: IconColor::Original,
+            color_dark: IconColor::Original,
             ..DisplayOptions::default()
         };
         let builtin = one(
             percent("a", 40),
             original(IconChoice::Kind(DeviceKind::Mouse)),
         );
-        assert_eq!(builtin.color, IconColor::Auto);
+        assert_eq!(builtin.color_light, IconColor::Auto);
+        assert_eq!(builtin.color_dark, IconColor::Auto);
         let svg = one(percent("a", 40), original(IconChoice::Svg("a.svg".into())));
-        assert_eq!(svg.color, IconColor::Original);
+        assert_eq!(svg.color_light, IconColor::Original);
+        assert_eq!(svg.color_dark, IconColor::Original);
     }
 
     #[test]
     fn rgb_color_passes_through() {
         let options = DisplayOptions {
-            color: IconColor::Rgb(1, 2, 3),
+            color_light: IconColor::Rgb(1, 2, 3),
+            color_dark: IconColor::Rgb(4, 5, 6),
             ..DisplayOptions::default()
         };
-        assert_eq!(
-            one(percent("a", 40), options).color,
-            IconColor::Rgb(1, 2, 3)
-        );
+        let segment = one(percent("a", 40), options);
+        assert_eq!(segment.color_light, IconColor::Rgb(1, 2, 3));
+        assert_eq!(segment.color_dark, IconColor::Rgb(4, 5, 6));
     }
 
     #[test]
@@ -351,6 +360,18 @@ mod tests {
         let segments = build_strip(&[first, second], None, &[], &options);
         assert_eq!(segments[0].caption.as_deref(), Some("AB1"));
         assert_eq!(segments[1].caption.as_deref(), Some("CD2"));
+    }
+
+    #[test]
+    fn label_off_suppresses_only_that_devices_caption() {
+        let devices = [percent("WH-1000XM4", 50), percent("WH-1000XM5", 60)];
+        let options = |id: &str| DisplayOptions {
+            show_label: id != "bt:WH-1000XM4",
+            ..DisplayOptions::default()
+        };
+        let segments = build_strip(&devices, None, &[], &options);
+        assert_eq!(segments[0].caption, None);
+        assert_eq!(segments[1].caption.as_deref(), Some("XM5"));
     }
 
     #[test]

@@ -21,7 +21,8 @@ fn segment(
         text: percent.map_or_else(|| "–".to_owned(), |p| format!("{p}%")),
         style,
         icon: IconChoice::Kind(kind),
-        color: IconColor::Auto,
+        color_light: IconColor::Auto,
+        color_dark: IconColor::Auto,
         gauge: percent,
     }
 }
@@ -29,7 +30,8 @@ fn segment(
 fn with_icon(segment: Segment, icon: IconChoice, color: IconColor) -> Segment {
     Segment {
         icon,
-        color,
+        color_light: color,
+        color_dark: color,
         ..segment
     }
 }

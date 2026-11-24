@@ -204,7 +204,12 @@ fn draw_segment(
     let mut cursor = x;
 
     let (icon, is_svg) = resolve_icon(&segment.icon, scene.svgs);
-    let tint = icon_tint(segment.color, is_svg, palette.ink);
+    // Each theme has its own icon colour, so the owner can pick one that reads on that bar.
+    let color = match scene.theme {
+        Theme::Light => segment.color_light,
+        Theme::Dark => segment.color_dark,
+    };
+    let tint = icon_tint(color, is_svg, palette.ink);
     canvas.draw_icon(icon, cursor, top, icon_size, tint);
     cursor += icon_size;
 
@@ -416,7 +421,8 @@ mod tests {
             text: "42%".to_owned(),
             style,
             icon: IconChoice::Kind(DeviceKind::Headset),
-            color: IconColor::Auto,
+            color_light: IconColor::Auto,
+            color_dark: IconColor::Auto,
             gauge: Some(42),
         }
     }
@@ -445,7 +451,8 @@ mod tests {
     fn svg_segment(color: IconColor) -> Segment {
         Segment {
             icon: IconChoice::Svg("t.svg".to_owned()),
-            color,
+            color_light: color,
+            color_dark: color,
             ..segment(SegmentStyle::Normal)
         }
     }
@@ -660,7 +667,8 @@ mod tests {
             text: "–".to_owned(),
             style: SegmentStyle::Placeholder,
             icon: IconChoice::Kind(DeviceKind::Other),
-            color: IconColor::Auto,
+            color_light: IconColor::Auto,
+            color_dark: IconColor::Auto,
             gauge: None,
         };
         let bitmap = strip(&[placeholder], 44, Theme::Light);
@@ -702,7 +710,8 @@ mod tests {
     fn builtin_icon_takes_the_chosen_colour() {
         let blue = Segment {
             icon: IconChoice::Kind(DeviceKind::Mouse),
-            color: IconColor::Rgb(0x3E, 0x8E, 0xED),
+            color_light: IconColor::Rgb(0x3E, 0x8E, 0xED),
+            color_dark: IconColor::Rgb(0x3E, 0x8E, 0xED),
             ..segment(SegmentStyle::Normal)
         };
         let bitmap = strip(&[blue], 44, Theme::Light);
@@ -721,6 +730,21 @@ mod tests {
         let opaque: Vec<_> = icon.iter().filter(|p| p[3] == 255).collect();
         assert!(!opaque.is_empty());
         assert!(opaque.iter().all(|p| p[..3] == blue_channels));
+    }
+
+    #[test]
+    fn icon_colour_follows_the_theme() {
+        let split = Segment {
+            color_light: IconColor::Rgb(0xE5, 0x48, 0x4D),
+            color_dark: IconColor::Rgb(0x3E, 0x8E, 0xED),
+            ..svg_segment(IconColor::Auto)
+        };
+        let is_red = |r: u8, g: u8, b: u8| r > 200 && g < 100 && b < 100;
+        let is_blue = |r: u8, g: u8, b: u8| r < 100 && g > 100 && b > 200;
+        let light = svg_strip(&split, Theme::Light);
+        assert!(has_pixel(&light, is_red) && !has_pixel(&light, is_blue));
+        let dark = svg_strip(&split, Theme::Dark);
+        assert!(has_pixel(&dark, is_blue) && !has_pixel(&dark, is_red));
     }
 
     #[test]

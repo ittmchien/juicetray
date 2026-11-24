@@ -23,16 +23,23 @@ pub enum IconColor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayOptions {
     pub show_percent: bool,
+    /// Whether the small caption telling same-icon devices apart may show.
+    pub show_label: bool,
     pub icon: IconChoice,
-    pub color: IconColor,
+    /// Icon colour on a light taskbar / menu bar.
+    pub color_light: IconColor,
+    /// Icon colour on a dark taskbar / menu bar.
+    pub color_dark: IconColor,
 }
 
 impl Default for DisplayOptions {
     fn default() -> Self {
         Self {
             show_percent: true,
+            show_label: true,
             icon: IconChoice::Auto,
-            color: IconColor::Auto,
+            color_light: IconColor::Auto,
+            color_dark: IconColor::Auto,
         }
     }
 }

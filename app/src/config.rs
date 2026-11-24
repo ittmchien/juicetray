@@ -260,10 +260,15 @@ pub fn hex(red: u8, green: u8, blue: u8) -> String {
     format!("{red:02X}{green:02X}{blue:02X}")
 }
 
-/// `Original` only means something for an SVG icon; with a built-in icon it is Auto.
+/// `Original` only means something for an SVG icon; with a built-in icon it is Auto, per theme.
 fn drop_stray_original(options: &mut DisplayOptions) {
-    if options.color == IconColor::Original && !matches!(options.icon, IconChoice::Svg(_)) {
-        options.color = IconColor::Auto;
+    if matches!(options.icon, IconChoice::Svg(_)) {
+        return;
+    }
+    for color in [&mut options.color_light, &mut options.color_dark] {
+        if *color == IconColor::Original {
+            *color = IconColor::Auto;
+        }
     }
 }
 
@@ -357,15 +362,21 @@ fn device_config(entry: &Table) -> DeviceConfig {
         (Some(name), _) => name.parse().map_or(IconChoice::Auto, IconChoice::Kind),
         (None, _) => IconChoice::Auto,
     };
-    let mut options = DisplayOptions {
-        show_percent: entry
-            .get("show_percent")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        icon,
-        color: text("color")
+    let flag = |key: &str| entry.get(key).and_then(Value::as_bool).unwrap_or(true);
+    // compat: the single `color` key of older files stands in for whichever theme key is missing.
+    let legacy = text("color").and_then(parse_color);
+    let theme_color = |key: &str| {
+        text(key)
             .and_then(parse_color)
-            .unwrap_or(IconColor::Auto),
+            .or(legacy)
+            .unwrap_or(IconColor::Auto)
+    };
+    let mut options = DisplayOptions {
+        show_percent: flag("show_percent"),
+        show_label: flag("show_label"),
+        icon,
+        color_light: theme_color("color_light"),
+        color_dark: theme_color("color_dark"),
     };
     drop_stray_original(&mut options);
     DeviceConfig {
@@ -379,6 +390,7 @@ fn device_table(device: &DeviceConfig) -> Table {
     let mut entry = Table::new();
     entry.insert("name".into(), Value::String(device.name.clone()));
     entry.insert("show_percent".into(), Value::Boolean(options.show_percent));
+    entry.insert("show_label".into(), Value::Boolean(options.show_label));
     let icon = match &options.icon {
         IconChoice::Auto => ICON_AUTO,
         IconChoice::Kind(kind) => kind.as_str(),
@@ -388,12 +400,18 @@ fn device_table(device: &DeviceConfig) -> Table {
         }
     };
     entry.insert("icon".into(), Value::String(icon.to_owned()));
-    let color = match options.color {
-        IconColor::Auto => COLOR_AUTO.to_owned(),
-        IconColor::Original => COLOR_ORIGINAL.to_owned(),
-        IconColor::Rgb(red, green, blue) => format!("#{}", hex(red, green, blue)),
-    };
-    entry.insert("color".into(), Value::String(color));
+    // The single `color` key is no longer written; `device_config` still reads it.
+    for (key, color) in [
+        ("color_light", options.color_light),
+        ("color_dark", options.color_dark),
+    ] {
+        let text = match color {
+            IconColor::Auto => COLOR_AUTO.to_owned(),
+            IconColor::Original => COLOR_ORIGINAL.to_owned(),
+            IconColor::Rgb(red, green, blue) => format!("#{}", hex(red, green, blue)),
+        };
+        entry.insert(key.into(), Value::String(text));
+    }
     entry
 }
 
@@ -614,24 +632,72 @@ mod tests {
         config.update_device(MAC_ID, "FIIL Atom", |options| {
             *options = DisplayOptions {
                 show_percent: false,
+                show_label: false,
                 icon: IconChoice::Svg("C:\\icons\\atom.svg".into()),
-                color: IconColor::Original,
+                color_light: IconColor::Original,
+                color_dark: IconColor::Rgb(0xFF, 0x88, 0x00),
             };
         });
         config.update_device(hex_id, "MX Master", |options| {
             *options = DisplayOptions {
                 show_percent: true,
+                show_label: true,
                 icon: IconChoice::Kind(DeviceKind::Mouse),
-                color: IconColor::Rgb(0x3E, 0x8E, 0xED),
+                color_light: IconColor::Rgb(0x3E, 0x8E, 0xED),
+                color_dark: IconColor::Auto,
             };
         });
         let loaded = Config::parse(&config.to_toml());
         assert_eq!(loaded, config);
         assert_eq!(loaded.devices[MAC_ID].name, "FIIL Atom");
         assert_eq!(
-            loaded.display_options(hex_id).color,
+            loaded.display_options(hex_id).color_light,
             IconColor::Rgb(0x3E, 0x8E, 0xED)
         );
+        // The single `color` key is never written again.
+        let written: Table = config.to_toml().parse().unwrap();
+        let entry = written["devices"][MAC_ID].as_table().unwrap();
+        assert!(!entry.contains_key("color"));
+        assert_eq!(entry["show_label"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn legacy_color_applies_to_both_themes() {
+        let config = Config::parse(concat!(
+            "[devices.\"bt:a\"]\n",
+            "color = \"#3E8EED\"\n",
+            "[devices.\"bt:b\"]\n",
+            "color = \"#3E8EED\"\n",
+            "color_dark = \"auto\"\n",
+            "[devices.\"bt:c\"]\n",
+            "color = \"#3E8EED\"\n",
+            "color_light = \"#FF8800\"\n",
+            "color_dark = \"#000001\"\n",
+        ));
+        let blue = IconColor::Rgb(0x3E, 0x8E, 0xED);
+        let a = config.display_options("bt:a");
+        assert_eq!((a.color_light, a.color_dark), (blue, blue));
+        // A present new key wins; the old one fills only the missing theme.
+        let b = config.display_options("bt:b");
+        assert_eq!((b.color_light, b.color_dark), (blue, IconColor::Auto));
+        let c = config.display_options("bt:c");
+        assert_eq!(c.color_light, IconColor::Rgb(0xFF, 0x88, 0x00));
+        assert_eq!(c.color_dark, IconColor::Rgb(0x00, 0x00, 0x01));
+        // Saving migrates to the new keys.
+        assert_eq!(Config::parse(&config.to_toml()), config);
+        assert!(!config.to_toml().contains("color = "));
+    }
+
+    #[test]
+    fn show_label_defaults_on() {
+        let config = Config::parse(concat!(
+            "[devices.\"bt:a\"]\n",
+            "show_label = false\n",
+            "[devices.\"bt:b\"]\n",
+        ));
+        assert!(!config.display_options("bt:a").show_label);
+        assert!(config.display_options("bt:b").show_label);
+        assert!(config.display_options("bt:unknown").show_label);
     }
 
     #[test]
@@ -653,7 +719,8 @@ mod tests {
         // `original` with a built-in icon reads as Auto.
         let b = config.display_options("bt:b");
         assert_eq!(b.icon, IconChoice::Kind(DeviceKind::Mouse));
-        assert_eq!(b.color, IconColor::Auto);
+        assert_eq!(b.color_light, IconColor::Auto);
+        assert_eq!(b.color_dark, IconColor::Auto);
         assert_eq!(config.display_options("bt:c"), DisplayOptions::default());
         assert_eq!(
             config.display_options("bt:unknown"),
@@ -678,10 +745,13 @@ mod tests {
         let mut config = Config::default();
         config.update_device(MAC_ID, "FIIL Atom", |options| {
             options.icon = IconChoice::Svg("a.svg".into());
-            options.color = IconColor::Original;
+            options.color_light = IconColor::Original;
+            options.color_dark = IconColor::Original;
         });
         config.update_device(MAC_ID, "", |options| options.icon = IconChoice::Auto);
-        assert_eq!(config.display_options(MAC_ID).color, IconColor::Auto);
+        let options = config.display_options(MAC_ID);
+        assert_eq!(options.color_light, IconColor::Auto);
+        assert_eq!(options.color_dark, IconColor::Auto);
         assert_eq!(config.devices[MAC_ID].name, "FIIL Atom");
     }
 

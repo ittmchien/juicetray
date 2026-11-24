@@ -73,8 +73,10 @@ mod tests {
     fn svg_options(path: &str) -> DisplayOptions {
         DisplayOptions {
             show_percent: false,
+            show_label: true,
             icon: IconChoice::Svg(path.to_owned()),
-            color: IconColor::Original,
+            color_light: IconColor::Original,
+            color_dark: IconColor::Original,
         }
     }
 

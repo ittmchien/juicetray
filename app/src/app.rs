@@ -20,7 +20,7 @@ use ui_model::{
 };
 
 use crate::alerts::{AlertState, notify_low_battery};
-use crate::config::{self, Config};
+use crate::config::Config;
 use crate::interval::{format_interval, parse_interval};
 use crate::login::{self, LoginState};
 use crate::menu::{self, MenuAction, MenuEntry};
@@ -43,8 +43,9 @@ const BLUETOOTH_PERMISSION_HINT: &str = "Allow Bluetooth in System Settings › 
 
 const REFRESH_PROMPT_TITLE: &str = "Custom auto-refresh";
 const REFRESH_PROMPT: &str = "How often to read the batteries, from 5s to 24h: 45s, 2m30s, 1h30m.";
-const COLOR_PROMPT_TITLE: &str = "Custom icon colour";
+#[cfg(not(windows))]
 const COLOR_PROMPT: &str = "Type a colour as #RRGGBB, for example #FF8800.";
+#[cfg(not(windows))]
 const COLOR_HINT: &str = "That is not a colour. Type #RRGGBB, for example #FF8800.";
 
 pub enum UserEvent {
@@ -283,7 +284,7 @@ impl App {
             MenuAction::SetRefresh(seconds) => self.set_refresh(seconds),
             MenuAction::CustomRefresh => self.prompt_refresh(),
             MenuAction::PickSvg(id) => self.pick_svg(&id),
-            MenuAction::CustomColor(id) => self.prompt_color(&id),
+            MenuAction::CustomColor(id, theme) => self.prompt_color(&id, theme),
             MenuAction::CheckBattery(id) => self.tell_worker(Command::CheckReceiver(id)),
             MenuAction::SetLow(percent) => {
                 self.config.low_battery_percent = percent;
@@ -297,9 +298,12 @@ impl App {
             MenuAction::TogglePercent(id) => {
                 self.update_device(&id, |options| options.show_percent = !options.show_percent);
             }
+            MenuAction::ToggleLabel(id) => {
+                self.update_device(&id, |options| options.show_label = !options.show_label);
+            }
             MenuAction::SetIcon(id, icon) => self.update_device(&id, |options| options.icon = icon),
-            MenuAction::SetColor(id, color) => {
-                self.update_device(&id, |options| options.color = color);
+            MenuAction::SetColor(id, theme, color) => {
+                self.update_device(&id, |options| set_theme_color(options, theme, color));
             }
             MenuAction::SetHideOffline(minutes) => {
                 self.config.hide_offline_minutes = minutes;
@@ -340,17 +344,12 @@ impl App {
         }
     }
 
-    /// Asks for a `#RRGGBB` icon colour, pre-filled with the device's custom one.
-    fn prompt_color(&mut self, id: &str) {
-        let current = match self.config.display_options(id).color {
-            IconColor::Rgb(red, green, blue) => format!("#{}", config::hex(red, green, blue)),
-            IconColor::Auto | IconColor::Original => String::new(),
-        };
+    /// Asks for a custom icon colour of one theme, starting from that theme's current colour.
+    fn prompt_color(&mut self, id: &str, theme: Theme) {
+        let current = theme_color(&self.config.display_options(id), theme);
         let _span = log::span("dialog color prompt");
-        if let Some(color) =
-            dialog::prompt_parsed(COLOR_PROMPT_TITLE, COLOR_PROMPT, &current, parse_hex_color)
-        {
-            self.update_device(id, |options| options.color = color);
+        if let Some(color) = ask_color(current, theme) {
+            self.update_device(id, |options| set_theme_color(options, theme, color));
         }
     }
 
@@ -678,9 +677,50 @@ fn install_edit_menu() -> Option<Menu> {
     }
 }
 
+fn theme_color(options: &DisplayOptions, theme: Theme) -> IconColor {
+    match theme {
+        Theme::Light => options.color_light,
+        Theme::Dark => options.color_dark,
+    }
+}
+
+fn set_theme_color(options: &mut DisplayOptions, theme: Theme, color: IconColor) {
+    match theme {
+        Theme::Light => options.color_light = color,
+        Theme::Dark => options.color_dark = color,
+    }
+}
+
+/// The Windows colour dialog, opened on `current`; Auto and Original have no colour of their
+/// own, so it opens on the theme ink.
+#[cfg(windows)]
+fn ask_color(current: IconColor, theme: Theme) -> Option<IconColor> {
+    let seed = match (current, theme) {
+        (IconColor::Rgb(red, green, blue), _) => (red, green, blue),
+        (_, Theme::Light) => (0, 0, 0),
+        (_, Theme::Dark) => (255, 255, 255),
+    };
+    dialog::pick_color(seed).map(|(red, green, blue)| IconColor::Rgb(red, green, blue))
+}
+
+/// macOS has no colour dialog here: a `#RRGGBB` prompt pre-filled with the current custom colour.
+#[cfg(not(windows))]
+fn ask_color(current: IconColor, theme: Theme) -> Option<IconColor> {
+    let shown = match current {
+        IconColor::Rgb(red, green, blue) => format!("#{}", crate::config::hex(red, green, blue)),
+        IconColor::Auto | IconColor::Original => String::new(),
+    };
+    let title = match theme {
+        Theme::Light => "Custom icon colour (light theme)",
+        Theme::Dark => "Custom icon colour (dark theme)",
+    };
+    dialog::prompt_parsed(title, COLOR_PROMPT, &shown, parse_hex_color)
+}
+
 /// Only a `#RRGGBB` colour (the `#` is optional) counts as a custom colour.
+#[cfg(not(windows))]
 fn parse_hex_color(text: &str) -> Result<IconColor, String> {
-    match config::parse_color(text.trim()) {
+    match crate::config::parse_color(text.trim()) {
         Some(color @ IconColor::Rgb(..)) => Ok(color),
         _ => Err(COLOR_HINT.to_owned()),
     }

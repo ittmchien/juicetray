@@ -1,5 +1,6 @@
-//! Native dialogs opened from a menu click: a one-line text prompt and the SVG file picker.
-//! Both run modally on the main thread and return when the owner closes them.
+//! Native dialogs opened from a menu click: a one-line text prompt, the SVG file picker and, on
+//! Windows, the colour picker. All run modally on the main thread and return when the owner
+//! closes them.
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -35,6 +36,13 @@ pub fn prompt_parsed<T>(
             Err(error) => shown_message = error,
         }
     }
+}
+
+/// The system colour dialog seeded with `initial` as `(red, green, blue)`; `None` when
+/// cancelled. macOS has no such dialog here and asks for a hex colour instead.
+#[cfg(windows)]
+pub fn pick_color(initial: (u8, u8, u8)) -> Option<(u8, u8, u8)> {
+    platform::pick_color(initial)
 }
 
 /// The owner's choice of one `.svg` file; `None` when cancelled.

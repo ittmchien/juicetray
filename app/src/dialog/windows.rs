@@ -1,5 +1,10 @@
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
+use std::sync::{Mutex, PoisonError};
+
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Controls::Dialogs::{
+    CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW, CommDlgExtendedError,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     BS_DEFPUSHBUTTON, BS_PUSHBUTTON, DLGTEMPLATE, DS_CENTER, DS_MODALFRAME, DS_SETFONT,
     DS_SETFOREGROUND, DialogBoxIndirectParamW, ES_AUTOHSCROLL, EndDialog, GWLP_USERDATA,
@@ -28,6 +33,9 @@ const MESSAGE_RECT: [i16; 4] = [7, 7, 206, 26];
 const INPUT_RECT: [i16; 4] = [7, 38, 206, 14];
 const OK_RECT: [i16; 4] = [109, 62, 50, 14];
 const CANCEL_RECT: [i16; 4] = [163, 62, 50, 14];
+
+/// The colour dialog's 16 custom slots, kept for the session; white marks an unused slot.
+static CUSTOM_COLORS: Mutex<[COLORREF; 16]> = Mutex::new([COLORREF(0x00FF_FFFF); 16]);
 
 /// What the dialog procedure reads at start and writes on OK.
 struct Prompt {
@@ -68,6 +76,34 @@ pub fn prompt_text(title: &str, message: &str, default: &str) -> Option<String> 
         );
     }
     prompt.answer
+}
+
+/// The system colour dialog, opened in full (custom colour) form on `initial`; `None` when the
+/// owner cancels or the dialog fails.
+pub fn pick_color((red, green, blue): (u8, u8, u8)) -> Option<(u8, u8, u8)> {
+    // Held across the modal call: the dialog reads and updates the slots while it is open.
+    let mut custom = CUSTOM_COLORS.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut choose = CHOOSECOLORW {
+        lStructSize: size_of::<CHOOSECOLORW>() as u32,
+        // COLORREF is 0x00BBGGRR.
+        rgbResult: COLORREF(u32::from(red) | u32::from(green) << 8 | u32::from(blue) << 16),
+        lpCustColors: custom.as_mut_ptr(),
+        Flags: CC_FULLOPEN | CC_RGBINIT,
+        ..Default::default()
+    };
+    // SAFETY: `choose` is fully initialised with its true size; `lpCustColors` points at 16
+    // COLORREFs that outlive the modal call; the owner is null, as for the text prompt.
+    if !unsafe { ChooseColorW(&raw mut choose) }.as_bool() {
+        // SAFETY: plain thread-local error query, valid right after the failed call.
+        let error = unsafe { CommDlgExtendedError() };
+        // Zero means the owner cancelled.
+        if error.0 != 0 {
+            eprintln!("colour picker failed: error {:#x}", error.0);
+        }
+        return None;
+    }
+    let rgb = choose.rgbResult.0;
+    Some((rgb as u8, (rgb >> 8) as u8, (rgb >> 16) as u8))
 }
 
 /// Fills the input at start, stores its text on OK and closes on OK or Cancel; the dialog
