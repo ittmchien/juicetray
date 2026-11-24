@@ -85,8 +85,8 @@ một lần cho mỗi thiết bị dù bạn trả lời gì): app nhận ra thi
 lệnh hỏi pin chỉ-đọc khi bạn bấm **Try**, và thêm thiết bị khi bạn xác nhận mức pin đúng. Nếu
 không được, bấm **Send report** để gửi thông tin qua
 [Google Form](https://forms.gle/Qp5CeBGEiPg2UtkX6) (không cần tài khoản), hoặc **Report on
-GitHub** để [mở issue](https://github.com/ittmchien/juicetray/issues) với thông tin điền sẵn; cả
-hai cách đều không kèm thư mục người dùng, tên máy hay số serial của thiết bị.
+GitHub** để [mở issue](https://github.com/ittmchien/juicetray/issues) với thông tin điền sẵn. Chỉ
+gửi tên thiết bị, USB ID và danh sách interface — không có thông tin cá nhân.
 
 📋 **[Danh sách thiết bị](https://docs.google.com/spreadsheets/d/e/2PACX-1vRTKUOHRmpLeXhjxL93T5HwuYsJKnzMHSUhN2AWslNCB938EpQH2YkMeNubTcpvdxpHC2o7Dw4OHfS7/pubhtml)**
 — mọi model Juicetray biết (**Supported**) và các thiết bị người dùng đã yêu cầu kèm trạng thái

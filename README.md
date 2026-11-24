@@ -86,8 +86,8 @@ you answer): it detects the device, sends one read-only battery query when you p
 and adds it once you confirm the level. If it does
 not work, press **Send report** to send the details through a
 [Google Form](https://forms.gle/Qp5CeBGEiPg2UtkX6) (no account needed), or **Report on GitHub**
-to [open an issue](https://github.com/ittmchien/juicetray/issues) with them filled in; either way
-your user folder, PC name and device serials are left out.
+to [open an issue](https://github.com/ittmchien/juicetray/issues) with them filled in. Only the
+device's name, USB ID and interfaces are sent — nothing personal.
 
 📋 **[Device list](https://docs.google.com/spreadsheets/d/e/2PACX-1vRTKUOHRmpLeXhjxL93T5HwuYsJKnzMHSUhN2AWslNCB938EpQH2YkMeNubTcpvdxpHC2o7Dw4OHfS7/pubhtml)**
 — every model Juicetray knows (**Supported**) and the devices users asked for, with their status

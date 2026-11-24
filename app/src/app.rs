@@ -178,8 +178,13 @@ impl UserEvent {
 
 /// Runs the event loop until Quit; never returns.
 pub fn run() -> ExitCode {
+    // A tray app has no console, so a refused second copy says why instead of quitting silently.
     if instance::another_instance_running() {
-        eprintln!("juicetray is already running");
+        dialog::notice(
+            "Juicetray",
+            "Juicetray is already running.\n\nTo start this copy (for example a newer version), \
+             quit the running one first: right-click its icon → Quit.",
+        );
         return ExitCode::SUCCESS;
     }
     // After the instance check, so a refused second copy never restarts the running one's log.
