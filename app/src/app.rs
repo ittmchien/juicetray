@@ -10,7 +10,9 @@ use strip_render::TextStyle;
 use strip_render::{Bitmap, Theme};
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopProxy};
-use tray_icon::menu::{Menu, MenuEvent};
+#[cfg(target_os = "macos")]
+use tray_icon::menu::Menu;
+use tray_icon::menu::MenuEvent;
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use ui_model::{
     DeviceView, DisplayOptions, EMPTY_MENU_TEXT, IconChoice, IconColor, Segment, build_strip,
@@ -54,6 +56,9 @@ pub enum UserEvent {
     ThemeChanged,
     #[cfg(windows)]
     Taskbar(taskbar::Signal),
+    /// A left or right click released on the tray icon: opens the menu thread's menu.
+    #[cfg(windows)]
+    TrayClick,
 }
 
 impl UserEvent {
@@ -69,6 +74,8 @@ impl UserEvent {
             Self::Taskbar(taskbar::Signal::KeeperTick) => "Taskbar::KeeperTick",
             #[cfg(windows)]
             Self::Taskbar(taskbar::Signal::Click) => "Taskbar::Click",
+            #[cfg(windows)]
+            Self::TrayClick => "TrayClick",
         }
     }
 }
@@ -89,6 +96,8 @@ pub fn run() -> ExitCode {
         // A closed event loop means the app is exiting.
         let _ = menu_proxy.send_event(UserEvent::Menu(event));
     }));
+    #[cfg(windows)]
+    forward_tray_clicks(proxy.clone());
     #[cfg(target_os = "macos")]
     theme::watch_changes(proxy.clone());
 
@@ -136,7 +145,8 @@ fn new_event_loop() -> EventLoop<UserEvent> {
 /// Everything the tray icon shows, plus the last values pushed to the OS.
 struct App {
     tray: TrayIcon,
-    /// The menu currently attached to the tray; the Windows strip opens the same one.
+    /// The menu currently attached to the status item; Windows builds one per show instead.
+    #[cfg(target_os = "macos")]
     current_menu: Menu,
     config: Config,
     devices: Vec<DeviceView>,
@@ -164,8 +174,13 @@ struct App {
 impl App {
     fn new(proxy: EventLoopProxy<UserEvent>) -> anyhow::Result<Self> {
         let config = Config::load();
+        // Windows attaches no menu: tray-icon would track it on this thread, where a stuck
+        // menu stops the app; clicks open it on the menu thread instead.
+        #[cfg(target_os = "macos")]
         let current_menu = menu::build_menu(&[]);
-        let builder = TrayIconBuilder::new().with_menu(Box::new(current_menu.clone()));
+        let builder = TrayIconBuilder::new();
+        #[cfg(target_os = "macos")]
+        let builder = builder.with_menu(Box::new(current_menu.clone()));
         // Windows: the tray shows the app icon (resource 1); levels live on the strip.
         #[cfg(windows)]
         let builder = builder.with_icon(Icon::from_resource(1, None)?);
@@ -178,6 +193,7 @@ impl App {
         let worker = refresh::spawn_worker(proxy, config.refresh_seconds)?;
         let mut app = Self {
             tray,
+            #[cfg(target_os = "macos")]
             current_menu,
             config,
             devices: Vec::new(),
@@ -238,7 +254,7 @@ impl App {
                 return ControlFlow::Wait;
             }
             #[cfg(windows)]
-            UserEvent::Taskbar(taskbar::Signal::Click) => self.show_menu_for_strip(),
+            UserEvent::Taskbar(taskbar::Signal::Click) | UserEvent::TrayClick => self.show_menu(),
         }
         self.apply();
         ControlFlow::Wait
@@ -412,11 +428,15 @@ impl App {
         }
 
         let entries = self.entries(SystemTime::now());
+        // Only macOS keeps a built menu; Windows builds it from the entries on each show.
         if entries != self.shown_entries {
-            let _span = log::span("menu rebuild");
-            self.current_menu = menu::build_menu(&entries);
-            self.tray
-                .set_menu(Some(Box::new(self.current_menu.clone())));
+            #[cfg(target_os = "macos")]
+            {
+                let _span = log::span("menu rebuild");
+                self.current_menu = menu::build_menu(&entries);
+                self.tray
+                    .set_menu(Some(Box::new(self.current_menu.clone())));
+            }
             self.shown_entries = entries;
         }
 
@@ -533,8 +553,10 @@ impl App {
         else {
             return;
         };
+        // The strip's own tooltip has no tray length cap, so it lists every device.
+        let strip_tooltip = ui_model::tooltip_compact(&self.visible_devices(), usize::MAX);
         let unchanged = self.shown_taskbar.as_ref().is_some_and(|(s, t, tooltip)| {
-            s == segments && t == theme && *tooltip == self.shown_tooltip
+            s == segments && t == theme && *tooltip == strip_tooltip
         });
         if unchanged {
             return;
@@ -543,33 +565,17 @@ impl App {
             segments: segments.clone(),
             theme: *theme,
             icons: Arc::clone(self.svgs.icons()),
-            tooltip: self.shown_tooltip.clone(),
+            tooltip: strip_tooltip.clone(),
         });
-        self.shown_taskbar = Some((segments.clone(), *theme, self.shown_tooltip.clone()));
+        self.shown_taskbar = Some((segments.clone(), *theme, strip_tooltip));
     }
 
-    /// Opens the live menu from a strip click, anchored to the tray icon's own window, which is
-    /// on this thread and so not input-attached to Explorer's taskbar.
-    fn show_menu_for_strip(&self) {
-        use tray_icon::menu::ContextMenu;
-        use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-        use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_NULL};
-
-        let owner = self.tray.window_handle() as isize;
-        {
-            // Modal: returns only when the menu closes; muda makes `owner` foreground first.
-            let _span = log::span("context menu");
-            // SAFETY: the tray icon's hidden top-level window stays valid as long as `self.tray`.
-            let _ = unsafe { self.current_menu.show_context_menu_for_hwnd(owner, None) };
-        }
-        // KB 135788: a message to the owner after TrackPopupMenu lets the next menu close when
-        // the user clicks elsewhere.
-        // SAFETY: posting only queues a message to the tray window, valid as long as `self.tray`.
-        if let Err(error) =
-            unsafe { PostMessageW(Some(HWND(owner as *mut _)), WM_NULL, WPARAM(0), LPARAM(0)) }
-        {
-            eprintln!("posting WM_NULL after the menu failed: {error}");
-        }
+    /// Opens the live menu (from a strip or tray click) on the menu thread, so this thread keeps
+    /// running even when the menu's modal loop gets stuck on another process's hung window.
+    fn show_menu(&self) {
+        // Opening the menu also refreshes; per-device floors still limit what is queried.
+        self.tell_worker(Command::RefreshNow);
+        crate::context_menu::show(self.entries(SystemTime::now()));
     }
 
     /// Drops the taskbar thread's handle, which waits until every copy is gone and Explorer's
@@ -577,6 +583,25 @@ impl App {
     fn hide_taskbar(&mut self) {
         self.taskbar = None;
     }
+}
+
+/// Turns a left or right button release on the tray icon into `UserEvent::TrayClick`, the same
+/// clicks tray-icon's own menu answered.
+#[cfg(windows)]
+fn forward_tray_clicks(proxy: EventLoopProxy<UserEvent>) {
+    use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent};
+
+    TrayIconEvent::set_event_handler(Some(move |event| {
+        if let TrayIconEvent::Click {
+            button: MouseButton::Left | MouseButton::Right,
+            button_state: MouseButtonState::Up,
+            ..
+        } = event
+        {
+            // A closed event loop means the app is exiting.
+            let _ = proxy.send_event(UserEvent::TrayClick);
+        }
+    }));
 }
 
 /// Without a strip window the tray icon still shows the weakest number.

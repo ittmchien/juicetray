@@ -3,6 +3,9 @@
 mod alerts;
 mod app;
 mod config;
+// Windows only: the context menu runs on its own thread, so a stuck menu never stops the app.
+#[cfg(windows)]
+mod context_menu;
 mod dialog;
 mod instance;
 mod interval;

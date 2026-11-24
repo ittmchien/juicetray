@@ -1,5 +1,6 @@
 //! Hang watchdog: the UI and taskbar threads each stamp a heartbeat, and a `watchdog` thread logs
 //! every thread's stack to `juicetray.log` once one goes quiet, so a frozen taskbar shows where.
+//! A context menu stuck open logs the other processes' hung windows its modal loop may wait on.
 
 #[cfg(windows)]
 pub use win::{Watched, beat, start, watch_current};
@@ -61,6 +62,7 @@ impl Stall {
 
 #[cfg(windows)]
 mod win {
+    use std::collections::BTreeMap;
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     use std::sync::{Mutex, PoisonError};
@@ -83,14 +85,17 @@ mod win {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_AMD64;
     use windows::Win32::System::Threading::{
-        GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, OpenThread, ResumeThread,
-        SuspendThread, THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION, THREAD_SUSPEND_RESUME,
+        GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, OpenProcess, OpenThread,
+        PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+        ResumeThread, SuspendThread, THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION,
+        THREAD_SUSPEND_RESUME,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, RegisterClassExW, SetTimer, WINDOW_EX_STYLE, WM_TIMER,
-        WNDCLASSEXW, WS_POPUP,
+        CreateWindowExW, DefWindowProcW, EnumWindows, GetWindowThreadProcessId, IsHungAppWindow,
+        IsWindowVisible, RegisterClassExW, SetTimer, WINDOW_EX_STYLE, WM_TIMER, WNDCLASSEXW,
+        WS_POPUP,
     };
-    use windows::core::{HSTRING, PCWSTR, w};
+    use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR, w};
 
     use super::{Stall, Verdict};
     use crate::log;
@@ -106,7 +111,7 @@ mod win {
     /// A thread whose heartbeat the watchdog checks.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Watched {
-        /// The tao event loop: menus and dialogs run their modal loops here.
+        /// The tao event loop: dialogs run their modal loops here; menus run on their own thread.
         Ui,
         /// The thread owning the taskbar strip windows, input-attached to Explorer.
         Taskbar,
@@ -166,7 +171,7 @@ mod win {
     }
 
     /// A hidden top-level window on the calling thread whose 2 s timer beats the UI heartbeat.
-    /// Modal loops (menus, dialogs, the file picker) dispatch it too, so only a stuck loop or a
+    /// Modal loops (dialogs, the file picker) dispatch it too, so only a stuck loop or a
     /// blocked call goes silent; the window lives for the whole process.
     fn start_heartbeat_timer() -> windows::core::Result<()> {
         // SAFETY: a null module name asks for this executable's own handle.
@@ -234,8 +239,10 @@ mod win {
             log::line(&format!("watchdog: SymInitialize failed: {error}"));
         }
         let mut stalls: [Stall; 2] = Default::default();
+        let mut reported_menu = None;
         loop {
             thread::sleep(TICK);
+            check_menu(&mut reported_menu);
             let now = now_ms();
             for watched in Watched::ALL {
                 // Not started (or never will be): nothing to judge yet.
@@ -256,6 +263,102 @@ mod win {
                 }
             }
         }
+    }
+
+    /// Logs a context menu open past `STUCK_AFTER` once, naming the hung windows its modal loop
+    /// may wait on, and logs when that menu is gone (closed, or abandoned for a new one).
+    fn check_menu(reported: &mut Option<u64>) {
+        use crate::context_menu::{STUCK_AFTER, open_for};
+
+        let open = open_for();
+        match (open, *reported) {
+            (Some((id, age)), _) if age >= STUCK_AFTER && *reported != Some(id) => {
+                log::line(&format!(
+                    "MENU stuck: open for {} ms; hung windows of other processes:",
+                    age.as_millis()
+                ));
+                log_hung_windows();
+                *reported = Some(id);
+            }
+            (open, Some(id)) if open.map(|(open_id, _)| open_id) != Some(id) => {
+                log::line("MENU stuck cleared: that menu is gone");
+                *reported = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Logs each other process owning a hung top-level window as `exe (pid N, M windows, V
+    /// visible)`; menu hit-testing only messages visible ones, so those name the likely culprit.
+    fn log_hung_windows() {
+        let mut windows: Vec<HWND> = Vec::new();
+        // SAFETY: the callback only pushes into `windows`, which outlives the call.
+        let listed =
+            unsafe { EnumWindows(Some(collect_window), LPARAM(&raw mut windows as isize)) };
+        if let Err(error) = listed {
+            log::line(&format!("  window list failed: {error}"));
+            return;
+        }
+        // SAFETY: GetCurrentProcessId has no preconditions.
+        let me = unsafe { GetCurrentProcessId() };
+        // pid -> (hung windows, of which visible)
+        let mut hung: BTreeMap<u32, (u32, u32)> = BTreeMap::new();
+        for window in windows {
+            let mut pid = 0;
+            // SAFETY: these only read window state without messaging it; a window closed since
+            // the enumeration reads as not hung, not visible and pid 0.
+            let (is_hung, is_visible) = unsafe {
+                GetWindowThreadProcessId(window, Some(&mut pid));
+                (
+                    IsHungAppWindow(window).as_bool(),
+                    IsWindowVisible(window).as_bool(),
+                )
+            };
+            if is_hung && pid != 0 && pid != me {
+                let (count, visible) = hung.entry(pid).or_default();
+                *count += 1;
+                *visible += u32::from(is_visible);
+            }
+        }
+        if hung.is_empty() {
+            log::line("  no hung windows");
+        }
+        for (pid, (count, visible)) in hung {
+            log::line(&format!(
+                "  hung: {} (pid {pid}, {count} windows, {visible} visible)",
+                process_name(pid)
+            ));
+        }
+    }
+
+    unsafe extern "system" fn collect_window(window: HWND, list: LPARAM) -> BOOL {
+        // SAFETY: `list` is the `Vec<HWND>` handed to EnumWindows, alive for the whole call.
+        unsafe { (*(list.0 as *mut Vec<HWND>)).push(window) };
+        true.into()
+    }
+
+    /// The process's exe file name, or why it could not be read.
+    fn process_name(pid: u32) -> String {
+        let query = || -> windows::core::Result<String> {
+            // SAFETY: plain access flags; the handle is closed by its guard.
+            let process =
+                Handle(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }?);
+            // MAX_PATH units: enough for an exe path outside the long-path opt-in.
+            let mut buffer = [0u16; 260];
+            let mut len = buffer.len() as u32;
+            // SAFETY: `buffer` holds `len` units and both outlive the call.
+            unsafe {
+                QueryFullProcessImageNameW(
+                    process.0,
+                    PROCESS_NAME_WIN32,
+                    PWSTR(buffer.as_mut_ptr()),
+                    &mut len,
+                )
+            }?;
+            let path = String::from_utf16_lossy(&buffer[..len as usize]);
+            Ok(path.rsplit('\\').next().unwrap_or(&path).to_owned())
+        };
+        query().unwrap_or_else(|error| format!("? ({error})"))
     }
 
     /// Loads this process's module list; the exe folder is searched for `juicetray.pdb`.

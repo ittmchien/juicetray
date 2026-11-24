@@ -26,7 +26,7 @@ Only confirmed devices are queried automatically. An unconfirmed device is liste
 touched until you confirm it from the menu: open the device's submenu and click **Check battery
 now**. That sends one battery query (same floor and safety rules as every other query). A valid
 reply adds the device to `allow` in the config file and puts it on the strip; otherwise the
-menu line shows why (no reply, busy (vendor app), wait N s, on cable, or bad reply).
+menu line shows why (`in use` for a vendor app, `…` while waiting, `charging` on cable, `error` for a bad reply or no answer).
 `allow` can still be edited by hand:
 
 ```toml

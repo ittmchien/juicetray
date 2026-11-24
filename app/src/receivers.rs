@@ -18,17 +18,14 @@ use ui_model::{DeviceKind, DeviceView, Level, Path};
 use crate::log;
 use crate::query::{
     ClaimError, TargetError, claim_query, floor_check, open_hid_target, open_serial_target,
-    pick_hid, pick_port, wait_text,
+    pick_hid, pick_port,
 };
 use crate::query_log::{self, QueryLog};
 
 /// Queries one read may send across all devices.
 const READ_BUDGET: u8 = 8;
 
-const ASLEEP_TEXT: &str = "asleep";
-
-/// Shown on a stored reading when the last query (newer than the reading) got no valid reply.
-const LAST_QUERY_FAILED_TEXT: &str = "no reply";
+const ASLEEP_TEXT: &str = "sleep";
 
 /// What happened to one device in this read; everything but `Reading` and `Waiting` is a
 /// failed or refused attempt.
@@ -430,25 +427,23 @@ fn query(
 /// The menu text for an outcome; an unconfirmed device points at its menu action.
 fn reason(outcome: Outcome) -> String {
     match outcome {
-        Outcome::NoChannel => "no channel".to_owned(),
-        Outcome::NeedsCapture => "unsupported".to_owned(),
-        Outcome::Unconfirmed => "unchecked".to_owned(),
-        Outcome::Waiting => "waiting".to_owned(),
-        Outcome::TooSoon(left) => wait_text(left),
-        Outcome::Busy => "busy (vendor app)".to_owned(),
-        Outcome::Ambiguous => "2+ receivers".to_owned(),
-        Outcome::NotRecorded => "log error".to_owned(),
-        Outcome::BudgetUsed => "skipped".to_owned(),
-        Outcome::NoReply => "no reply".to_owned(),
-        // The detailed `why` is logged where the reply is decoded; the menu keeps two words.
-        Outcome::Invalid(why) => if why == ON_CABLE_TEXT {
-            why
-        } else {
-            "bad reply"
-        }
-        .to_owned(),
+        Outcome::NoChannel | Outcome::NeedsCapture => "unsupported".to_owned(),
+        Outcome::Unconfirmed => "new".to_owned(),
+        Outcome::Waiting | Outcome::TooSoon(_) => "…".to_owned(),
+        Outcome::Busy => "in use".to_owned(),
+        Outcome::Ambiguous => "2 receivers".to_owned(),
+        Outcome::NotRecorded | Outcome::BudgetUsed => "error".to_owned(),
+        // A device that never answered has nothing to show yet; it is not broken.
+        Outcome::NoReply => "no data".to_owned(),
+        // The detailed `why` is logged where the reply is decoded; the menu keeps one word.
+        Outcome::Invalid(_) if on_cable(outcome) => "charging".to_owned(),
+        Outcome::Invalid(_) => "error".to_owned(),
         Outcome::Reading(..) => ASLEEP_TEXT.to_owned(),
     }
+}
+
+fn on_cable(outcome: Outcome) -> bool {
+    matches!(outcome, Outcome::Invalid(why) if why == ON_CABLE_TEXT)
 }
 
 /// The row id the menu and config use for a receiver or cable device.
@@ -503,21 +498,21 @@ fn view(
     let Some(reading) = shown else {
         return row;
     };
-    // An asleep reading whose last query went unanswered keeps both notes.
+    // A dimmed reading with its age already says the device did not answer, so that adds no note;
+    // a cable shows only the bolt.
     let note = if failed {
-        Some(match outcome {
-            Outcome::Waiting if reading.asleep => {
-                format!("{ASLEEP_TEXT}; {LAST_QUERY_FAILED_TEXT}")
-            }
-            Outcome::Waiting => LAST_QUERY_FAILED_TEXT.to_owned(),
-            _ => reason(outcome),
-        })
+        match outcome {
+            Outcome::Waiting if reading.asleep => Some(ASLEEP_TEXT.to_owned()),
+            Outcome::Waiting | Outcome::NoReply => None,
+            _ if on_cable(outcome) => None,
+            _ => Some(reason(outcome)),
+        }
     } else {
         reading.asleep.then(|| ASLEEP_TEXT.to_owned())
     };
     DeviceView {
         level: Level::Percent(reading.percent),
-        charging: reading.charging,
+        charging: reading.charging || on_cable(outcome),
         stale: failed || reading.asleep,
         note,
         ..row
@@ -651,21 +646,23 @@ mod tests {
         assert_eq!(good.row.level, Level::Percent(80));
 
         let failures = [
-            (Outcome::NoReply, "no reply"),
-            (Outcome::Busy, "busy (vendor app)"),
-            (Outcome::TooSoon(Duration::from_millis(6_500)), "wait 7 s"),
-            (Outcome::Invalid("unknown power state"), "bad reply"),
+            (Outcome::NoReply, "no data"),
+            (Outcome::Busy, "in use"),
+            (Outcome::TooSoon(Duration::from_millis(6_500)), "…"),
+            (Outcome::Invalid("unknown power state"), "error"),
         ];
         for (outcome, text) in failures {
             let row = checked(vgn, outcome, None, None, at(NOW));
             assert_eq!(row.confirm, None, "{outcome:?}");
             assert_eq!(row.row.level, Level::NoData(text.into()), "{outcome:?}");
 
-            // A stored reading keeps its percent and carries the reason as the note.
+            // A stored reading keeps its percent; its age already tells a missing reply, so only
+            // other reasons become the note.
             let stored = Some((reading(61, false, false), at(NOW - 300)));
             let row = checked(vgn, outcome, stored, None, at(NOW));
             assert_eq!(row.confirm, None, "{outcome:?}");
-            assert_eq!(row.row.note.as_deref(), Some(text), "{outcome:?}");
+            let note = (!matches!(outcome, Outcome::NoReply)).then_some(text);
+            assert_eq!(row.row.note.as_deref(), note, "{outcome:?}");
         }
 
         // A table-confirmed device needs no `allow` entry.
@@ -689,16 +686,13 @@ mod tests {
 
         check(Outcome::NoReply).remember(&mut notes);
         let row = later_read(&notes);
-        assert_eq!(row.level, Level::NoData("unchecked".into()));
-        assert_eq!(row.note.as_deref(), Some("no reply"));
+        assert_eq!(row.level, Level::NoData("new".into()));
+        assert_eq!(row.note.as_deref(), Some("no data"));
 
         // The latest failure wins; a floor wait sent nothing and keeps it.
         check(Outcome::Busy).remember(&mut notes);
         check(Outcome::TooSoon(Duration::from_secs(5))).remember(&mut notes);
-        assert_eq!(
-            later_read(&notes).note.as_deref(),
-            Some("busy (vendor app)")
-        );
+        assert_eq!(later_read(&notes).note.as_deref(), Some("in use"));
 
         // A note only rides on a device the gate still holds back.
         let queried = view(vgn, Outcome::NoReply, None, None, at(NOW));
@@ -812,7 +806,7 @@ mod tests {
         );
         assert_eq!(row.level, Level::Percent(55));
         assert!(row.stale);
-        assert_eq!(row.note.as_deref(), Some("asleep"));
+        assert_eq!(row.note.as_deref(), Some("sleep"));
     }
 
     #[test]
@@ -838,10 +832,10 @@ mod tests {
             at(NOW),
         );
         assert!(asleep.stale);
-        assert_eq!(asleep.note.as_deref(), Some("asleep"));
+        assert_eq!(asleep.note.as_deref(), Some("sleep"));
 
         let empty = view(mchose(), Outcome::Waiting, None, Some(at(NOW - 5)), at(NOW));
-        assert_eq!(empty.level, Level::NoData("waiting".into()));
+        assert_eq!(empty.level, Level::NoData("…".into()));
         assert!(!empty.stale);
         assert_eq!(empty.note, None);
     }
@@ -860,7 +854,7 @@ mod tests {
         assert_eq!(row.level, Level::Percent(70));
         assert_eq!(row.updated_at, at(NOW - 600));
         assert!(row.stale);
-        assert_eq!(row.note.as_deref(), Some("no reply"));
+        assert_eq!(row.note, None);
 
         // An asleep stored reading keeps its own note next to the unanswered-query one.
         let asleep = view(
@@ -871,7 +865,7 @@ mod tests {
             at(NOW),
         );
         assert!(asleep.stale);
-        assert_eq!(asleep.note.as_deref(), Some("asleep; no reply"));
+        assert_eq!(asleep.note.as_deref(), Some("sleep"));
 
         // A reading recorded at the stamp's second is the answer to that query.
         let answered = view(
@@ -892,7 +886,7 @@ mod tests {
             Some(at(NOW - 120)),
             at(NOW),
         );
-        assert_eq!(empty.level, Level::NoData("waiting".into()));
+        assert_eq!(empty.level, Level::NoData("…".into()));
         assert!(!empty.stale);
     }
 
@@ -911,7 +905,8 @@ mod tests {
             assert!(row.charging, "{outcome:?}");
             assert_eq!(row.updated_at, at(NOW - 300), "{outcome:?}");
             assert!(row.stale, "{outcome:?}");
-            assert_eq!(row.note, Some(reason(outcome)), "{outcome:?}");
+            let note = (outcome != Outcome::NoReply && !on_cable(outcome)).then(|| reason(outcome));
+            assert_eq!(row.note, note, "{outcome:?}");
             assert!(row.connected);
         }
     }
@@ -929,14 +924,15 @@ mod tests {
     #[test]
     fn reason_texts() {
         let text = reason;
-        assert_eq!(text(Outcome::Unconfirmed), "unchecked");
-        assert_eq!(text(Outcome::TooSoon(Duration::from_secs(4))), "wait 4 s");
-        assert_eq!(text(Outcome::NoChannel), "no channel");
+        assert_eq!(text(Outcome::Unconfirmed), "new");
+        assert_eq!(text(Outcome::TooSoon(Duration::from_secs(4))), "…");
+        assert_eq!(text(Outcome::NoChannel), "unsupported");
         assert_eq!(text(Outcome::NeedsCapture), "unsupported");
-        assert_eq!(text(Outcome::Busy), "busy (vendor app)");
-        assert_eq!(text(Outcome::NoReply), "no reply");
-        assert_eq!(text(Outcome::BudgetUsed), "skipped");
-        assert_eq!(text(Outcome::Invalid("unknown power state")), "bad reply");
+        assert_eq!(text(Outcome::Busy), "in use");
+        assert_eq!(text(Outcome::NoReply), "no data");
+        assert_eq!(text(Outcome::BudgetUsed), "error");
+        assert_eq!(text(Outcome::Invalid("unknown power state")), "error");
+        assert_eq!(text(Outcome::Invalid(ON_CABLE_TEXT)), "charging");
     }
 
     #[test]
