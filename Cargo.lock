@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "juicetray"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "block2",
@@ -982,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "juicetray-bluetooth"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "juicetray-ui-model",
@@ -994,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "juicetray-door"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "hidapi",
@@ -1004,7 +1004,7 @@ dependencies = [
 
 [[package]]
 name = "juicetray-protocol"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
  "toml 1.2.2+spec-1.1.0",
@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "juicetray-strip-render"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "juicetray-ui-model"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "keyboard-types"
