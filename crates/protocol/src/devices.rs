@@ -143,17 +143,21 @@ mod tests {
     }
 
     #[test]
-    fn turbo_plus_and_rongyuan_dongles_are_unverified_receivers() {
+    fn turbo_plus_rongyuan_and_driveall_dongles_are_unverified_receivers() {
         let rows = [
             (0x391D, 0x1A21, Family::VgnKc2, Kind::Mouse),
             (0x3151, 0x5038, Family::RongYuanF7, Kind::Keyboard),
             (0x3151, 0x5006, Family::RongYuanF7, Kind::Keyboard),
+            (0x0C45, 0xFEF9, Family::Driveall, Kind::Keyboard),
         ];
         for (vid, pid, family, kind) in rows {
             let device = known(vid, pid).expect("row is in the catalogue");
             assert_eq!((device.family, device.kind), (family, kind));
             assert!(!device.verified && !device.cable && !device.needs_capture);
         }
+        // 3151:5038 reports itself as a MonsGeek dongle; the NUT75 dongle is 0C45:FEF9.
+        let monsgeek = known(0x3151, 0x5038).expect("row is in the catalogue");
+        assert_eq!(monsgeek.name, "MonsGeek 2.4G dongle");
     }
 
     #[test]

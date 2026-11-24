@@ -13,7 +13,7 @@ use serde::Deserialize;
 mod recovery;
 
 /// The `Family` variants a catalogue line may name; keep in step with `protocol::Family`.
-const FAMILIES: [&str; 7] = [
+const FAMILIES: [&str; 8] = [
     "Compx",
     "Report13",
     "Mchose",
@@ -21,6 +21,7 @@ const FAMILIES: [&str; 7] = [
     "AtkBitmouse",
     "VgnKc2",
     "RongYuanF7",
+    "Driveall",
 ];
 
 /// Catalogue `kind` values and their `protocol::Kind` variants.

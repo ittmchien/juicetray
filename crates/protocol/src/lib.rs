@@ -7,6 +7,7 @@ mod atk_serial;
 mod bitmouse;
 pub mod compx;
 mod devices;
+mod driveall;
 mod families;
 mod hid;
 mod mchose;
@@ -37,6 +38,7 @@ pub enum Family {
     AtkBitmouse,
     VgnKc2,
     RongYuanF7,
+    Driveall,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,7 +82,8 @@ impl Family {
             | Family::Mchose
             | Family::AtkBitmouse
             | Family::VgnKc2
-            | Family::RongYuanF7 => Link::Hid,
+            | Family::RongYuanF7
+            | Family::Driveall => Link::Hid,
             Family::AtkSerial => Link::Serial,
         }
     }
@@ -94,6 +97,7 @@ impl Family {
             Family::AtkBitmouse => "ATK BITMOUSE",
             Family::VgnKc2 => "VGN kc2",
             Family::RongYuanF7 => "RongYuan F7",
+            Family::Driveall => "Driveall",
         }
     }
 
@@ -101,11 +105,13 @@ impl Family {
     pub fn query_floor(self) -> Duration {
         match self {
             // RongYuan dongles answer F7 from their own cache without waking the keyboard.
+            // Driveall's 10 s is unverified: whether GET_DEVICE_INFO wakes the keyboard is unknown.
             Family::Compx
             | Family::Report13
             | Family::AtkBitmouse
             | Family::VgnKc2
-            | Family::RongYuanF7 => Duration::from_secs(10),
+            | Family::RongYuanF7
+            | Family::Driveall => Duration::from_secs(10),
             Family::Mchose | Family::AtkSerial => Duration::from_secs(300),
         }
     }
@@ -116,7 +122,10 @@ impl Family {
         match self {
             Family::Compx => Duration::from_millis(3000),
             Family::Report13 => Duration::from_millis(800),
-            Family::AtkBitmouse | Family::Mchose | Family::VgnKc2 => Duration::from_millis(500),
+            // Driveall: the web driver's per-try timeout (500 ms), sent once instead of 3 retries.
+            Family::AtkBitmouse | Family::Mchose | Family::VgnKc2 | Family::Driveall => {
+                Duration::from_millis(500)
+            }
             Family::AtkSerial => Duration::from_millis(1000),
             // Vendor tools read ~20 ms after SetFeature and retry 100 ms apart on an unfilled
             // reply; one read after 100 ms stands in for those retries.
@@ -141,6 +150,7 @@ pub fn battery_query(family: Family) -> &'static [u8] {
         Family::AtkBitmouse => &bitmouse::QUERY,
         Family::VgnKc2 => &vgn_kc2::QUERY,
         Family::RongYuanF7 => &rongyuan::QUERY,
+        Family::Driveall => &driveall::QUERY,
     }
 }
 
@@ -154,7 +164,8 @@ pub fn online_query(family: Family) -> Option<&'static [u8]> {
         | Family::Mchose
         | Family::AtkBitmouse
         | Family::VgnKc2
-        | Family::RongYuanF7 => None,
+        | Family::RongYuanF7
+        | Family::Driveall => None,
     }
 }
 
@@ -167,12 +178,13 @@ pub fn decode_online(family: Family, bytes: &[u8]) -> Decoded {
         | Family::Mchose
         | Family::AtkBitmouse
         | Family::VgnKc2
-        | Family::RongYuanF7 => Decoded::NotTheReply,
+        | Family::RongYuanF7
+        | Family::Driveall => Decoded::NotTheReply,
     }
 }
 
-/// Decodes one HID input report as read (report id first), one GetFeature reply or one serial
-/// frame.
+/// Decodes one HID input report as read (report id first; hidapi drops an unused id 0), one
+/// GetFeature reply or one serial frame.
 pub fn decode(family: Family, bytes: &[u8]) -> Decoded {
     match family {
         Family::Compx => compx::decode(bytes),
@@ -182,6 +194,7 @@ pub fn decode(family: Family, bytes: &[u8]) -> Decoded {
         Family::AtkBitmouse => bitmouse::decode(bytes),
         Family::VgnKc2 => vgn_kc2::decode(bytes),
         Family::RongYuanF7 => rongyuan::decode(bytes),
+        Family::Driveall => driveall::decode(bytes),
     }
 }
 
@@ -238,6 +251,7 @@ mod tests {
         assert_eq!(ms(Family::AtkSerial), 1000);
         assert_eq!(ms(Family::VgnKc2), 500);
         assert_eq!(ms(Family::RongYuanF7), 100);
+        assert_eq!(ms(Family::Driveall), 500);
     }
 
     #[test]
@@ -249,6 +263,7 @@ mod tests {
         assert_eq!(Family::AtkBitmouse.query_floor(), Duration::from_secs(10));
         assert_eq!(Family::VgnKc2.query_floor(), Duration::from_secs(10));
         assert_eq!(Family::RongYuanF7.query_floor(), Duration::from_secs(10));
+        assert_eq!(Family::Driveall.query_floor(), Duration::from_secs(10));
     }
 
     #[test]
@@ -283,10 +298,12 @@ mod tests {
         assert_eq!(Family::RongYuanF7.link(), Link::Hid);
         assert_eq!(Family::VgnKc2.name(), "VGN kc2");
         assert_eq!(Family::RongYuanF7.name(), "RongYuan F7");
+        assert_eq!(Family::Driveall.link(), Link::Hid);
+        assert_eq!(Family::Driveall.name(), "Driveall");
     }
 
     /// Every variant; the match makes a new variant fail to compile here until it is listed.
-    fn all_families() -> [Family; 7] {
+    fn all_families() -> [Family; 8] {
         let all = [
             Family::Compx,
             Family::Report13,
@@ -295,6 +312,7 @@ mod tests {
             Family::AtkBitmouse,
             Family::VgnKc2,
             Family::RongYuanF7,
+            Family::Driveall,
         ];
         for family in all {
             match family {
@@ -304,7 +322,8 @@ mod tests {
                 | Family::AtkSerial
                 | Family::AtkBitmouse
                 | Family::VgnKc2
-                | Family::RongYuanF7 => {}
+                | Family::RongYuanF7
+                | Family::Driveall => {}
             }
         }
         all

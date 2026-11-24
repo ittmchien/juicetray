@@ -12,7 +12,7 @@ const ATK_VID: u16 = 0x373B;
 const REPORT13_VID: u16 = 0x3554;
 const MCHOSE_VID: u16 = 0x3837;
 const VGN_VID: u16 = 0x391D;
-/// VIDs of the HID families other than Compx; RongYuan F7 goes by catalogue PIDs only.
+/// VIDs of the HID families other than Compx; RongYuan F7 and Driveall go by catalogue PIDs only.
 const OTHER_FAMILY_VIDS: [u16; 4] = [ATK_VID, REPORT13_VID, MCHOSE_VID, VGN_VID];
 
 /// Whether `vid:pid` falls under Compx's VID rule (its VIDs minus Pulsar's other protocol).
@@ -28,8 +28,9 @@ pub fn family_vid(vid: u16, pid: u16) -> bool {
 
 /// The families `vid:pid` can be queried as, in `Family` order. HID families need their
 /// `pick_target` collection among `collections`; ATK serial needs a port and a catalogue ATK
-/// serial PID; RongYuan F7 needs a catalogue RongYuan PID, since other protocols share its
-/// shape. A recovery id has none.
+/// serial PID; RongYuan F7 and Driveall need a catalogue PID of their own family, since other
+/// protocols share their shape (Driveall's FF60:0061 is also QMK raw HID on the shared Sonix VID).
+/// A recovery id has none.
 pub fn families_for(
     vid: u16,
     pid: u16,
@@ -64,6 +65,10 @@ pub fn families_for(
         (
             Family::RongYuanF7,
             catalogue_is(Family::RongYuanF7) && has_target(Family::RongYuanF7),
+        ),
+        (
+            Family::Driveall,
+            catalogue_is(Family::Driveall) && has_target(Family::Driveall),
         ),
     ]
     .into_iter()
@@ -230,6 +235,29 @@ mod tests {
         // The same shape on an id outside the catalogue is another protocol until listed.
         assert!(families_for(0x3151, 0x9999, &[rongyuan()], false).is_empty());
         assert!(families_for(0x046D, 0x5038, &[rongyuan()], false).is_empty());
+    }
+
+    /// The NUT75 2.4G dongle's if3: FF60:0061, 64-byte input and output report 0.
+    fn driveall() -> HidShape {
+        shape(0xFF60, 0x0061, both(0, 64))
+    }
+
+    #[test]
+    fn driveall_needs_a_catalogue_pid_and_its_shape() {
+        let if4 = shape(0xFF70, 0x0071, both(0, 64));
+        assert_eq!(
+            families_for(
+                0x0C45,
+                0xFEF9,
+                &[system_mouse(), driveall(), if4.clone()],
+                false
+            ),
+            [Family::Driveall]
+        );
+        assert!(families_for(0x0C45, 0xFEF9, &[if4], false).is_empty());
+        // Other Sonix ids and QMK raw HID boards share the shape: never Driveall until listed.
+        assert!(families_for(0x0C45, 0x1234, &[driveall()], false).is_empty());
+        assert!(families_for(0xFEED, 0xFEF9, &[driveall()], false).is_empty());
     }
 
     #[test]

@@ -901,7 +901,7 @@ mod tests {
         }
     }
 
-    /// A NUT75-style GetFeature reply: id 0, canRead 1, keyboard 87 %, connected.
+    /// A MonsGeek-dongle-style GetFeature reply: id 0, canRead 1, keyboard 87 %, connected.
     fn rongyuan_reply() -> Vec<u8> {
         padded(&[0x00, 0x01, 0x57, 0x00, 0x00, 0x01, 0x01], 65)
     }
@@ -978,6 +978,65 @@ mod tests {
         assert!(log.borrow().features.is_empty());
         assert_eq!(exchange.reply, Some((reply, reading(75, false))));
         assert_eq!(exchange.unrelated, vec![push]);
+    }
+
+    /// A Driveall `55 10` reply as read (hidapi drops report id 0): payload at [8], level at
+    /// payload[17], chargeStatus at payload[18].
+    fn driveall_reply(percent: u8, charge: u8) -> Vec<u8> {
+        let mut reply = padded(&[0x55, 0x10, 0x30], 64);
+        reply[25] = percent;
+        reply[26] = charge;
+        reply
+    }
+
+    #[test]
+    fn driveall_is_one_get_device_info_write_skipping_notifications() {
+        let asleep = padded(&[0x55, 0xFC, 0x06], 64);
+        let reads = bytes(&[asleep.clone(), driveall_reply(87, 0)]);
+        let (mut target, log) = target(0x0C45, 0xFEF9, Link::Hid, reads);
+        let exchange = Door::new(1).send_until(&mut target, far()).expect("send");
+        let frame = battery_query(Family::Driveall);
+        assert_eq!(&frame[..9], &[0x00, 0xAA, 0x10, 0x30, 0, 0, 0, 0x01, 0]);
+        assert_eq!(log.borrow().writes, vec![frame.to_vec()]);
+        assert!(log.borrow().features.is_empty());
+        assert_eq!(
+            exchange.reply,
+            Some((driveall_reply(87, 0), reading(87, false)))
+        );
+        assert_eq!(exchange.unrelated, vec![asleep]);
+    }
+
+    #[test]
+    fn driveall_without_a_55_10_reply_is_no_reading_and_no_retry() {
+        // Only dongle notifications arrive (keyboard asleep, then disconnected).
+        let notices = [
+            padded(&[0x55, 0xFC, 0x06], 64),
+            padded(&[0x55, 0xFC, 0x04], 64),
+        ];
+        let (mut offline, log) = target(0x0C45, 0xFEF9, Link::Hid, bytes(&notices));
+        let mut door = Door::new(1);
+        let exchange = door.send_until(&mut offline, far()).expect("send");
+        assert_eq!(exchange.reply, None);
+        assert_eq!(exchange.unrelated, notices.to_vec());
+        assert_eq!(log.borrow().writes.len(), 1);
+        // The budget is spent: a second query in the same refresh is refused before any I/O.
+        assert!(error_text(door.send(&mut offline)).contains("budget"));
+        assert_eq!(log.borrow().writes.len(), 1);
+        // Driveall has no online query.
+        let (mut online, log) = target(0x0C45, 0xFEF9, Link::Hid, Vec::new());
+        assert!(error_text(Door::new(1).send_online(&mut online)).contains("no online query"));
+        assert!(log.borrow().writes.is_empty());
+    }
+
+    #[test]
+    fn driveall_reports_nonzero_charge_status_as_charging() {
+        let reads = bytes(&[driveall_reply(64, 1)]);
+        let (mut target, _log) = target(0x0C45, 0xFEF9, Link::Hid, reads);
+        let exchange = Door::new(1).send_until(&mut target, far()).expect("send");
+        assert_eq!(
+            exchange.reply,
+            Some((driveall_reply(64, 1), reading(64, true)))
+        );
     }
 
     #[test]

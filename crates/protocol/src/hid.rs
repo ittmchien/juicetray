@@ -1,6 +1,6 @@
 //! HID collection rules: which collections may be opened, and which one a family's query goes to.
 
-use crate::{Family, ReportKind, ReportSize, bitmouse, rongyuan, vgn_kc2};
+use crate::{Family, ReportKind, ReportSize, bitmouse, driveall, rongyuan, vgn_kc2};
 
 /// First usage page of the vendor-defined range.
 const VENDOR_PAGE_MIN: u16 = 0xFF00;
@@ -8,6 +8,8 @@ const VENDOR_PAGE_MIN: u16 = 0xFF00;
 const FIRMWARE_UPDATE_PAGE: u16 = 0x008C;
 const VGN_KC2_PAGE: (u16, u16) = (0xFFC1, 0x0001);
 const RONGYUAN_PAGE: (u16, u16) = (0xFFFF, 0x0002);
+/// The Driveall query channel; the dongle's FF70:0071 and system collections are never targets.
+const DRIVEALL_PAGE: (u16, u16) = (0xFF60, 0x0061);
 
 const COMPX_REPORT_ID: u8 = 0x08;
 const COMPX_REPORT_LEN: usize = 17;
@@ -87,6 +89,7 @@ pub fn pick_target(family: Family, shapes: &[HidShape]) -> Result<usize, PickErr
         Family::AtkBitmouse => pick_bitmouse(shapes),
         Family::VgnKc2 => pick_vgn_kc2(shapes),
         Family::RongYuanF7 => pick_rongyuan(shapes),
+        Family::Driveall => pick_driveall(shapes),
         Family::AtkSerial => Err(PickError::NoMatch),
     }
 }
@@ -203,6 +206,15 @@ fn pick_rongyuan(shapes: &[HidShape]) -> Result<usize, PickError> {
     exactly_one(matching(shapes, |shape| {
         (shape.usage_page, shape.usage) == RONGYUAN_PAGE
             && has_report(shape, ReportKind::Feature, 0, rongyuan::FRAME_LEN - 1)
+    }))
+}
+
+/// `FF60/0061` with 64-byte input and output report 0 (no report id on the wire's data).
+fn pick_driveall(shapes: &[HidShape]) -> Result<usize, PickError> {
+    exactly_one(matching(shapes, |shape| {
+        (shape.usage_page, shape.usage) == DRIVEALL_PAGE
+            && has_report(shape, ReportKind::Output, 0, driveall::REPORT_LEN)
+            && has_report(shape, ReportKind::Input, 0, driveall::REPORT_LEN)
     }))
 }
 
@@ -432,7 +444,7 @@ mod tests {
         )
     }
 
-    /// The NUT75 dongle's if2 as parsed: feature report 0 of 64 bytes.
+    /// The MonsGeek 3151:5038 dongle's if2 as parsed: feature report 0 of 64 bytes.
     fn rongyuan_shape() -> HidShape {
         shape(0xFFFF, 0x0002, vec![report(ReportKind::Feature, 0, 64)])
     }
@@ -467,6 +479,7 @@ mod tests {
         reports.extend(both(0x08, 17));
         reports.extend(both(0x13, 20));
         reports.extend(both(0x55, 64));
+        reports.extend(both(0, 64));
         reports.push(report(ReportKind::Output, 0x08, 64));
         reports.push(report(ReportKind::Input, 0x08, 127));
         let dfu = HidShape {
@@ -481,6 +494,7 @@ mod tests {
             Family::AtkBitmouse,
             Family::VgnKc2,
             Family::RongYuanF7,
+            Family::Driveall,
         ] {
             assert_eq!(
                 pick_target(family, std::slice::from_ref(&dfu)),
@@ -525,7 +539,7 @@ mod tests {
 
     #[test]
     fn pick_rongyuan_needs_ffff_0002_feature_64() {
-        // The NUT75 dongle: if1 FFFF:0001 input 05 (32 B) and if2 FFFF:0002 feature 64.
+        // The MonsGeek 3151:5038 dongle: if1 FFFF:0001 input 05 (32 B) and if2 FFFF:0002 feature 64.
         let push = shape(0xFFFF, 0x0001, vec![report(ReportKind::Input, 0x05, 32)]);
         assert_eq!(
             pick_target(Family::RongYuanF7, &[push.clone(), rongyuan_shape()]),
@@ -548,6 +562,52 @@ mod tests {
             pick_target(Family::VgnKc2, &[rongyuan_shape()]),
             Err(PickError::NoMatch)
         );
+    }
+
+    /// The NUT75 2.4G dongle's if3 as parsed: FF60:0061, input and output report 0 of 64 bytes.
+    fn driveall_shape() -> HidShape {
+        HidShape {
+            interface: Some(3),
+            ..shape(0xFF60, 0x0061, both(0, 64))
+        }
+    }
+
+    #[test]
+    fn pick_driveall_needs_ff60_0061_and_both_64_byte_reports() {
+        let if4 = HidShape {
+            interface: Some(4),
+            ..shape(0xFF70, 0x0071, both(0, 64))
+        };
+        assert_eq!(
+            pick_target(Family::Driveall, &[if4.clone(), driveall_shape()]),
+            Ok(1)
+        );
+        let wrong_usage = HidShape {
+            usage: 0x0062,
+            ..driveall_shape()
+        };
+        let qmk_32 = shape(0xFF60, 0x0061, both(0, 32));
+        let numbered = shape(0xFF60, 0x0061, both(0x01, 65));
+        let no_input = shape(0xFF60, 0x0061, vec![report(ReportKind::Output, 0, 64)]);
+        assert_eq!(
+            pick_target(
+                Family::Driveall,
+                &[if4, wrong_usage, qmk_32, numbered, no_input]
+            ),
+            Err(PickError::NoMatch)
+        );
+        assert_eq!(
+            pick_target(Family::Driveall, &[driveall_shape(), driveall_shape()]),
+            Err(PickError::Ambiguous(vec![0, 1]))
+        );
+        // Other families never take the Driveall collection.
+        for family in [Family::Compx, Family::Mchose, Family::VgnKc2] {
+            assert_eq!(
+                pick_target(family, &[driveall_shape()]),
+                Err(PickError::NoMatch),
+                "{family:?}"
+            );
+        }
     }
 
     #[test]
