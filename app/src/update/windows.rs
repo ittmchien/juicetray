@@ -55,7 +55,7 @@ pub fn spawn_cleanup() {
     let spawned = thread::Builder::new()
         .name("update-cleanup".into())
         .spawn(|| {
-            let Ok(exe) = std::env::current_exe() else {
+            let Ok(exe) = super::install::running_exe() else {
                 return;
             };
             let backup = super::install::backup_path(&exe);

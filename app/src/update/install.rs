@@ -6,6 +6,12 @@ use std::path::{Path, PathBuf};
 
 use super::check::EXE_ASSET;
 
+/// The running exe's real file: winget starts a portable app through a link in its Links folder,
+/// and the swap must replace the target, not the link.
+pub fn running_exe() -> std::io::Result<PathBuf> {
+    std::env::current_exe().and_then(std::fs::canonicalize)
+}
+
 /// The downloaded exe waits here, next to the running one so the final rename stays on one volume.
 pub fn staged_path(exe: &Path) -> PathBuf {
     with_suffix(exe, ".new")
