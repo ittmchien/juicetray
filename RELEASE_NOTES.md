@@ -10,7 +10,7 @@
 - Modern Windows 10/11 look for all dialogs.
 - Options moved under **Settings**; offline devices now say *disconnected*.
 - Xbox and other Bluetooth LE controllers show in the Controller group.
-- Checks for updates at most once a day.
+- Checks for updates at most once a day; the menu shows your version next to **Check for updates…**.
 
 ### 🛠 Fixed
 - Settings are never overwritten when the config file can't be read.
