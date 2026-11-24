@@ -83,9 +83,14 @@ queries it on its own. To try one, use **Add unsupported device…** in the menu
 **OK** on the "New device found" popup (shown for supported brands and for any wireless
 receiver you plug in): it detects the device when you plug it in, sends one
 read-only battery query when you press **Try**, and adds it once you confirm the level. If it does
-not work, press **Report on GitHub** to
-[open an issue](https://github.com/ittmchien/juicetray/issues) with the details filled in (your
-user folder, PC name and device serials are left out).
+not work, press **Send report** to send the details through a
+[Google Form](https://forms.gle/Qp5CeBGEiPg2UtkX6) (no account needed), or **Report on GitHub**
+to [open an issue](https://github.com/ittmchien/juicetray/issues) with them filled in; either way
+your user folder, PC name and device serials are left out.
+
+📋 **[Device list](https://docs.google.com/spreadsheets/d/e/2PACX-1vRTKUOHRmpLeXhjxL93T5HwuYsJKnzMHSUhN2AWslNCB938EpQH2YkMeNubTcpvdxpHC2o7Dw4OHfS7/pubhtml)**
+— every model Juicetray knows (**Supported**) and the devices users asked for, with their status
+(**Requested**).
 
 `allow` in the config file still works for hand-added devices:
 
@@ -148,8 +153,8 @@ git clone -b dev https://github.com/ittmchien/juicetray
 A model is one line in its brand's file under `crates/protocol/devices/` (for example
 `atk.toml`), with `vid` and `pid` as 4 hex digits, `name`, `family`, `kind` (`mouse`, `headset`,
 `keyboard`, `gamepad` or `other`), `connection` (`receiver` or `cable`) and `verified`. `family`
-is one of `Compx`, `Report13`, `Mchose`, `AtkSerial`, `AtkBitmouse`, `VgnKc2` or `RongYuanF7`;
-a model that needs another protocol needs a new family in code first. The build checks every line (unknown family or kind,
+is one of `Compx`, `Report13`, `Mchose`, `AtkSerial`, `AtkBitmouse`, `VgnKc2`, `RongYuanF7` or
+`Driveall`; a model that needs another protocol needs a new family in code first. The build checks every line (unknown family or kind,
 bad hex, duplicate VID:PID) and fails with the file and entry named. Open the pull request against
 `dev` with `verified = false`; a model becomes `verified = true` only after a hardware check
 (`juicetray probe <VID:PID>` read the same level as the vendor app).

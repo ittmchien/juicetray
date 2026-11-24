@@ -82,9 +82,14 @@ không bao giờ tự hỏi pin nó. Muốn thử, dùng **Add unsupported devic
 hoặc bấm **OK** trên popup "New device found" (hiện với các hãng được hỗ trợ và với mọi
 receiver không dây bạn cắm vào): app nhận ra thiết bị khi bạn cắm vào, gửi một
 lệnh hỏi pin chỉ-đọc khi bạn bấm **Try**, và thêm thiết bị khi bạn xác nhận mức pin đúng. Nếu
-không được, bấm **Report on GitHub** để
-[mở issue](https://github.com/ittmchien/juicetray/issues) với thông tin điền sẵn (không kèm thư
-mục người dùng, tên máy hay số serial của thiết bị).
+không được, bấm **Send report** để gửi thông tin qua
+[Google Form](https://forms.gle/Qp5CeBGEiPg2UtkX6) (không cần tài khoản), hoặc **Report on
+GitHub** để [mở issue](https://github.com/ittmchien/juicetray/issues) với thông tin điền sẵn; cả
+hai cách đều không kèm thư mục người dùng, tên máy hay số serial của thiết bị.
+
+📋 **[Danh sách thiết bị](https://docs.google.com/spreadsheets/d/e/2PACX-1vRTKUOHRmpLeXhjxL93T5HwuYsJKnzMHSUhN2AWslNCB938EpQH2YkMeNubTcpvdxpHC2o7Dw4OHfS7/pubhtml)**
+— mọi model Juicetray biết (**Supported**) và các thiết bị người dùng đã yêu cầu kèm trạng thái
+(**Requested**).
 
 `allow` trong file config vẫn dùng được cho thiết bị thêm tay:
 
@@ -148,9 +153,8 @@ git clone -b dev https://github.com/ittmchien/juicetray
 Mỗi model là một dòng trong file của hãng đó dưới `crates/protocol/devices/` (ví dụ
 `atk.toml`), gồm `vid` và `pid` (4 chữ số hex), `name`, `family`, `kind` (`mouse`, `headset`,
 `keyboard`, `gamepad` hoặc `other`), `connection` (`receiver` hoặc `cable`) và `verified`.
-`family` là một trong `Compx`, `Report13`, `Mchose`, `AtkSerial`, `AtkBitmouse`, `VgnKc2` hoặc
-`RongYuanF7`; model cần
-giao thức khác thì phải thêm family vào code trước. Bước build kiểm từng dòng (family hoặc kind
+`family` là một trong `Compx`, `Report13`, `Mchose`, `AtkSerial`, `AtkBitmouse`, `VgnKc2`,
+`RongYuanF7` hoặc `Driveall`; model cần giao thức khác thì phải thêm family vào code trước. Bước build kiểm từng dòng (family hoặc kind
 lạ, hex sai, VID:PID trùng) và báo lỗi kèm tên file và vị trí dòng. Mở pull request vào `dev`
 với `verified = false`; model chỉ được đổi thành `verified = true` sau khi kiểm trên thiết bị
 thật (`juicetray probe <VID:PID>` đọc ra cùng mức pin với app của hãng).

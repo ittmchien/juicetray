@@ -1,19 +1,38 @@
-//! Reports the owner sends to GitHub: the prefilled new-issue URL and the redaction every copied
-//! or reported text gets first. The app never creates an issue itself (that needs a token).
+//! Reports the user sends about an unsupported device: the prefilled request-form and GitHub
+//! new-issue URLs and the redaction every copied or reported text gets first. The app never
+//! submits anything itself (a GitHub issue would need a token).
 
 use crate::scan::redact_path;
 
+/// The public device-request Google Form, prefilled through its "Juicetray report" field; a
+/// Google account is not needed to send it.
+const REQUEST_FORM_URL: &str = "https://docs.google.com/forms/d/e/1FAIpQLSc5bJHdzNtpcBlNYhdWDEPBYsOLnUxOcdpCiOouqm39RN68Pw/viewform?usp=pp_url&entry.801793204=";
+/// The plain new-issue page, for owners who prefer GitHub; it needs a GitHub account.
 const NEW_ISSUE_URL: &str = "https://github.com/ittmchien/juicetray/issues/new";
-/// Longest prefilled URL; GitHub and browsers refuse much longer ones.
+/// Longest prefilled URL; Google Forms answered a 7041-character one, and GitHub and browsers
+/// refuse much longer ones.
 pub const MAX_URL_LEN: usize = 7000;
-/// Ends a body cut to fit the URL, so the owner knows the full text is on the clipboard path.
+/// Ends a body cut to fit the URL, so the user knows the full text is on the clipboard path.
 const TRUNCATED: &str = "…(truncated, use Copy)";
 
-/// The new-issue page with `title` and `body` filled in, percent-encoded. A body too long is cut
-/// a whole encoded character at a time and ends with `TRUNCATED`, so the URL stays within
-/// `MAX_URL_LEN` and never ends inside a `%XX` escape or a multi-byte character.
+/// The request form with its report field filled in; see `with_body` for the encoding and cut.
+pub fn report_url(body: &str) -> String {
+    with_body(REQUEST_FORM_URL.to_owned(), body)
+}
+
+/// The new-issue page with `title` and `body` filled in; see `with_body` for the encoding and
+/// cut. The caller redacts both.
 pub fn issue_url(title: &str, body: &str) -> String {
-    let mut url = format!("{NEW_ISSUE_URL}?title={}&body=", encode(title));
+    with_body(
+        format!("{NEW_ISSUE_URL}?title={}&body=", encode(title)),
+        body,
+    )
+}
+
+/// `url` with `body` appended percent-encoded. A body too long is cut a whole encoded character
+/// at a time and ends with `TRUNCATED`, so the URL stays within `MAX_URL_LEN` and never ends
+/// inside a `%XX` escape or a multi-byte character.
+fn with_body(mut url: String, body: &str) -> String {
     let whole = encode(body);
     if url.len() + whole.len() <= MAX_URL_LEN {
         url.push_str(&whole);
@@ -257,6 +276,29 @@ mod tests {
     }
 
     #[test]
+    fn report_url_encodes_and_cuts_on_whole_characters() {
+        let url = report_url("a b&c=d\nđ");
+        assert_eq!(url, format!("{REQUEST_FORM_URL}a%20b%26c%3Dd%0A%C4%91"));
+
+        let long = "đ".repeat(5000);
+        let url = report_url(&long);
+        assert!(url.len() <= MAX_URL_LEN);
+        // A cut body says so; each `đ` is two escapes and the cut never leaves half of one.
+        let body = url.strip_prefix(REQUEST_FORM_URL).unwrap();
+        let body = body
+            .strip_suffix(&encode(TRUNCATED))
+            .expect("truncation note");
+        assert_eq!(body.len() % 6, 0);
+        assert!(body.len() > MAX_URL_LEN - 300);
+        assert!(report_url("x").ends_with("=x"));
+        // A body that just fits gets no note.
+        let fits = "x".repeat(MAX_URL_LEN - REQUEST_FORM_URL.len());
+        assert_eq!(report_url(&fits).len(), MAX_URL_LEN);
+        assert!(report_url(&fits).ends_with('x'));
+    }
+
+    // The new-issue URL encodes its title too and shares the report URL's cut.
+    #[test]
     fn issue_url_encodes_and_cuts_on_whole_characters() {
         let url = issue_url("Device 3554:FA09", "a b&c=d\nđ");
         assert_eq!(
@@ -274,8 +316,7 @@ mod tests {
             .expect("truncation note");
         assert_eq!(body.len() % 6, 0);
         assert!(body.len() > MAX_URL_LEN - 150);
-        let short = issue_url("t", "x");
-        assert!(short.ends_with("&body=x"));
+        assert!(issue_url("t", "x").ends_with("&body=x"));
         // A body that just fits gets no note.
         let fits = "x".repeat(MAX_URL_LEN - issue_url("t", "").len());
         assert_eq!(issue_url("t", &fits).len(), MAX_URL_LEN);

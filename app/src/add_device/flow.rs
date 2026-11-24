@@ -124,8 +124,10 @@ pub struct Input {
 pub enum Event {
     /// The main button (Continue, Next, Try, Add, Copy, Try again).
     Primary(Input),
-    /// The second button (Not right, Report on GitHub).
+    /// The second button (Not right, Send report).
     Alt,
+    /// The third button (Report on GitHub), shown only for an unsupported device.
+    Extra,
     /// Another list row was picked.
     Select(usize),
     Arrived(Id),
@@ -159,6 +161,8 @@ pub struct View {
     pub details: Option<String>,
     pub primary: Option<String>,
     pub alt: Option<&'static str>,
+    /// A third button after [Alt]; the window shifts [Primary] and [Alt] left to fit it.
+    pub extra: Option<&'static str>,
     pub close: &'static str,
 }
 
@@ -293,6 +297,7 @@ impl Flow {
             }
             Event::Primary(input) => self.primary(input, now),
             Event::Alt => self.alt(now),
+            Event::Extra => self.extra(),
         }
     }
 
@@ -334,6 +339,7 @@ impl Flow {
             details: None,
             primary: None,
             alt: None,
+            extra: None,
             close: "Close",
         };
         match &self.step {
@@ -433,13 +439,15 @@ impl Flow {
             }
             Step::Unsupported(id) => {
                 view.text = format!(
-                    "Not supported yet. {}\n\nCopy the details or report it on GitHub, so \
-                     support can be added.",
+                    "Not supported yet. {}\n\nSend the report (no account needed) or report it on \
+                     GitHub so support can be added, or copy the details.",
                     self.facts.reason
                 );
+                // Two report channels: the account-free form first, then a GitHub issue.
                 view.details = Some(self.details(*id));
                 view.primary = Some("Copy".to_owned());
-                view.alt = Some("Report on GitHub");
+                view.alt = Some("Send report");
+                view.extra = Some("Report on GitHub");
             }
         }
         view
@@ -729,16 +737,27 @@ impl Flow {
                 );
                 None
             }
-            // The title carries the USB product string, so it is redacted like the body.
-            Step::Unsupported(id) => Some(Effect::OpenUrl(report::issue_url(
-                &report::redact(
-                    &format!("Device report: {}", self.labelled(id)),
-                    &self.identity,
-                ),
-                &self.details(id),
-            ))),
+            // The redacted details fill the request form; its first line names the device.
+            Step::Unsupported(id) => Some(Effect::OpenUrl(report::report_url(&self.details(id)))),
             _ => None,
         }
+    }
+
+    /// [Report on GitHub]: a new-issue page with the redacted details; other steps show no
+    /// third button, so the event does nothing there.
+    fn extra(&self) -> Option<Effect> {
+        let Step::Unsupported(id) = self.step else {
+            return None;
+        };
+        // The title carries the USB product string, so it is redacted like the body.
+        let title = report::redact(
+            &format!("Device report: {}", self.labelled(id)),
+            &self.identity,
+        );
+        Some(Effect::OpenUrl(report::issue_url(
+            &title,
+            &self.details(id),
+        )))
     }
 
     fn unsupported(&mut self, id: Id, reason: String) {
@@ -836,7 +855,7 @@ fn no_choice_reason((vid, pid): Id) -> &'static str {
 
 /// The families offered for `id`: a catalogue model only as its own family (the worker queries
 /// it that way once allowed) and never when it needs a capture or is a BITMOUSE cable; ATK serial
-/// and RongYuan F7 only exist for catalogue models, so other ids never get them.
+/// RongYuan F7 and Driveall only exist for catalogue models, so other ids never get them.
 pub fn choices(id: Id, families: &[(Family, Option<Duration>)]) -> Vec<(Family, Option<Duration>)> {
     let keep = |family: Family| match known(id.0, id.1) {
         Some(device) => {
@@ -844,7 +863,10 @@ pub fn choices(id: Id, families: &[(Family, Option<Duration>)]) -> Vec<(Family, 
                 && !device.needs_capture
                 && !(device.family == Family::AtkBitmouse && device.cable)
         }
-        None => !matches!(family, Family::AtkSerial | Family::RongYuanF7),
+        None => !matches!(
+            family,
+            Family::AtkSerial | Family::RongYuanF7 | Family::Driveall
+        ),
     };
     families
         .iter()
@@ -1012,6 +1034,9 @@ mod tests {
         );
         assert_eq!(view.primary.as_deref(), Some("Continue"));
         assert_eq!(view.close, "Cancel");
+        // No third button here, so its event does nothing.
+        assert_eq!(view.extra, None);
+        assert_eq!(flow.on(Event::Extra, start), None);
 
         assert_eq!(press(&mut flow, start), None);
         assert!(flow.view(start).text.starts_with("Detecting…"));
@@ -1137,7 +1162,8 @@ mod tests {
         let view = flow.view(now);
         assert!(view.text.contains(UNSTABLE), "{}", view.text);
         assert_eq!(view.primary.as_deref(), Some("Copy"));
-        assert_eq!(view.alt, Some("Report on GitHub"));
+        assert_eq!(view.alt, Some("Send report"));
+        assert_eq!(view.extra, Some("Report on GitHub"));
     }
 
     #[test]
@@ -1177,6 +1203,7 @@ mod tests {
         assert_eq!(choices(UNKNOWN, &both), both);
         assert!(choices(UNKNOWN, &[(Family::AtkSerial, None)]).is_empty());
         assert!(choices(UNKNOWN, &[(Family::RongYuanF7, None)]).is_empty());
+        assert!(choices(UNKNOWN, &[(Family::Driveall, None)]).is_empty());
         // A catalogue model is tried as its own family only.
         let (row, family) = unverified();
         let other = if family == Family::Compx {
@@ -1416,6 +1443,10 @@ mod tests {
         let mut flow = choosing(UNKNOWN, &[(Family::Compx, None)], now);
         press(&mut flow, now);
         flow.on(Event::Tried(TryOutcome::Reading(reading(52))), now);
+        // Only an unsupported device has a third button.
+        assert_eq!(flow.view(now).extra, None);
+        assert_eq!(flow.on(Event::Extra, now + ADD_GUARD), None);
+        assert_eq!(flow.view(now).primary.as_deref(), Some("Add"));
         // [Not right] waits out the same guard as [Add].
         assert_eq!(flow.on(Event::Alt, now), None);
         assert_eq!(flow.view(now).primary.as_deref(), Some("Add"));
@@ -1423,13 +1454,25 @@ mod tests {
         assert_eq!(flow.on(Event::Alt, now), None);
         let view = flow.view(now);
         assert!(view.text.contains("(52 %) does not match"), "{}", view.text);
+        assert_eq!(view.primary.as_deref(), Some("Copy"));
+        assert_eq!(view.alt, Some("Send report"));
+        assert_eq!(view.extra, Some("Report on GitHub"));
         assert_eq!(press(&mut flow, now), Some(Effect::Copy));
+        let Some(Effect::OpenUrl(url)) = flow.on(Event::Extra, now) else {
+            panic!("issue url");
+        };
+        assert!(
+            url.starts_with(
+                "https://github.com/ittmchien/juicetray/issues/new?title=Device%20report%3A%20"
+            ),
+            "{url}"
+        );
+        assert!(url.len() <= report::MAX_URL_LEN);
         let Some(Effect::OpenUrl(url)) = flow.on(Event::Alt, now) else {
             panic!("report url");
         };
-        assert!(url.starts_with(
-            "https://github.com/ittmchien/juicetray/issues/new?title=Device%20report%3A%20"
-        ));
+        assert!(url.starts_with("https://docs.google.com/forms/"), "{url}");
+        assert!(url.contains("Device%3A%20"), "{url}");
         assert!(url.len() <= report::MAX_URL_LEN);
 
         let mut flow = new_flow();
@@ -1443,7 +1486,7 @@ mod tests {
         // The environment leads, so URL truncation never drops it.
         assert!(details.starts_with("Juicetray v0.0.0, Windows 10.0.19045\nDevice: "));
 
-        // The title's product string is redacted too.
+        // The product string in the sent report is redacted too.
         let mut flow = new_flow();
         flow.on(Event::Handover(UNKNOWN), now);
         flow.on(
@@ -1456,8 +1499,15 @@ mod tests {
         let Some(Effect::OpenUrl(url)) = flow.on(Event::Alt, now) else {
             panic!("report url");
         };
+        assert!(url.starts_with("https://docs.google.com/forms/"), "{url}");
+        assert!(!url.contains("JANE"), "{url}");
+        assert!(url.contains("%3Cpc%3E"), "{url}");
+        // The GitHub issue's title carries the product string, redacted as well.
+        let Some(Effect::OpenUrl(url)) = flow.on(Event::Extra, now) else {
+            panic!("issue url");
+        };
         let title = url.split("&body=").next().unwrap();
-        assert!(!title.contains("JANE"), "{title}");
+        assert!(!url.contains("JANE"), "{url}");
         assert!(title.contains("%3Cpc%3E"), "{title}");
     }
 

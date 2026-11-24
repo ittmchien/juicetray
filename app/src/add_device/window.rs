@@ -48,6 +48,7 @@ const NAME_LABEL_ID: u16 = 106;
 const NAME_ID: u16 = 107;
 const DETAILS_ID: u16 = 108;
 const ALT_ID: u16 = 109;
+const EXTRA_ID: u16 = 110;
 /// The custom-device fields, shown and hidden together.
 const FORM_IDS: [u16; 6] = [
     KIND_LABEL_ID,
@@ -77,6 +78,9 @@ const PRIMARY_WIDE_RECT: [i16; 4] = [55, 132, 146, 14];
 /// Longest primary label `PRIMARY_RECT` holds ("Try in 10 s").
 const SHORT_LABEL: usize = 12;
 const ALT_RECT: [i16; 4] = [121, 132, 80, 14];
+/// With an [Extra] button, [Primary] moves here, [Alt] to `PRIMARY_RECT` and [Extra] takes
+/// `ALT_RECT`, so all three sit left of [Close] in their usual order.
+const PRIMARY_LEFT_RECT: [i16; 4] = [7, 132, 44, 14];
 const CLOSE_RECT: [i16; 4] = [205, 132, 48, 14];
 
 /// Posted by `open` to the running window: focus it and take the handed-over id.
@@ -437,6 +441,7 @@ unsafe fn on_message(dialog: HWND, message: u32, wparam: WPARAM, lparam: LPARAM)
                     }
                 }
                 _ if id == ALT_ID => session.handle(dialog, Event::Alt),
+                _ if id == EXTRA_ID => session.handle(dialog, Event::Extra),
                 _ if id == LIST_ID && u32::from(code) == CBN_SELCHANGE => {
                     session.handle(dialog, Event::Select(selection(dialog, LIST_ID)));
                 }
@@ -501,25 +506,31 @@ fn render(dialog: HWND, view: &View, shown: Option<&View>) {
         set_text(dialog, DETAILS_ID, &text.replace('\n', "\r\n"));
         show(dialog, DETAILS_ID, view.details.is_some());
     }
-    if changed(&|old| old.primary != view.primary || old.alt != view.alt) {
+    if changed(&|old| old.primary != view.primary || old.alt != view.alt || old.extra != view.extra)
+    {
         let label = view.primary.as_deref().unwrap_or_default();
-        // A long label (the receiver confirmation) takes the hidden [Alt] button's room too.
-        let wide = view.alt.is_none() && label.chars().count() > SHORT_LABEL;
-        place(
-            dialog,
-            IDOK.0 as u16,
-            if wide {
-                PRIMARY_WIDE_RECT
-            } else {
-                PRIMARY_RECT
-            },
-        );
+        // A long label (the receiver confirmation) takes the hidden [Alt] button's room too; an
+        // [Extra] button shifts [Primary] and [Alt] one slot left.
+        let (primary, alt) = if view.extra.is_some() {
+            (PRIMARY_LEFT_RECT, PRIMARY_RECT)
+        } else if view.alt.is_none() && label.chars().count() > SHORT_LABEL {
+            (PRIMARY_WIDE_RECT, ALT_RECT)
+        } else {
+            (PRIMARY_RECT, ALT_RECT)
+        };
+        place(dialog, IDOK.0 as u16, primary);
+        place(dialog, ALT_ID, alt);
         set_text(dialog, IDOK.0 as u16, label);
         show(dialog, IDOK.0 as u16, view.primary.is_some());
     }
     if changed(&|old| old.alt != view.alt) {
         set_text(dialog, ALT_ID, view.alt.unwrap_or_default());
         show(dialog, ALT_ID, view.alt.is_some());
+    }
+    // The third button sits in `ALT_RECT` and is hidden while the view has none.
+    if changed(&|old| old.extra != view.extra) {
+        set_text(dialog, EXTRA_ID, view.extra.unwrap_or_default());
+        show(dialog, EXTRA_ID, view.extra.is_some());
     }
     if changed(&|old| old.close != view.close) {
         set_text(dialog, IDCANCEL.0 as u16, view.close);
@@ -624,7 +635,7 @@ fn text(dialog: HWND, id: u16) -> String {
     }
 }
 
-/// The window's template: message, picker, custom-device fields, details and three buttons; only
+/// The window's template: message, picker, custom-device fields, details and four buttons; only
 /// the message and the close button start visible.
 fn template() -> Vec<u32> {
     let hidden = WS_CHILD;
@@ -632,7 +643,7 @@ fn template() -> Vec<u32> {
     let combo = hidden | WS_TABSTOP | WS_VSCROLL | dialog_style(CBS_DROPDOWNLIST);
     let label = hidden | dialog_style(NO_PREFIX);
     let button = |kind: i32| WS_TABSTOP | dialog_style(kind);
-    let items: [(WINDOW_STYLE, [i16; 4], u16, u16, &str); 12] = [
+    let items: [(WINDOW_STYLE, [i16; 4], u16, u16, &str); 13] = [
         (
             visible | dialog_style(NO_PREFIX),
             MESSAGE_RECT,
@@ -681,6 +692,14 @@ fn template() -> Vec<u32> {
             hidden | button(BS_PUSHBUTTON),
             ALT_RECT,
             ALT_ID,
+            BUTTON_CLASS,
+            "",
+        ),
+        // [Extra] after [Alt] in the tab order; `render` places [Primary] and [Alt] around it.
+        (
+            hidden | button(BS_PUSHBUTTON),
+            ALT_RECT,
+            EXTRA_ID,
             BUTTON_CLASS,
             "",
         ),
