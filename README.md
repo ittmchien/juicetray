@@ -67,7 +67,7 @@ allow = ["391D:1A05"]
 
 ## Safety
 
-Juicetray only sends read-only battery queries, one at a time, with no retry loops. It never
+Juicetray only sends read-only battery and online-status queries, one at a time, with no retry loops. It never
 changes a device setting. Bluetooth levels are read from what the OS already stores, so no
 query reaches those devices. A receiver or cable device is queried at most once per 10 s
 (mice) or 5 min (headsets), whatever the auto-refresh setting.
@@ -82,8 +82,8 @@ query reaches those devices. A receiver or cable device is queried at most once 
 - `juicetray probe <VID:PID>` (optional; the menu's Check battery now confirms a device without
   it) sends one read-only battery query to a supported device and prints the raw reply. Close
   the vendor app first; probe refuses within the device's floor.
-- `juicetray probe --online <VID:PID>` sends the read-only Compx online-status query instead
-  (Compx devices only, same floor) and prints `online: yes/no/unsupported`.
+- `juicetray probe --online <VID:PID>` sends the read-only online-status query instead
+  (Compx and ATK N9 Ultra only, same floor) and prints `online: yes/no/unsupported`.
 - `juicetray listen <VID:PID> [seconds]` only reads (1-60 s, default 10) and prints each
   report with its time in ms, to see what a vendor app's own polling gets back; nothing is sent.
 

@@ -181,13 +181,8 @@ mod tests {
     }
 
     #[test]
-    fn online_query_is_compx_only() {
-        for family in [
-            Family::Report13,
-            Family::Mchose,
-            Family::AtkSerial,
-            Family::AtkBitmouse,
-        ] {
+    fn online_query_is_compx_and_atk_serial_only() {
+        for family in [Family::Report13, Family::Mchose, Family::AtkBitmouse] {
             assert_eq!(online_query(family), None, "{family:?}");
             assert_eq!(
                 decode_online_family(family, &online_reply(0, 1)),

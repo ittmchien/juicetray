@@ -1,5 +1,5 @@
 //! `juicetray probe [--online] <VID:PID>`: one query to one known device through the door:
-//! battery by default, the Compx online-status getter with `--online`. The query floor is
+//! battery by default, the online-status getter (Compx, ATK serial) with `--online`. The query floor is
 //! checked before any device is listed or opened, and the query time is saved before the write,
 //! so a failed or unanswered query still counts.
 
@@ -47,12 +47,13 @@ fn parse_probe_args(args: &[String]) -> Result<(Option<&str>, bool), String> {
     Ok((device, online))
 }
 
-/// Refusals before the log or any device is touched: `--online` is Compx only, and a device
-/// with no known working battery command is refused for the battery query.
+/// Refusals before the log or any device is touched: `--online` needs a family with an online
+/// query (Compx, ATK serial), and a device with no known working battery command is refused
+/// for the battery query.
 fn early_refusal(device: &KnownDevice, online: bool) -> Result<(), String> {
     let (vid, pid) = (device.vid, device.pid);
     if online && online_query(device.family).is_none() {
-        return Err(refusal(vid, pid, "online query is Compx only"));
+        return Err(refusal(vid, pid, "this family has no online query"));
     }
     if device.needs_capture && !online {
         return Err(refusal(vid, pid, "not supported yet: needs a capture"));
@@ -466,26 +467,52 @@ mod tests {
         };
         let x1 = known(0x373B, 0x1107).unwrap();
 
-        // needs_capture blocks the battery query but not the online one (Compx only).
+        // needs_capture blocks the battery query but not the online one (where the family has one).
         let refusal = early_refusal(cable, false).unwrap_err();
         assert!(refusal.contains("needs a capture"), "{refusal}");
         assert!(refusal.ends_with("nothing was sent"), "{refusal}");
         assert_eq!(early_refusal(cable, true), Ok(()));
         assert_eq!(early_refusal(x1, true), Ok(()));
         assert_eq!(early_refusal(x1, false), Ok(()));
+        let n9 = known(0x373B, 0x1204).unwrap();
+        assert_eq!(early_refusal(n9, true), Ok(()));
 
         for online in [false, true] {
             let text = early_refusal(vgn, online).unwrap_err();
             assert!(text.ends_with("nothing was sent"), "{text}");
             let expected = if online {
-                "online query is Compx only"
+                "this family has no online query"
             } else {
                 "needs a capture"
             };
             assert!(text.contains(expected), "{text}");
         }
         let mchose = early_refusal(mchose(), true).unwrap_err();
-        assert!(mchose.contains("online query is Compx only"), "{mchose}");
+        assert!(
+            mchose.contains("this family has no online query"),
+            "{mchose}"
+        );
+    }
+
+    #[test]
+    fn probe_text_online_atk_serial() {
+        let n9 = known(0x373B, 0x1204).unwrap();
+        let frame = online_query(Family::AtkSerial).unwrap();
+        for (linked, last) in [(1, "online: yes"), (0, "online: no")] {
+            let bytes = padded(&[0x05, 0x00, 0x04, 0x00, linked], 64);
+            let decoded = protocol::decode_online(Family::AtkSerial, &bytes);
+            let exchange = Exchange {
+                family: Family::AtkSerial,
+                sent: frame,
+                reply: Some((bytes.clone(), decoded)),
+                unrelated: Vec::new(),
+                dropped: 0,
+            };
+            let text = exchange_text(n9, "target", &exchange);
+            let lines: Vec<&str> = text.lines().collect();
+            assert_eq!(lines[2], format!("sent (64 B): {}", hex(frame)));
+            assert_eq!(lines[4], last);
+        }
     }
 
     #[test]

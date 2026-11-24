@@ -1,6 +1,6 @@
-//! The one write door: a write budget, the family's fixed battery query (plus the Compx
-//! online-status query), one write per query and a bounded wait for the reply. No API here
-//! takes raw bytes.
+//! The one write door: a write budget, the family's fixed battery query (plus the Compx and
+//! ATK serial online-status query), one write per query and a bounded wait for the reply. No
+//! API here takes raw bytes.
 
 use std::time::{Duration, Instant};
 
@@ -85,8 +85,8 @@ impl Door {
         self.send_query(target, Query::Battery)
     }
 
-    /// Sends the Compx online-status query once and waits for the reply; every other family is
-    /// refused before any I/O.
+    /// Sends the online-status query (Compx, ATK serial) once and waits for the reply; every
+    /// other family is refused before any I/O.
     pub fn send_online(&mut self, target: &mut Target) -> anyhow::Result<Exchange> {
         self.send_query(target, Query::Online)
     }
@@ -128,7 +128,7 @@ impl Door {
         let sent = match query {
             Query::Battery => battery_query(family),
             Query::Online => online_query(family)
-                .ok_or_else(|| anyhow!("online query is Compx only; nothing was sent"))?,
+                .ok_or_else(|| anyhow!("this family has no online query; nothing was sent"))?,
         };
         if self.writes_left == 0 {
             bail!("write budget used up; nothing was sent");
@@ -514,6 +514,27 @@ mod tests {
     }
 
     #[test]
+    fn atk_serial_online_frame_accumulates_and_ignores_a_battery_frame() {
+        let status = padded(&[0x05, 0x00, 0x04, 0x00, 0x01], SERIAL_FRAME_LEN);
+        let battery = padded(&[0x05, 0x00, 0x03, 0x00, 0xd2], SERIAL_FRAME_LEN);
+        // A stale battery frame comes first: it is not the status reply and stays unrelated.
+        let reads = bytes(&[
+            battery.clone(),
+            status[..10].to_vec(),
+            status[10..].to_vec(),
+        ]);
+        let (mut target, log) = target(0x373B, 0x1204, Link::Serial, reads);
+        let exchange = Door::new(1).send_online(&mut target).expect("send");
+        let query = online_query(Family::AtkSerial).unwrap();
+        assert_eq!(log.borrow().writes, vec![query.to_vec()]);
+        assert_eq!(
+            exchange.reply,
+            Some((status, Decoded::Online(protocol::Online::Yes)))
+        );
+        assert_eq!(exchange.unrelated, vec![battery]);
+    }
+
+    #[test]
     fn online_echo_is_not_the_reply() {
         let echo = online_query(Family::Compx).unwrap().to_vec();
         let (mut target, _log) = target(
@@ -530,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn allow_list_is_battery_plus_compx_online() {
+    fn allow_list_is_battery_plus_compx_and_atk_serial_online() {
         for device in protocol::KNOWN {
             let link = device.family.link();
             let open = || target(device.vid, device.pid, link, Vec::new());
@@ -548,14 +569,19 @@ mod tests {
             let (mut target, log) = open();
             let online = Door::new(1).send_online(&mut target);
             match (device.family, online) {
-                (Family::Compx, Ok(_)) => assert_eq!(
+                (Family::Compx | Family::AtkSerial, Ok(_)) => assert_eq!(
                     log.borrow().writes,
-                    vec![online_query(Family::Compx).unwrap().to_vec()]
+                    vec![online_query(device.family).unwrap().to_vec()]
                 ),
-                (Family::Compx, Err(error)) => panic!("compx online refused: {error:#}"),
+                (family @ (Family::Compx | Family::AtkSerial), Err(error)) => {
+                    panic!("{family:?} online refused: {error:#}")
+                }
                 (_, Ok(_)) => panic!("{:04X}:{:04X} accepted online", device.vid, device.pid),
                 (_, Err(error)) => {
-                    assert!(format!("{error:#}").contains("Compx only"), "{error:#}");
+                    assert!(
+                        format!("{error:#}").contains("no online query"),
+                        "{error:#}"
+                    );
                     assert!(log.borrow().writes.is_empty());
                     assert!(log.borrow().timeouts.is_empty());
                 }

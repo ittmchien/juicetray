@@ -114,12 +114,13 @@ pub fn battery_query(family: Family) -> &'static [u8] {
     }
 }
 
-/// The only non-battery frame the door may send: Compx online status (a read-only getter in
-/// both vendor apps). Every other family has none.
+/// The only non-battery frame the door may send: the online status (a read-only getter in the
+/// Compx vendor apps, ATK HUB's getStatus for ATK serial). Every other family has none.
 pub fn online_query(family: Family) -> Option<&'static [u8]> {
     match family {
         Family::Compx => Some(&compx::ONLINE_QUERY),
-        Family::Report13 | Family::Mchose | Family::AtkSerial | Family::AtkBitmouse => None,
+        Family::AtkSerial => Some(&atk_serial::ONLINE_QUERY),
+        Family::Report13 | Family::Mchose | Family::AtkBitmouse => None,
     }
 }
 
@@ -127,9 +128,8 @@ pub fn online_query(family: Family) -> Option<&'static [u8]> {
 pub fn decode_online(family: Family, bytes: &[u8]) -> Decoded {
     match family {
         Family::Compx => compx::decode_online(bytes),
-        Family::Report13 | Family::Mchose | Family::AtkSerial | Family::AtkBitmouse => {
-            Decoded::NotTheReply
-        }
+        Family::AtkSerial => atk_serial::decode_online(bytes),
+        Family::Report13 | Family::Mchose | Family::AtkBitmouse => Decoded::NotTheReply,
     }
 }
 
