@@ -54,6 +54,22 @@ pub fn confirm(title: &str, message: &str, ok_label: &str, cancel_label: &str) -
     platform::confirm(title, message, ok_label, cancel_label)
 }
 
+#[cfg(windows)]
+pub use self::windows::Answer;
+
+/// `confirm` with a middle action: `ok_label` is the default button, `alt_label` the second
+/// choice and `cancel_label` (or Esc) backs out; same threading rule as `confirm`. Windows only.
+#[cfg(windows)]
+pub fn confirm_or_alt(
+    title: &str,
+    message: &str,
+    ok_label: &str,
+    alt_label: &str,
+    cancel_label: &str,
+) -> Answer {
+    platform::confirm_or_alt(title, message, ok_label, alt_label, cancel_label)
+}
+
 /// Shows `message` with an OK button; blocks the calling thread until it is closed, so it runs
 /// on its own thread, never the event loop's. Windows only.
 #[cfg(windows)]

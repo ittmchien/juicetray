@@ -38,6 +38,13 @@ const CANCEL_RECT: [i16; 4] = [163, 62, 50, 14];
 const CONFIRM_RECT: [i16; 4] = [0, 0, 220, 58];
 const CONFIRM_OK_RECT: [i16; 4] = [109, 38, 50, 14];
 const CONFIRM_CANCEL_RECT: [i16; 4] = [163, 38, 50, 14];
+/// The middle button's control id in the three-button dialog.
+const ALT_ID: u16 = 102;
+const THREE_WAY_RECT: [i16; 4] = [0, 0, 250, 58];
+const THREE_WAY_MESSAGE_RECT: [i16; 4] = [7, 7, 236, 26];
+const THREE_WAY_OK_RECT: [i16; 4] = [37, 38, 64, 14];
+const THREE_WAY_ALT_RECT: [i16; 4] = [105, 38, 88, 14];
+const THREE_WAY_CANCEL_RECT: [i16; 4] = [197, 38, 46, 14];
 
 /// The colour dialog's 16 custom slots, kept for the session; white marks an unused slot.
 static CUSTOM_COLORS: Mutex<[COLORREF; 16]> = Mutex::new([COLORREF(0x00FF_FFFF); 16]);
@@ -87,15 +94,45 @@ pub fn prompt_text(title: &str, message: &str, default: &str) -> Option<String> 
 /// `cancel_label` button answer no. Blocks the calling thread, so callers run it off the
 /// event-loop thread.
 pub fn confirm(title: &str, message: &str, ok_label: &str, cancel_label: &str) -> bool {
+    let template = confirm_template(title, message, ok_label, cancel_label);
+    run_choice(&template) == Some(IDOK.0 as isize)
+}
+
+/// The owner's pick in a three-button dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    Ok,
+    Alt,
+    Cancel,
+}
+
+/// Like `confirm` with a second action: `ok_label` is the default button, `alt_label` the
+/// middle one; Esc and the `cancel_label` button cancel. Blocks the calling thread.
+pub fn confirm_or_alt(
+    title: &str,
+    message: &str,
+    ok_label: &str,
+    alt_label: &str,
+    cancel_label: &str,
+) -> Answer {
+    let template = three_way_template(title, message, ok_label, alt_label, cancel_label);
+    match run_choice(&template) {
+        Some(id) if id == IDOK.0 as isize => Answer::Ok,
+        Some(id) if id == ALT_ID as isize => Answer::Alt,
+        _ => Answer::Cancel,
+    }
+}
+
+/// Runs a button-only dialog; the id of the pressed button, `None` when the dialog failed.
+fn run_choice(template: &[u32]) -> Option<isize> {
     // SAFETY: a null module name asks for this executable's own handle, which never fails here.
     let instance = match unsafe { GetModuleHandleW(None) } {
         Ok(module) => HINSTANCE::from(module),
         Err(error) => {
             eprintln!("confirm dialog failed: {error}");
-            return false;
+            return None;
         }
     };
-    let template = confirm_template(title, message, ok_label, cancel_label);
     // SAFETY: the template is DWORD-aligned and well formed; the dialog procedure reads no
     // creation data.
     let result = unsafe {
@@ -112,8 +149,9 @@ pub fn confirm(title: &str, message: &str, ok_label: &str, cancel_label: &str) -
             "confirm dialog failed: {}",
             windows::core::Error::from_thread()
         );
+        return None;
     }
-    result == IDOK.0 as isize
+    Some(result)
 }
 
 /// A modal message box with one OK button. Blocks the calling thread, so callers run it off the
@@ -204,7 +242,7 @@ unsafe extern "system" fn dialog_proc(
     }
 }
 
-/// Closes the confirm dialog with the id of the button pressed (OK or Cancel).
+/// Closes the confirm dialog with the id of the button pressed (OK, the middle one or Cancel).
 unsafe extern "system" fn confirm_proc(
     dialog: HWND,
     message: u32,
@@ -216,7 +254,7 @@ unsafe extern "system" fn confirm_proc(
         WM_INITDIALOG => 1,
         WM_COMMAND => {
             let id = i32::from(wparam.0 as u16);
-            if id != IDOK.0 && id != IDCANCEL.0 {
+            if id != IDOK.0 && id != IDCANCEL.0 && id != i32::from(ALT_ID) {
                 return 0;
             }
             // SAFETY: `dialog` is the live modal dialog.
@@ -291,6 +329,44 @@ fn dialog_template(title: &str, message: &str) -> Vec<u32> {
 /// An in-memory `DLGTEMPLATE` for the confirm dialog: caption, font, message, `ok_label` and
 /// `cancel_label`.
 fn confirm_template(title: &str, message: &str, ok_label: &str, cancel_label: &str) -> Vec<u32> {
+    button_template(
+        title,
+        message,
+        [CONFIRM_RECT, MESSAGE_RECT],
+        &[
+            (IDOK.0 as u16, CONFIRM_OK_RECT, ok_label),
+            (IDCANCEL.0 as u16, CONFIRM_CANCEL_RECT, cancel_label),
+        ],
+    )
+}
+
+/// The confirm dialog with a middle button, wider so the longer labels fit.
+fn three_way_template(
+    title: &str,
+    message: &str,
+    ok_label: &str,
+    alt_label: &str,
+    cancel_label: &str,
+) -> Vec<u32> {
+    button_template(
+        title,
+        message,
+        [THREE_WAY_RECT, THREE_WAY_MESSAGE_RECT],
+        &[
+            (IDOK.0 as u16, THREE_WAY_OK_RECT, ok_label),
+            (ALT_ID, THREE_WAY_ALT_RECT, alt_label),
+            (IDCANCEL.0 as u16, THREE_WAY_CANCEL_RECT, cancel_label),
+        ],
+    )
+}
+
+/// A caption, the font, a message and push buttons `(id, rect, label)`; the first is the default.
+fn button_template(
+    title: &str,
+    message: &str,
+    [dialog_rect, message_rect]: [[i16; 4]; 2],
+    buttons: &[(u16, [i16; 4], &str)],
+) -> Vec<u32> {
     let mut words = TemplateWords::default();
     let style = WS_POPUP
         | WS_CAPTION
@@ -298,9 +374,8 @@ fn confirm_template(title: &str, message: &str, ok_label: &str, cancel_label: &s
         | dialog_style(DS_MODALFRAME | DS_SETFONT | DS_CENTER | DS_SETFOREGROUND);
     words.dword(style.0);
     words.dword(0);
-    let item_count = 3;
-    words.word(item_count);
-    words.rect(CONFIRM_RECT);
+    words.word(1 + buttons.len() as u16);
+    words.rect(dialog_rect);
     // No menu, default dialog class.
     words.word(0);
     words.word(0);
@@ -309,21 +384,21 @@ fn confirm_template(title: &str, message: &str, ok_label: &str, cancel_label: &s
     words.text(FONT_FACE);
 
     let control = WS_CHILD | WS_VISIBLE;
-    words.item(control, MESSAGE_RECT, MESSAGE_ID, STATIC_CLASS, message);
-    words.item(
-        control | WS_TABSTOP | dialog_style(BS_DEFPUSHBUTTON),
-        CONFIRM_OK_RECT,
-        IDOK.0 as u16,
-        BUTTON_CLASS,
-        ok_label,
-    );
-    words.item(
-        control | WS_TABSTOP | dialog_style(BS_PUSHBUTTON),
-        CONFIRM_CANCEL_RECT,
-        IDCANCEL.0 as u16,
-        BUTTON_CLASS,
-        cancel_label,
-    );
+    words.item(control, message_rect, MESSAGE_ID, STATIC_CLASS, message);
+    for (index, (id, rect, label)) in buttons.iter().enumerate() {
+        let kind = if index == 0 {
+            BS_DEFPUSHBUTTON
+        } else {
+            BS_PUSHBUTTON
+        };
+        words.item(
+            control | WS_TABSTOP | dialog_style(kind),
+            *rect,
+            *id,
+            BUTTON_CLASS,
+            label,
+        );
+    }
     words.into_dwords()
 }
 
@@ -413,5 +488,15 @@ mod tests {
         let first_item = header_words + header_words % 2;
         let style = u32::from(words[first_item]) | (u32::from(words[first_item + 1]) << 16);
         assert_eq!(style, (WS_CHILD | WS_VISIBLE).0);
+    }
+
+    #[test]
+    fn three_way_template_has_four_items() {
+        let template = three_way_template("Odd", "x", "Update now", "Open download page", "Later");
+        let words: Vec<u16> = template
+            .iter()
+            .flat_map(|dword| [*dword as u16, (dword >> 16) as u16])
+            .collect();
+        assert_eq!(words[4], 4);
     }
 }

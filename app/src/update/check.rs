@@ -5,11 +5,27 @@ use super::RELEASES_URL;
 /// A release page on this project's own repository is the only link the app will open.
 const RELEASE_PAGE_PREFIX: &str = "https://github.com/ittmchien/juicetray/";
 
-/// A newer release: its version without the leading `v`, and the page to download it from.
+/// Release assets are only fetched from this project's own download URLs.
+const DOWNLOAD_PREFIX: &str = "https://github.com/ittmchien/juicetray/releases/download/";
+
+/// The portable executable's asset name and the checksum list published next to it.
+pub const EXE_ASSET: &str = "juicetray-windows-x86_64.exe";
+pub const SUMS_ASSET: &str = "SHA256SUMS.txt";
+
+/// Where a release's executable and its checksum list can be downloaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateAssets {
+    pub exe_url: String,
+    pub sums_url: String,
+}
+
+/// A newer release: its version without the leading `v`, the page to download it from and, when
+/// the release carries both files, the assets for a one-click update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateInfo {
     pub version: String,
     pub url: String,
+    pub assets: Option<UpdateAssets>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,12 +86,85 @@ pub fn evaluate(status: u16, body: &str, current: &str) -> Result<UpdateCheck, S
     Ok(UpdateCheck::Available(UpdateInfo {
         version: tag.trim().trim_start_matches(['v', 'V']).to_owned(),
         url,
+        assets: update_assets(body, &tag),
     }))
 }
 
 /// True the first time `found` is seen: the owner is told once per version.
 pub fn should_notify(last_notified: Option<&str>, found: &str) -> bool {
     last_notified != Some(found)
+}
+
+/// Both download URLs, or `None` when the release lacks either file or links elsewhere. Both
+/// must sit under the release's own tag so the exe and its checksum come from the same release
+/// as the version shown.
+fn update_assets(json: &str, tag: &str) -> Option<UpdateAssets> {
+    let listed = release_assets(json);
+    let prefix = format!("{DOWNLOAD_PREFIX}{tag}/");
+    let url_of = |wanted: &str| {
+        listed
+            .iter()
+            .find(|(name, url)| name == wanted && url.starts_with(&prefix))
+            .map(|(_, url)| url.clone())
+    };
+    Some(UpdateAssets {
+        exe_url: url_of(EXE_ASSET)?,
+        sums_url: url_of(SUMS_ASSET)?,
+    })
+}
+
+/// `(name, browser_download_url)` of each object in the top-level `assets` array; an asset
+/// lacking either string is left out. Depth 1 is the release, 2 the array, 3 an asset.
+fn release_assets(json: &str) -> Vec<(String, String)> {
+    let mut chars = json.chars().peekable();
+    let mut found = Vec::new();
+    let (mut name, mut url) = (None, None);
+    let mut depth = 0_u32;
+    let mut in_assets = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '{' | '[' => depth += 1,
+            '}' | ']' => {
+                if in_assets && c == '}' && depth == 3 {
+                    if let (Some(name), Some(url)) = (name.take(), url.take()) {
+                        found.push((name, url));
+                    }
+                } else if in_assets && c == ']' && depth == 2 {
+                    break;
+                }
+                depth = depth.saturating_sub(1);
+            }
+            '"' => {
+                let Some(key) = read_string(&mut chars) else {
+                    break;
+                };
+                skip_whitespace(&mut chars);
+                if chars.next_if_eq(&':').is_none() {
+                    continue;
+                }
+                skip_whitespace(&mut chars);
+                match (depth, key.as_str()) {
+                    (1, "assets") if chars.next_if_eq(&'[').is_some() => {
+                        in_assets = true;
+                        depth += 1;
+                    }
+                    (3, "name" | "browser_download_url")
+                        if in_assets && chars.next_if_eq(&'"').is_some() =>
+                    {
+                        let value = read_string(&mut chars);
+                        if key == "name" {
+                            name = value;
+                        } else {
+                            url = value;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    found
 }
 
 type Chars<'a> = std::iter::Peekable<std::str::Chars<'a>>;
@@ -234,8 +323,98 @@ mod tests {
             Ok(UpdateCheck::Available(UpdateInfo {
                 version: "0.2.0".into(),
                 url: "https://github.com/ittmchien/juicetray/releases/tag/v0.2.0".into(),
+                assets: None,
             }))
         );
+    }
+
+    const DL: &str = "https://github.com/ittmchien/juicetray/releases/download/v0.2.0";
+
+    fn release_with_assets(assets: &str) -> String {
+        format!(
+            r#"{{"tag_name":"v0.2.0","author":{{"name":"x"}},"assets":[{assets}],"body":"[]"}}"#
+        )
+    }
+
+    fn asset(name: &str, url: &str) -> String {
+        format!(
+            r#"{{"name":"{name}","uploader":{{"name":"u","browser_download_url":"nested"}},"browser_download_url":"{url}"}}"#
+        )
+    }
+
+    #[test]
+    fn both_assets_are_found_among_others() {
+        let body = release_with_assets(&format!(
+            "{},{},{}",
+            asset("notes.txt", &format!("{DL}/notes.txt")),
+            asset(SUMS_ASSET, &format!("{DL}/{SUMS_ASSET}")),
+            asset(EXE_ASSET, &format!("{DL}/{EXE_ASSET}")),
+        ));
+        assert_eq!(
+            update_assets(&body, "v0.2.0"),
+            Some(UpdateAssets {
+                exe_url: format!("{DL}/{EXE_ASSET}"),
+                sums_url: format!("{DL}/{SUMS_ASSET}"),
+            })
+        );
+        // The check hands them on with the verdict.
+        let Ok(UpdateCheck::Available(info)) = check(200, &body) else {
+            panic!("expected an update");
+        };
+        assert!(info.assets.is_some());
+    }
+
+    #[test]
+    fn a_missing_asset_or_foreign_url_gives_no_assets() {
+        let exe = asset(EXE_ASSET, &format!("{DL}/{EXE_ASSET}"));
+        let sums = asset(SUMS_ASSET, &format!("{DL}/{SUMS_ASSET}"));
+        let assets_of = |body: &str| update_assets(body, "v0.2.0");
+        assert_eq!(assets_of(&release_with_assets(&exe)), None);
+        assert_eq!(assets_of(&release_with_assets(&sums)), None);
+        assert_eq!(assets_of(&release_with_assets("")), None);
+        assert_eq!(assets_of(r#"{"tag_name":"v1"}"#), None);
+        let evil = asset(EXE_ASSET, "https://evil.example/juicetray.exe");
+        let with_evil = release_with_assets(&format!("{evil},{sums}"));
+        assert_eq!(assets_of(&with_evil), None);
+        // Another repository's download link is not accepted either.
+        let other = asset(
+            EXE_ASSET,
+            "https://github.com/someone/else/releases/download/v1/x",
+        );
+        let with_other = release_with_assets(&format!("{other},{sums}"));
+        assert_eq!(assets_of(&with_other), None);
+        // Only the exact name counts: a similar file name or a nested "name" does not.
+        let similar = asset("juicetray-windows-x86_64.exe.sig", &format!("{DL}/x"));
+        let with_similar = release_with_assets(&format!("{similar},{sums}"));
+        assert_eq!(assets_of(&with_similar), None);
+    }
+
+    #[test]
+    fn assets_from_another_tag_are_rejected() {
+        let other_dl = "https://github.com/ittmchien/juicetray/releases/download/v0.1.0";
+        let exe = asset(EXE_ASSET, &format!("{DL}/{EXE_ASSET}"));
+        let sums = asset(SUMS_ASSET, &format!("{DL}/{SUMS_ASSET}"));
+        let old_exe = asset(EXE_ASSET, &format!("{other_dl}/{EXE_ASSET}"));
+        let old_sums = asset(SUMS_ASSET, &format!("{other_dl}/{SUMS_ASSET}"));
+        // Either file from another release, or both, gives no assets.
+        for (first, second) in [(&old_exe, &sums), (&exe, &old_sums), (&old_exe, &old_sums)] {
+            let body = release_with_assets(&format!("{first},{second}"));
+            assert_eq!(update_assets(&body, "v0.2.0"), None);
+            assert!(matches!(
+                check(200, &body),
+                Ok(UpdateCheck::Available(UpdateInfo { assets: None, .. }))
+            ));
+        }
+        // A tag that merely starts the same does not match.
+        let body = release_with_assets(&format!("{exe},{sums}"));
+        assert_eq!(update_assets(&body, "v0.2"), None);
+    }
+
+    #[test]
+    fn a_truncated_asset_list_gives_no_assets() {
+        let exe = asset(EXE_ASSET, &format!("{DL}/{EXE_ASSET}"));
+        let cut = format!(r#"{{"tag_name":"v0.2.0","assets":[{exe},{{"name":"SHA2"#);
+        assert_eq!(update_assets(&cut, "v0.2.0"), None);
     }
 
     #[test]

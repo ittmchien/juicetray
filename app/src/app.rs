@@ -93,6 +93,9 @@ pub enum UserEvent {
         manual: bool,
         outcome: Result<UpdateCheck, String>,
     },
+    /// The new exe is installed and running: this instance quits through the normal exit path.
+    #[cfg(windows)]
+    UpdateRestart,
 }
 
 impl UserEvent {
@@ -120,6 +123,8 @@ impl UserEvent {
             Self::UpdateDue => "UpdateDue",
             #[cfg(windows)]
             Self::UpdateChecked { .. } => "UpdateChecked",
+            #[cfg(windows)]
+            Self::UpdateRestart => "UpdateRestart",
         }
     }
 }
@@ -132,6 +137,9 @@ pub fn run() -> ExitCode {
     }
     // After the instance check, so a refused second copy never restarts the running one's log.
     log::init();
+    // The previous exe an update moved aside is deleted once nothing holds it.
+    #[cfg(windows)]
+    update::spawn_cleanup();
 
     let event_loop = new_event_loop();
     let proxy = event_loop.create_proxy();
@@ -372,6 +380,12 @@ impl App {
                 self.on_update_checked(manual, outcome);
                 return ControlFlow::Wait;
             }
+            // Same exit as Quit, so the tray icon and strip are removed first.
+            #[cfg(windows)]
+            UserEvent::UpdateRestart => {
+                self.hide_taskbar();
+                return ControlFlow::Exit;
+            }
         }
         self.apply();
         ControlFlow::Wait
@@ -471,10 +485,11 @@ impl App {
         update::open_url(update::RELEASES_URL);
     }
 
+    /// The menu line offers the update in a dialog on its own thread.
     #[cfg(windows)]
     fn open_update(&self) {
         if let Some(info) = &self.update {
-            update::open_url(&info.url);
+            update::spawn_offer(self.proxy.clone(), info.clone());
         }
     }
 

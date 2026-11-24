@@ -121,7 +121,7 @@ pub enum MenuAction {
     /// Check GitHub Releases now and say the result (macOS opens the releases page instead).
     CheckForUpdates,
     ToggleCheckUpdates,
-    /// Open the download page of the update the menu announces.
+    /// Offer the update the menu announces: install it, open its download page or leave it.
     OpenUpdate,
     Quit,
 }
