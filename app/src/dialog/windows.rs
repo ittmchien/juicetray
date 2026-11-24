@@ -16,9 +16,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::HSTRING;
 
 /// Predefined control classes, by the atoms dialog templates use for them.
-const BUTTON_CLASS: u16 = 0x0080;
-const EDIT_CLASS: u16 = 0x0081;
-const STATIC_CLASS: u16 = 0x0082;
+pub(crate) const BUTTON_CLASS: u16 = 0x0080;
+pub(crate) const EDIT_CLASS: u16 = 0x0081;
+pub(crate) const STATIC_CLASS: u16 = 0x0082;
+pub(crate) const COMBO_BOX_CLASS: u16 = 0x0085;
 /// Marks the next template word as a class atom instead of a class name.
 const ATOM_MARKER: u16 = 0xFFFF;
 
@@ -314,21 +315,7 @@ fn input_text(dialog: HWND) -> String {
 /// `u32` words because the template must start on a DWORD boundary.
 fn dialog_template(title: &str, message: &str) -> Vec<u32> {
     let mut words = TemplateWords::default();
-    let style = WS_POPUP
-        | WS_CAPTION
-        | WS_SYSMENU
-        | dialog_style(DS_MODALFRAME | DS_SETFONT | DS_CENTER | DS_SETFOREGROUND);
-    words.dword(style.0);
-    words.dword(0);
-    let item_count = 4;
-    words.word(item_count);
-    words.rect(DIALOG_RECT);
-    // No menu, default dialog class.
-    words.word(0);
-    words.word(0);
-    words.text(title);
-    words.word(FONT_POINTS);
-    words.text(FONT_FACE);
+    words.header(title, 4, DIALOG_RECT);
 
     let control = WS_CHILD | WS_VISIBLE;
     words.item(control, MESSAGE_RECT, MESSAGE_ID, STATIC_CLASS, message);
@@ -398,20 +385,7 @@ fn button_template(
     buttons: &[(u16, [i16; 4], &str)],
 ) -> Vec<u32> {
     let mut words = TemplateWords::default();
-    let style = WS_POPUP
-        | WS_CAPTION
-        | WS_SYSMENU
-        | dialog_style(DS_MODALFRAME | DS_SETFONT | DS_CENTER | DS_SETFOREGROUND);
-    words.dword(style.0);
-    words.dword(0);
-    words.word(1 + buttons.len() as u16);
-    words.rect(dialog_rect);
-    // No menu, default dialog class.
-    words.word(0);
-    words.word(0);
-    words.text(title);
-    words.word(FONT_POINTS);
-    words.text(FONT_FACE);
+    words.header(title, 1 + buttons.len() as u16, dialog_rect);
 
     let control = WS_CHILD | WS_VISIBLE;
     words.item(control, message_rect, MESSAGE_ID, STATIC_CLASS, message);
@@ -433,15 +407,33 @@ fn button_template(
 }
 
 /// Dialog, edit and button style constants are `i32` bit sets in the bindings.
-fn dialog_style(bits: i32) -> WINDOW_STYLE {
+pub(crate) fn dialog_style(bits: i32) -> WINDOW_STYLE {
     WINDOW_STYLE(bits as u32)
 }
 
 /// Little-endian 16-bit words of a dialog template.
 #[derive(Default)]
-struct TemplateWords(Vec<u16>);
+pub(crate) struct TemplateWords(Vec<u16>);
 
 impl TemplateWords {
+    /// The `DLGTEMPLATE` header of a centred, captioned modal dialog in the app's font.
+    pub(crate) fn header(&mut self, title: &str, item_count: u16, rect: [i16; 4]) {
+        let style = WS_POPUP
+            | WS_CAPTION
+            | WS_SYSMENU
+            | dialog_style(DS_MODALFRAME | DS_SETFONT | DS_CENTER | DS_SETFOREGROUND);
+        self.dword(style.0);
+        self.dword(0);
+        self.word(item_count);
+        self.rect(rect);
+        // No menu, default dialog class.
+        self.word(0);
+        self.word(0);
+        self.text(title);
+        self.word(FONT_POINTS);
+        self.text(FONT_FACE);
+    }
+
     fn word(&mut self, value: u16) {
         self.0.push(value);
     }
@@ -462,7 +454,14 @@ impl TemplateWords {
     }
 
     /// One `DLGITEMTEMPLATE`, DWORD-aligned, with a predefined class and no creation data.
-    fn item(&mut self, style: WINDOW_STYLE, rect: [i16; 4], id: u16, class: u16, text: &str) {
+    pub(crate) fn item(
+        &mut self,
+        style: WINDOW_STYLE,
+        rect: [i16; 4],
+        id: u16,
+        class: u16,
+        text: &str,
+    ) {
         if self.0.len() % 2 == 1 {
             self.0.push(0);
         }
@@ -476,7 +475,7 @@ impl TemplateWords {
         self.word(0);
     }
 
-    fn into_dwords(self) -> Vec<u32> {
+    pub(crate) fn into_dwords(self) -> Vec<u32> {
         self.0
             .chunks(2)
             .map(|pair| u32::from(pair[0]) | (u32::from(pair.get(1).copied().unwrap_or(0)) << 16))

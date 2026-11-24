@@ -79,11 +79,12 @@ Battery read correctly on the owner's devices; these are read automatically.
 ### ➕ Other devices
 
 Many ATK, VXE and VGN mice use the same protocols. Until a model is verified, Juicetray never
-queries it on its own. To try one, use **Add unsupported device…** in the menu (coming in the
-next release): it detects the device when you plug it in, sends one read-only battery query, and
-adds it once you confirm the level. If it does not work, please
-[open an issue](https://github.com/ittmchien/juicetray/issues) — the window fills in the details
-for you.
+queries it on its own. To try one, use **Add unsupported device…** in the menu (Windows), or
+**OK** on the "New device found" popup: it detects the device when you plug it in, sends one
+read-only battery query when you press **Try**, and adds it once you confirm the level. If it does
+not work, press **Report on GitHub** to
+[open an issue](https://github.com/ittmchien/juicetray/issues) with the details filled in (your
+user folder, PC name and device serials are left out).
 
 `allow` in the config file still works for hand-added devices:
 

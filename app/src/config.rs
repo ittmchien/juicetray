@@ -300,11 +300,38 @@ impl Config {
 
     /// Adds a catalogue model the owner added in the Add window to `allow`, in memory and in the
     /// file.
-    #[allow(dead_code, reason = "the Add window's [Add] button calls it")]
+    #[cfg_attr(
+        not(windows),
+        allow(dead_code, reason = "only Windows has the Add window")
+    )]
     pub fn allow_and_save(&mut self, vid: u16, pid: u16) -> Result<()> {
         let _span = log::span("config allow and save");
         let path = path().context("no config directory available")?;
         self.add_id_and_save_to(&path, |config| &mut config.allow, vid, pid)
+    }
+
+    /// Adds a device outside the catalogue the owner added in the Add window to
+    /// `custom_devices`, in memory and in the file; an entry with the same id is replaced.
+    #[cfg_attr(
+        not(windows),
+        allow(dead_code, reason = "only Windows has the Add window")
+    )]
+    pub fn add_custom_and_save(&mut self, entry: CustomEntry) -> Result<()> {
+        let _span = log::span("config add custom device and save");
+        let path = path().context("no config directory available")?;
+        self.add_custom_and_save_to(&path, entry)
+    }
+
+    /// The file's device keys (hand edits win) with `entry` in place of any entry naming its id.
+    fn add_custom_and_save_to(&mut self, path: &Path, entry: CustomEntry) -> Result<()> {
+        if let Ok(text) = fs::read_to_string(path) {
+            self.take_device_lists(Self::parse(&text));
+        }
+        let id = parse_vid_pid(&entry.id).ok();
+        self.custom_devices
+            .retain(|old| id.is_none() || parse_vid_pid(&old.id).ok() != id);
+        self.custom_devices.push(entry);
+        write_atomically(path, &self.to_toml())
     }
 
     /// Adds a device the owner declined in the new-device popup to `declined`, in memory and in
@@ -579,7 +606,10 @@ fn custom_device(entry: &CustomEntry) -> Result<Device, String> {
         "Report13" => Family::Report13,
         "Mchose" => Family::Mchose,
         "AtkBitmouse" => Family::AtkBitmouse,
+        "VgnKc2" => Family::VgnKc2,
+        // Both are told apart from look-alike protocols only by catalogue PIDs.
         "AtkSerial" => return Err("ATK serial works only for catalogue models".to_owned()),
+        "RongYuanF7" => return Err("RongYuan F7 works only for catalogue models".to_owned()),
         other => return Err(format!("unknown family {other:?}")),
     };
     let kind = match entry.kind.as_str() {
@@ -987,6 +1017,37 @@ allow = [\"373B:1204\"]
     }
 
     #[test]
+    fn add_custom_and_save_replaces_its_id_and_keeps_hand_edits() {
+        let root =
+            std::env::temp_dir().join(format!("juicetray-custom-save-test-{}", std::process::id()));
+        let path = root.join("config.toml");
+        let mut config = Config::default();
+        config.save_to(&path).unwrap();
+        // Written by hand while the app runs, with an older entry for the same id.
+        fs::write(
+            &path,
+            "allow = [\"373B:1204\"]\n\n[[custom_devices]]\nid = \"3554:7777\"\nfamily = \"Report13\"\n\n[[custom_devices]]\nid = \"1234:5678\"\nfamily = \"Compx\"\nkind = \"mouse\"\nconnection = \"cable\"\n",
+        )
+        .unwrap();
+        let entry = CustomEntry {
+            id: "3554:7777".into(),
+            name: "My board".into(),
+            family: "Compx".into(),
+            kind: "keyboard".into(),
+            connection: "receiver".into(),
+        };
+        config.add_custom_and_save_to(&path, entry.clone()).unwrap();
+        let loaded = Config::parse(&fs::read_to_string(&path).unwrap());
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(loaded.allow, ["373B:1204"]);
+        assert_eq!(loaded.custom_devices.len(), 2);
+        assert_eq!(loaded.custom_devices[0].id, "1234:5678");
+        assert_eq!(loaded.custom_devices[1], entry);
+        assert_eq!(config.custom_devices, loaded.custom_devices);
+    }
+
+    #[test]
     fn device_lists_absent_are_empty_and_not_written() {
         // An old config without the keys loads unchanged and writes none of them.
         let config = Config::parse("refresh_seconds = 300\nallow = [\"373B:1204\"]\n");
@@ -1050,7 +1111,7 @@ allow = [\"373B:1204\"]
             (Family::AtkBitmouse, Kind::Headset)
         );
         assert!(good.cable && good.custom);
-        for family in ["Compx", "Report13", "Mchose", "AtkBitmouse"] {
+        for family in ["Compx", "Report13", "Mchose", "AtkBitmouse", "VgnKc2"] {
             assert!(custom_device(&entry("0001:0002", family, "other", "receiver")).is_ok());
         }
         let bad = [
@@ -1058,6 +1119,7 @@ allow = [\"373B:1204\"]
             entry("3554:F2FF", "Compx", "mouse", "receiver"),
             entry("1:2", "compx", "mouse", "receiver"),
             entry("1:2", "AtkSerial", "headset", "receiver"),
+            entry("1:2", "RongYuanF7", "keyboard", "receiver"),
             entry("1:2", "Compx", "Mouse", "receiver"),
             entry("1:2", "Compx", "mouse", "dongle"),
             entry("1:2", "", "mouse", "receiver"),

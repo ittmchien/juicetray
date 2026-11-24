@@ -6,7 +6,7 @@ mod layout;
 mod win;
 
 #[cfg(windows)]
-pub use win::{Signal, StripContent, TaskbarHandle, describe_environment};
+pub use win::{Signal, StripContent, TaskbarHandle, describe_environment, windows_build};
 
 /// Straight RGBA to the premultiplied BGRA that `UpdateLayeredWindow` blends.
 /// Fully transparent pixels get alpha 1 so the whole strip still takes clicks.

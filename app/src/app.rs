@@ -122,6 +122,9 @@ pub enum UserEvent {
     /// The Add device window closed; waiting popups may show.
     #[cfg(windows)]
     AddDeviceClosed,
+    /// The owner pressed [Add] in the Add device window: this thread writes the config.
+    #[cfg(windows)]
+    AddDevice(add_device::AddRequest),
 }
 
 impl UserEvent {
@@ -164,6 +167,8 @@ impl UserEvent {
             Self::OpenAddDevice(_) => "OpenAddDevice",
             #[cfg(windows)]
             Self::AddDeviceClosed => "AddDeviceClosed",
+            #[cfg(windows)]
+            Self::AddDevice(_) => "AddDevice",
         }
     }
 }
@@ -473,12 +478,18 @@ impl App {
             }
             #[cfg(windows)]
             UserEvent::OpenAddDevice(id) => {
-                add_device::open(self.proxy.clone(), id);
+                self.open_add_device(Some(id));
                 return ControlFlow::Wait;
             }
             #[cfg(windows)]
             UserEvent::AddDeviceClosed => {
                 self.show_next_offer();
+                return ControlFlow::Wait;
+            }
+            // The next read shows the device; its row changes the screen then.
+            #[cfg(windows)]
+            UserEvent::AddDevice(request) => {
+                self.add_device(request);
                 return ControlFlow::Wait;
             }
         }
@@ -558,6 +569,7 @@ impl App {
             }
             MenuAction::CheckForUpdates => self.check_for_updates(),
             MenuAction::ToggleDetectNewDevices => self.toggle_detect_new_devices(),
+            MenuAction::AddDevice => self.open_add_device(None),
             MenuAction::ToggleCheckUpdates => {
                 self.config.check_updates = !self.config.check_updates;
                 self.save_config();
@@ -589,6 +601,31 @@ impl App {
     /// macOS never announces an update, so its menu has no such line.
     #[cfg(not(windows))]
     fn open_update(&self) {}
+
+    /// Opens the Add device window, or focuses it and hands `id` over; it asks the worker for
+    /// device work itself.
+    #[cfg(windows)]
+    fn open_add_device(&self, id: Option<Id>) {
+        add_device::open(self.proxy.clone(), self.worker.clone(), id);
+    }
+
+    /// macOS has no Add device window, so its menu has no such item.
+    #[cfg(not(windows))]
+    fn open_add_device(&self, _id: Option<(u16, u16)>) {}
+
+    /// Saves what the owner added (catalogue id to `allow`, other ids to `custom_devices`) and
+    /// reads at once, so the device shows up.
+    #[cfg(windows)]
+    fn add_device(&mut self, request: add_device::AddRequest) {
+        let saved = match request {
+            add_device::AddRequest::Allow((vid, pid)) => self.config.allow_and_save(vid, pid),
+            add_device::AddRequest::Custom(entry) => self.config.add_custom_and_save(entry),
+        };
+        if let Err(error) = saved {
+            log::line(&format!("saving an added device failed: {error:#}"));
+        }
+        self.tell_worker(Command::RefreshNow);
+    }
 
     /// Saves the battery option and tells the worker, which restarts or stops its timer.
     fn set_refresh_on_battery(&mut self, on: bool) {
@@ -1165,11 +1202,15 @@ impl App {
     }
 
     /// Shows the next waiting offer unless a popup or the Add device window is open; the Add
-    /// window detects devices itself, so offers wait until it closes.
+    /// window detects devices itself, so offers wait until it closes, and those it added or that
+    /// were declined meanwhile drop out.
     fn show_next_offer(&mut self) {
         if add_device::is_open() {
             return;
         }
+        let settings = Settings::from_config(&self.config);
+        self.offers
+            .retain(|id| plug::plan(id, &settings) == Plan::Offer);
         if let Some(offer) = self.offers.next()
             && !popup::show(self.proxy.clone(), offer)
         {

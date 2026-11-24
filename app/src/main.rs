@@ -1,7 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-// Windows only: the Add device window opens from the new-device popup.
-#[cfg(windows)]
+// The Add device window runs on Windows; its steps are also tested elsewhere.
+#[cfg(any(windows, test))]
 mod add_device;
 mod alerts;
 mod app;
@@ -30,6 +30,9 @@ mod query;
 mod query_log;
 mod receivers;
 mod refresh;
+// GitHub reports come from Windows windows; the URL and redaction rules are also tested elsewhere.
+#[cfg(any(windows, test))]
+mod report;
 mod scan;
 mod svg_cache;
 mod taskbar;

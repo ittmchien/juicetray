@@ -29,7 +29,8 @@ const CUSTOM_LOW_ID: &str = "low:custom";
 const CUSTOM_OFFLINE_ID: &str = "offline:custom";
 const REFRESH_ON_BATTERY_ID: &str = "refresh-battery";
 const DETECT_NEW_DEVICES_ID: &str = "detect-new";
-/// Only Windows watches for new devices, so only it offers the switch.
+const ADD_DEVICE_ID: &str = "add-device";
+/// Only Windows watches for new devices and has the Add device window, so only it offers them.
 const DETECT_NEW_AVAILABLE: bool = cfg!(windows);
 const ICON_AUTO: &str = "auto";
 const SECONDS_PER_MINUTE: u32 = 60;
@@ -117,6 +118,8 @@ pub enum MenuAction {
     ToggleStartAtLogin,
     /// New-device popups on or off; plug-in refreshes of queried devices stay.
     ToggleDetectNewDevices,
+    /// Opens the Add device window, which warns first, then detects the device.
+    AddDevice,
     /// Turning it on is confirmed first; turning it off is not.
     ToggleRefreshOnBattery,
     /// Check GitHub Releases now and say the result (macOS opens the releases page instead).
@@ -191,6 +194,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         "login" => return Some(MenuAction::ToggleStartAtLogin),
         REFRESH_ON_BATTERY_ID => return Some(MenuAction::ToggleRefreshOnBattery),
         DETECT_NEW_DEVICES_ID => return Some(MenuAction::ToggleDetectNewDevices),
+        ADD_DEVICE_ID => return Some(MenuAction::AddDevice),
         CHECK_UPDATES_ID => return Some(MenuAction::CheckForUpdates),
         AUTO_UPDATE_ID => return Some(MenuAction::ToggleCheckUpdates),
         OPEN_UPDATE_ID => return Some(MenuAction::OpenUpdate),
@@ -317,11 +321,14 @@ pub fn menu_entries(
         login_entry(login),
     ]);
     if DETECT_NEW_AVAILABLE {
-        entries.push(MenuEntry::check(
-            DETECT_NEW_DEVICES_ID.to_owned(),
-            "Detect new devices",
-            config.detect_new_devices,
-        ));
+        entries.extend([
+            MenuEntry::check(
+                DETECT_NEW_DEVICES_ID.to_owned(),
+                "Detect new devices",
+                config.detect_new_devices,
+            ),
+            MenuEntry::item(ADD_DEVICE_ID, "Add unsupported device…"),
+        ]);
     }
     // Only a build that can check on its own offers the switch.
     if AUTO_CHECK_AVAILABLE {
@@ -809,6 +816,9 @@ mod tests {
             assert_eq!(entries[detect].text, "Detect new devices");
             assert_eq!(entries[detect].checked, Some(true));
             assert_eq!(entries[detect - 1].id.as_deref(), Some("login"));
+            // The Add device window follows it, on Windows only.
+            assert_eq!(entries[detect + 1].id.as_deref(), Some(ADD_DEVICE_ID));
+            assert_eq!(entries[detect + 1].text, "Add unsupported device…");
             let off = Config {
                 detect_new_devices: false,
                 ..Config::default()
@@ -917,6 +927,7 @@ mod tests {
             action_for("detect-new"),
             Some(MenuAction::ToggleDetectNewDevices)
         );
+        assert_eq!(action_for("add-device"), Some(MenuAction::AddDevice));
         assert_eq!(action_for("auto:7"), None);
         assert_eq!(action_for("icon:toaster:bt:x"), None);
         assert_eq!(action_for("color:zzz:auto:bt:x"), None);

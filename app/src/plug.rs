@@ -37,6 +37,15 @@ pub fn parse_interface_name(name: &str) -> Option<Id> {
     Some((hex_after("VID_")?, hex_after("PID_")?))
 }
 
+/// Whether a device interface path belongs to a Bluetooth device (classic, LE or a HID over
+/// either), which spells its ids `VID&…` or sits under a Bluetooth enumerator.
+pub fn is_bluetooth_interface(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    ["BTHENUM", "BTHLE", "_VID&", "{00001124-", "{00001812-"]
+        .iter()
+        .any(|tag| upper.contains(tag))
+}
+
 /// Arrivals waiting out `SETTLE`, and when each id last earned a refresh.
 #[derive(Debug, Default)]
 pub struct Arrivals {
@@ -52,6 +61,16 @@ impl Arrivals {
     /// When the earliest waiting id settles; `None` when nothing waits.
     pub fn next_due(&self) -> Option<Instant> {
         self.last_arrival.values().map(|at| *at + SETTLE).min()
+    }
+
+    /// When the latest waiting id settles, so every waiting id is due; `None` when nothing waits.
+    pub fn quiet_at(&self) -> Option<Instant> {
+        self.last_arrival.values().map(|at| *at + SETTLE).max()
+    }
+
+    /// Forgets a waiting id, for a device that left before it settled.
+    pub fn forget(&mut self, id: Id) {
+        self.last_arrival.remove(&id);
     }
 
     /// The ids quiet for `SETTLE` at `now`, sorted; they stop waiting.
@@ -187,7 +206,7 @@ fn offer_name((vid, pid): Id, product: Option<&str>) -> String {
 }
 
 #[cfg(windows)]
-pub use win::{Registration, find_offers, listen, on_window_message};
+pub use win::{Registration, find_offers, interface_name, listen, on_window_message, register};
 
 #[cfg(windows)]
 mod win {
@@ -230,6 +249,12 @@ mod win {
     pub fn listen(window: HWND, proxy: EventLoopProxy<UserEvent>) -> Option<Registration> {
         // A second call keeps the first proxy; both reach the same event loop.
         let _ = PROXY.set(proxy);
+        register(window)
+    }
+
+    /// Registers `window` (a top-level window of this thread) for every device interface
+    /// arrival and removal; `None` (logged) when the registration fails.
+    pub fn register(window: HWND) -> Option<Registration> {
         let filter = DEV_BROADCAST_DEVICEINTERFACE_W {
             dbcc_size: size_of::<DEV_BROADCAST_DEVICEINTERFACE_W>() as u32,
             dbcc_devicetype: DBT_DEVTYP_DEVICEINTERFACE.0,
@@ -259,7 +284,10 @@ mod win {
             WM_DEVICECHANGE if wparam.0 == DBT_DEVICEARRIVAL as usize => {
                 // SAFETY: for DBT_DEVICEARRIVAL `lParam` is null or a DEV_BROADCAST_HDR valid
                 // during the call.
-                let Some(id) = (unsafe { arrival_id(lparam) }) else {
+                let Some(id) = (unsafe { interface_name(lparam) })
+                    .as_deref()
+                    .and_then(parse_interface_name)
+                else {
                     return;
                 };
                 UserEvent::Plugged(id)
@@ -273,11 +301,12 @@ mod win {
         }
     }
 
-    /// The VID:PID of a device-interface arrival; the path itself is dropped here.
+    /// The interface path of a device-interface arrival or removal; callers parse it and drop
+    /// it, never log it (R10).
     ///
     /// # Safety
     /// `lparam` is null or points at a DEV_BROADCAST_HDR of `dbch_size` bytes.
-    unsafe fn arrival_id(lparam: LPARAM) -> Option<Id> {
+    pub unsafe fn interface_name(lparam: LPARAM) -> Option<String> {
         let header = lparam.0 as *const DEV_BROADCAST_HDR;
         if header.is_null() {
             return None;
@@ -301,7 +330,7 @@ mod win {
             )
         };
         let length = name.iter().position(|&unit| unit == 0).unwrap_or(units);
-        parse_interface_name(&String::from_utf16_lossy(&name[..length]))
+        Some(String::from_utf16_lossy(&name[..length]))
     }
 
     /// Runs on the refresh worker: the offers among the present devices (`only` those ids, or
@@ -365,6 +394,22 @@ mod tests {
     }
 
     #[test]
+    fn bluetooth_interfaces_are_told_apart_from_usb_ones() {
+        let bluetooth = [
+            r"\\?\HID#{00001124-0000-1000-8000-00805f9b34fb}_VID&0002046d_PID&b023#9&x",
+            r"\\?\HID#{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&02045e_PID&0b13#a&b",
+            r"\\?\BTHENUM#{0000110b-0000-1000-8000-00805f9b34fb}_LOCALMFG&0002#7&c",
+            r"\\?\BTHLEDevice#{0000180f-0000-1000-8000-00805f9b34fb}_Dev_VID&02#8&d",
+        ];
+        for name in bluetooth {
+            assert!(is_bluetooth_interface(name), "{name}");
+        }
+        assert!(!is_bluetooth_interface(
+            r"\\?\HID#VID_373B&PID_1216&MI_01#8&1a2b3c&0&0001#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        ));
+    }
+
+    #[test]
     fn arrivals_settle_two_seconds_after_the_last_one_per_id() {
         let start = Instant::now();
         let mut arrivals = Arrivals::default();
@@ -377,6 +422,10 @@ mod tests {
             arrivals.next_due(),
             Some(start + Duration::from_millis(500) + SETTLE)
         );
+        assert_eq!(
+            arrivals.quiet_at(),
+            Some(start + Duration::from_secs(1) + SETTLE)
+        );
         assert!(arrivals.take_due(start + SETTLE).is_empty());
         assert_eq!(
             arrivals.take_due(start + Duration::from_millis(2500)),
@@ -385,7 +434,12 @@ mod tests {
         assert_eq!(arrivals.next_due(), Some(start + Duration::from_secs(3)));
         assert_eq!(arrivals.take_due(start + Duration::from_secs(9)), [(1, 1)]);
         assert_eq!(arrivals.next_due(), None);
+        assert_eq!(arrivals.quiet_at(), None);
         assert!(arrivals.take_due(start + Duration::from_secs(9)).is_empty());
+        // A device that leaves before it settles stops waiting.
+        arrivals.arrived((3, 3), start);
+        arrivals.forget((3, 3));
+        assert_eq!(arrivals.next_due(), None);
     }
 
     #[test]

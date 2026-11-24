@@ -56,6 +56,11 @@ pub fn confirm(title: &str, message: &str, ok_label: &str, cancel_label: &str) -
 
 #[cfg(windows)]
 pub use self::windows::Answer;
+/// The in-memory dialog template builder, for windows with their own dialog procedure.
+#[cfg(windows)]
+pub(crate) use self::windows::{
+    BUTTON_CLASS, COMBO_BOX_CLASS, EDIT_CLASS, STATIC_CLASS, TemplateWords, dialog_style,
+};
 
 /// `confirm` with a middle action: `ok_label` is the default button, `alt_label` the second
 /// choice and `cancel_label` (or Esc) backs out; same threading rule as `confirm`. Windows only.

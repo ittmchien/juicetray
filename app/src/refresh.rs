@@ -22,6 +22,20 @@ pub enum Command {
     /// `UserEvent::Offers`.
     #[cfg(windows)]
     FindOffers(Option<Vec<crate::plug::Id>>),
+    /// The Add window asks for a device's interfaces and matching families; a closed reply
+    /// channel (the window closed) is ignored.
+    #[cfg(windows)]
+    Inspect {
+        id: crate::plug::Id,
+        reply: Sender<crate::add_device::Inspection>,
+    },
+    /// The Add window's one try: a single battery query as `family`; same reply rule.
+    #[cfg(windows)]
+    TryAs {
+        id: crate::plug::Id,
+        family: protocol::Family,
+        reply: Sender<crate::add_device::TryOutcome>,
+    },
 }
 
 /// Starts the worker; it reads at once, then on `RefreshNow` and
@@ -52,6 +66,9 @@ fn run(
     let mut read_now = true;
     // The last Bluetooth list that was read; a failed Bluetooth read sends it again.
     let mut bluetooth_devices = Vec::new();
+    // Shapes the Add window read, kept until their device leaves.
+    #[cfg(windows)]
+    let mut shapes = door::ShapeCache::default();
     log::trace(format_args!("worker start {power:?}"));
     loop {
         if read_now {
@@ -104,6 +121,16 @@ fn run(
                     return;
                 }
             }
+            #[cfg(windows)]
+            Ok(Command::Inspect { id, reply }) => {
+                read_now = false;
+                let _ = reply.send(crate::add_device::inspect(id, &mut shapes));
+            }
+            #[cfg(windows)]
+            Ok(Command::TryAs { id, family, reply }) => {
+                read_now = false;
+                let _ = reply.send(crate::add_device::try_as(id, family));
+            }
             Err(RecvTimeoutError::Disconnected) => {
                 log::trace(format_args!("worker exit: app dropped the sender"));
                 return;
@@ -120,6 +147,10 @@ fn wake_reason(command: &Result<Command, RecvTimeoutError>) -> &'static str {
         Ok(Command::SetPower(_)) => "SetPower",
         #[cfg(windows)]
         Ok(Command::FindOffers(_)) => "FindOffers",
+        #[cfg(windows)]
+        Ok(Command::Inspect { .. }) => "Inspect",
+        #[cfg(windows)]
+        Ok(Command::TryAs { .. }) => "TryAs",
         Err(RecvTimeoutError::Timeout) => "timeout",
         Err(RecvTimeoutError::Disconnected) => "disconnected",
     }

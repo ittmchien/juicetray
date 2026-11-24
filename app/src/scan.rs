@@ -158,7 +158,7 @@ fn hid_lines(collection: &HidCollection) -> Vec<String> {
 }
 
 /// Report sizes of an opened collection, or the reason there are none.
-fn reports_text(reports: &[ReportSize], parse_error: Option<&str>) -> String {
+pub(crate) fn reports_text(reports: &[ReportSize], parse_error: Option<&str>) -> String {
     if let Some(error) = parse_error {
         return format!("report sizes unknown ({error})");
     }

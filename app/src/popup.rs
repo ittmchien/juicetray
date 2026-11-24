@@ -41,6 +41,11 @@ impl OfferQueue {
     pub fn drop_waiting(&mut self) {
         self.waiting.clear();
     }
+
+    /// Keeps only the waiting offers whose id `keep` accepts.
+    pub fn retain(&mut self, keep: impl Fn(Id) -> bool) {
+        self.waiting.retain(|offer| keep(offer.id));
+    }
 }
 
 #[cfg(windows)]
@@ -131,5 +136,11 @@ mod tests {
         queue.drop_waiting();
         queue.closed();
         assert_eq!(queue.next(), None);
+
+        // Offers that no longer qualify (added in the Add window meanwhile) drop out.
+        queue.push(offer((4, 4)));
+        queue.push(offer((5, 5)));
+        queue.retain(|id| id != (4, 4));
+        assert_eq!(queue.next(), Some(offer((5, 5))));
     }
 }
