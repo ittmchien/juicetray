@@ -105,7 +105,7 @@ impl Arrivals {
 pub enum Plan {
     /// The worker queries it (verified, `allow` or custom): read now.
     Refresh,
-    /// Offer it in the popup, once the device lists show something to query.
+    /// A popup candidate: offered once the device lists show something to query or a receiver.
     Offer,
     Ignore,
 }
@@ -146,11 +146,24 @@ pub fn plan(id: Id, settings: &Settings) -> Plan {
     if !settings.detect_new || settings.declined.contains(&id) {
         return Plan::Ignore;
     }
-    if known(vid, pid).is_some() || family_vid(vid, pid) {
-        Plan::Offer
-    } else {
-        Plan::Ignore
-    }
+    // Any other id is a candidate; `offers` keeps those a family may read and wireless receivers.
+    Plan::Offer
+}
+
+/// Whether a family may read `id`: a catalogue model or a model on a family's VID.
+fn may_read((vid, pid): Id) -> bool {
+    known(vid, pid).is_some() || family_vid(vid, pid)
+}
+
+/// Whether a USB product string names a wireless receiver; wired mice, keyboards, webcams and
+/// other USB gear rarely use these words.
+fn is_receiver(product: Option<&str>) -> bool {
+    product.is_some_and(|text| {
+        let text = text.to_ascii_lowercase();
+        ["receiver", "dongle", "wireless", "2.4g"]
+            .iter()
+            .any(|word| text.contains(word))
+    })
 }
 
 /// Whether the lists show something a family could query: a vendor collection the open rule
@@ -181,9 +194,11 @@ pub fn offers<'a>(
         .iter()
         .filter(|presence| {
             let id = (presence.vid, presence.pid);
+            // A readable model needs a channel; any wireless receiver is offered so the owner
+            // can try it or report it from the Add device window.
             only.is_none_or(|ids| ids.contains(&id))
                 && plan(id, settings) == Plan::Offer
-                && has_query_channel(presence)
+                && ((may_read(id) && has_query_channel(presence)) || is_receiver(product(id)))
         })
         .map(|presence| {
             let id = (presence.vid, presence.pid);
@@ -511,14 +526,51 @@ mod tests {
             plan(unknown_family, &settings(&[], &[], &[unknown_family])),
             Plan::Ignore
         );
-        // Recovery ids, other Pulsar protocols and foreign VIDs are never offered.
+        // Recovery ids are never candidates, even when allowed; foreign VIDs are, and `offers`
+        // keeps them only when they name a receiver.
         assert_eq!(plan((0x3554, 0xF2FF), &plain), Plan::Ignore);
         assert_eq!(
             plan((0x3554, 0xF405), &settings(&[(0x3554, 0xF405)], &[], &[])),
             Plan::Ignore
         );
-        assert_eq!(plan((0x3710, 0x5405), &plain), Plan::Ignore);
-        assert_eq!(plan((0x046D, 0xC52B), &plain), Plan::Ignore);
+        assert_eq!(plan((0x3710, 0x5405), &plain), Plan::Offer);
+        assert_eq!(plan((0x046D, 0xC52B), &plain), Plan::Offer);
+    }
+
+    #[test]
+    fn wireless_receivers_are_offered_by_name_other_usb_gear_is_not() {
+        let receiver = (0x249A, 0x5C2F);
+        let webcam = (0x046D, 0x0825);
+        let present = [
+            presence(receiver, 0, 0),
+            presence(webcam, 0, 0),
+            presence((0x1234, 0x0001), 0, 0),
+            presence((0x1234, 0x0002), 0, 0),
+            presence((0x1234, 0x0003), 0, 0),
+            presence((0x3554, 0xF2FF), 0, 0),
+        ];
+        let product = |id: Id| match id {
+            (0x249A, 0x5C2F) => Some("Wireless-Receiver"),
+            (0x1234, 0x0001) => Some("USB DONGLE"),
+            (0x1234, 0x0002) => Some("2.4G Mouse"),
+            (0x1234, 0x0003) => Some("USB Keyboard"),
+            // A recovery id stays ignored whatever it calls itself.
+            (0x3554, 0xF2FF) => Some("Receiver"),
+            _ => Some("HD Webcam C270"),
+        };
+        let plain = settings(&[], &[], &[]);
+        let mut ids: Vec<Id> = offers(&present, None, &plain, product)
+            .iter()
+            .map(|offer| offer.id)
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, [(0x1234, 0x0001), (0x1234, 0x0002), receiver]);
+        let declined = settings(&[], &[], &[receiver]);
+        assert!(
+            offers(&present, Some(&[receiver]), &declined, product).is_empty(),
+            "a declined receiver is never offered again"
+        );
+        assert!(!is_receiver(None));
     }
 
     #[test]

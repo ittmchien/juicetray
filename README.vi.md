@@ -79,7 +79,8 @@ thiết bị.
 
 Nhiều chuột ATK, VXE và VGN dùng chung giao thức. Khi một model chưa được xác minh, Juicetray
 không bao giờ tự hỏi pin nó. Muốn thử, dùng **Add unsupported device…** trong menu (Windows),
-hoặc bấm **OK** trên popup "New device found": app nhận ra thiết bị khi bạn cắm vào, gửi một
+hoặc bấm **OK** trên popup "New device found" (hiện với các hãng được hỗ trợ và với mọi
+receiver không dây bạn cắm vào): app nhận ra thiết bị khi bạn cắm vào, gửi một
 lệnh hỏi pin chỉ-đọc khi bạn bấm **Try**, và thêm thiết bị khi bạn xác nhận mức pin đúng. Nếu
 không được, bấm **Report on GitHub** để
 [mở issue](https://github.com/ittmchien/juicetray/issues) với thông tin điền sẵn (không kèm thư

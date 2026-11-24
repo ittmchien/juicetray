@@ -80,7 +80,8 @@ Battery read correctly on the owner's devices; these are read automatically.
 
 Many ATK, VXE and VGN mice use the same protocols. Until a model is verified, Juicetray never
 queries it on its own. To try one, use **Add unsupported device…** in the menu (Windows), or
-**OK** on the "New device found" popup: it detects the device when you plug it in, sends one
+**OK** on the "New device found" popup (shown for supported brands and for any wireless
+receiver you plug in): it detects the device when you plug it in, sends one
 read-only battery query when you press **Try**, and adds it once you confirm the level. If it does
 not work, press **Report on GitHub** to
 [open an issue](https://github.com/ittmchien/juicetray/issues) with the details filled in (your
