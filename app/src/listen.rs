@@ -5,8 +5,10 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
-use protocol::{Link, known};
+use protocol::Link;
 
+use crate::config::Config;
+use crate::device::lookup;
 use crate::probe::unknown_device;
 use crate::query::{open_hid_target, open_serial_target, parse_vid_pid, refusal_for, target_why};
 use crate::scan::bytes_line;
@@ -51,11 +53,12 @@ fn report_line(elapsed: Duration, bytes: &[u8]) -> String {
     format!("{:>6} ms  {}", elapsed.as_millis(), bytes_line("rx", bytes))
 }
 
-/// The flow in order: parse, known device, list, pick, open (never mouse/keyboard collections),
+/// The flow in order: parse, known device (catalogue, then custom devices), list, pick, open (never mouse/keyboard collections),
 /// then read only. A device that needs a capture is allowed: nothing is written to it.
 fn listen(args: &[String]) -> Result<(), String> {
     let ((vid, pid), duration) = parse_listen_args(args)?;
-    let device = known(vid, pid).ok_or_else(|| unknown_device("listen", vid, pid))?;
+    let device = lookup(vid, pid, &Config::load().custom())
+        .ok_or_else(|| unknown_device("listen", vid, pid))?;
     let family = device.family;
 
     let inventory = door::inventory(&[(vid, pid)]);

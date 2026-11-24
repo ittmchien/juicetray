@@ -6,7 +6,7 @@ use std::ffi::CStr;
 
 use hidapi::{DeviceInfo, HidApi};
 use protocol::{
-    HidShape, ReportSize, TopCollection, open_permission, parse_descriptor, reports_of,
+    HidShape, ReportSize, TopCollection, is_recovery, open_permission, parse_descriptor, reports_of,
 };
 use serialport::{SerialPortInfo, SerialPortType};
 
@@ -241,9 +241,10 @@ fn listed_ids(ids: &[(u16, u16)], seen: &[(u16, u16)]) -> Vec<(u16, u16)> {
     found
 }
 
-/// An empty filter keeps every device; the open rule still ran over the full list.
+/// An empty filter keeps every device but a recovery id, which is never listed in depth or
+/// opened; the open rule still ran over the full list.
 fn wanted(filter: &[(u16, u16)], vid: u16, pid: u16) -> bool {
-    filter.is_empty() || filter.contains(&(vid, pid))
+    !is_recovery(vid, pid) && (filter.is_empty() || filter.contains(&(vid, pid)))
 }
 
 /// Builds every collection's entry. Page and usage come from hidapi; the descriptor only
@@ -378,7 +379,12 @@ fn serial_entries(ports: Vec<SerialPortInfo>) -> Vec<SerialEntry> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Listed, Listing, Presence, SerialEntry, listed_ids, wanted};
+    use protocol::HidShape;
+
+    use super::{
+        Access, HidCollection, Inventory, Listed, Listing, Presence, SerialEntry, listed_ids,
+        wanted,
+    };
 
     fn port(name: &str, vid: u16, pid: u16) -> SerialEntry {
         SerialEntry {
@@ -519,5 +525,57 @@ mod tests {
     #[test]
     fn wanted_empty_filter_keeps_everything() {
         assert!(wanted(&[], 0x046D, 0xC52B));
+    }
+
+    #[test]
+    fn wanted_never_keeps_a_recovery_id() {
+        for pid in [0xF2FF, 0xF400, 0xF410] {
+            assert!(!wanted(&[], 0x3554, pid), "{pid:04X}");
+            assert!(!wanted(&[(0x3554, pid)], 0x3554, pid), "{pid:04X}");
+        }
+        assert!(wanted(&[], 0x3554, 0xF411));
+    }
+
+    fn hid(vid: u16, pid: u16, usage_page: u16) -> HidCollection {
+        HidCollection {
+            vid,
+            pid,
+            bus: "Usb".into(),
+            manufacturer: None,
+            product: None,
+            has_serial: false,
+            path: format!("{vid:04X}:{pid:04X}:{usage_page:04X}"),
+            shape: HidShape {
+                interface: Some(0),
+                usage_page,
+                usage: 0x0001,
+                reports: Vec::new(),
+            },
+            access: Access::Skipped("test"),
+        }
+    }
+
+    #[test]
+    fn inventory_shapes_and_serial_ports_are_per_id() {
+        let inventory = Inventory {
+            api: None,
+            hid: vec![
+                hid(0x373B, 0x1216, 0x0001),
+                hid(0x373B, 0x1216, 0xFF05),
+                hid(0x3554, 0xFA09, 0xFF02),
+            ],
+            serial: vec![port("COM3", 0x373B, 0x1204)],
+            errors: Vec::new(),
+        };
+        let pages: Vec<u16> = inventory
+            .shapes(0x373B, 0x1216)
+            .iter()
+            .map(|shape| shape.usage_page)
+            .collect();
+        assert_eq!(pages, [0x0001, 0xFF05]);
+        assert_eq!(inventory.shapes(0x3554, 0xFA09).len(), 1);
+        assert!(inventory.shapes(0x373B, 0x1204).is_empty());
+        assert!(inventory.has_serial_port(0x373B, 0x1204));
+        assert!(!inventory.has_serial_port(0x373B, 0x1216));
     }
 }

@@ -16,7 +16,6 @@ use ui_model::{
 use crate::config::{Config, HIDE_OFFLINE_CHOICES, LOW_CHOICES, REFRESH_CHOICES, hex, parse_color};
 use crate::interval::format_interval;
 use crate::login::LoginState;
-use crate::receivers::can_check;
 use crate::update::AUTO_CHECK_AVAILABLE;
 
 const CHECK_UPDATES_ID: &str = "check-updates";
@@ -25,7 +24,6 @@ const OPEN_UPDATE_ID: &str = "update-open";
 const CHOICE_OFF: &str = "off";
 const CHOICE_OFF_LABEL: &str = "Off";
 const MINUTES_PER_HOUR: u32 = 60;
-const CHECK_BATTERY_TEXT: &str = "Check battery now";
 const CUSTOM_REFRESH_ID: &str = "auto:custom";
 const CUSTOM_LOW_ID: &str = "low:custom";
 const CUSTOM_OFFLINE_ID: &str = "offline:custom";
@@ -110,8 +108,6 @@ pub enum MenuAction {
     SetColors(String, IconColor, IconColor),
     /// Ask for a colour: `None` sets both taskbar themes, `Some` only that one.
     CustomColor(String, Option<Theme>),
-    /// One battery query for an unconfirmed receiver; carries only the row id.
-    CheckBattery(String),
     /// Minutes before an offline device leaves the strip; `None` = never.
     SetHideOffline(Option<u32>),
     CustomHideOffline,
@@ -211,7 +207,6 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         "ccolor" => Some(MenuAction::CustomColor(device, None)),
         "ccolor-light" => Some(MenuAction::CustomColor(device, Some(Theme::Light))),
         "ccolor-dark" => Some(MenuAction::CustomColor(device, Some(Theme::Dark))),
-        "check" => Some(MenuAction::CheckBattery(device)),
         "icon" => {
             let (value, device) = rest.split_once(':')?;
             let icon = if value == ICON_AUTO {
@@ -372,11 +367,7 @@ fn device_entry(device: &DeviceView, config: &Config, now: SystemTime) -> MenuEn
     let id = &device.id;
     let options = config.display_options(id);
     let is_svg = matches!(options.icon, IconChoice::Svg(_));
-    // Only a receiver held back for want of confirmation offers the one-query check.
-    let check = can_check(id, &config.allowed())
-        .then(|| MenuEntry::item(&format!("check:{id}"), CHECK_BATTERY_TEXT));
-    let mut children: Vec<MenuEntry> = check.into_iter().collect();
-    children.extend([
+    let children = vec![
         MenuEntry::check(
             format!("hide:{id}"),
             "Show on strip",
@@ -389,7 +380,7 @@ fn device_entry(device: &DeviceView, config: &Config, now: SystemTime) -> MenuEn
             "Icon colour",
             color_entries(id, (options.color_light, options.color_dark), is_svg),
         ),
-    ]);
+    ];
     // A native menu cannot colour text, so a low device says it in words.
     let mut line = menu_line(device, now);
     if needs_charge(device, config.low_battery_percent) {
@@ -968,47 +959,28 @@ mod tests {
     }
 
     #[test]
-    fn check_battery_id_roundtrips() {
-        for id in ["usb-373b-1216", MAC_ID] {
-            assert_eq!(
-                action_for(&format!("check:{id}")),
-                Some(MenuAction::CheckBattery(id.to_owned()))
-            );
-        }
-    }
-
-    #[test]
-    fn check_battery_only_for_unconfirmed_not_allowed_receivers() {
-        let row = |id: &str| DeviceView {
-            id: id.to_owned(),
+    fn device_submenus_have_no_battery_check() {
+        // Unverified devices are added through the Add window, never queried from a row.
+        assert_eq!(action_for("check:usb-391d-1a05"), None);
+        let row = DeviceView {
+            id: "usb-391d-1a05".to_owned(),
             path: Path::Dongle,
-            ..device(id, Level::NoData("x".into()), true)
+            ..device("usb-391d-1a05", Level::NoData("x".into()), true)
         };
-        let check_ids = |config: &Config| -> Vec<String> {
-            let devices = [
-                row("usb-391d-1a05"),
-                row("usb-3837-6011"),
-                device("Headset", Level::Percent(50), true),
-            ];
-            entries(&devices, config, LoginState::Disabled)
-                .iter()
-                .flat_map(|e| &e.children)
-                .filter(|e| e.text == "Check battery now")
-                .filter_map(|e| e.id.clone())
-                .collect()
-        };
-        let ids = check_ids(&Config::default());
-        assert_eq!(ids, ["check:usb-391d-1a05"]);
-        assert_eq!(
-            action_for(&ids[0]),
-            Some(MenuAction::CheckBattery("usb-391d-1a05".into()))
-        );
-
-        let allowed = Config {
-            allow: vec!["391d:1a05".into()],
-            ..Config::default()
-        };
-        assert!(check_ids(&allowed).is_empty());
+        let entries = entries(&[row], &Config::default(), LoginState::Disabled);
+        let mut stack: Vec<&MenuEntry> = entries.iter().collect();
+        while let Some(entry) = stack.pop() {
+            assert_ne!(entry.text, "Check battery now");
+            assert!(
+                !entry
+                    .id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("check:")),
+                "{:?}",
+                entry.id
+            );
+            stack.extend(&entry.children);
+        }
     }
 
     const BLUE: (IconColor, IconColor) = (

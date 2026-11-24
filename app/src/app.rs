@@ -27,7 +27,7 @@ use crate::interval::{format_interval, parse_interval};
 use crate::login::{self, LoginState};
 use crate::menu::{self, MenuAction, MenuEntry};
 use crate::pause::{self, PowerSource, PowerState};
-use crate::refresh::{self, Command, ReadScope};
+use crate::refresh::{self, Command};
 use crate::svg_cache::SvgCache;
 #[cfg(windows)]
 use crate::taskbar::{self, StripContent, TaskbarHandle};
@@ -67,9 +67,8 @@ const BATTERY_CONFIRM: &str =
 const BATTERY_CONFIRM_OK: &str = "Turn on";
 
 pub enum UserEvent {
-    Devices(Vec<DeviceView>, ReadScope),
-    /// A menu check got a valid reading from this unconfirmed `VID:PID`.
-    Allowed(u16, u16),
+    /// One read cycle's rows and the config file as the worker read it for that cycle.
+    Devices(Vec<DeviceView>, Box<Config>),
     Menu(MenuEvent),
     #[cfg(target_os = "macos")]
     ThemeChanged,
@@ -103,7 +102,6 @@ impl UserEvent {
     fn name(&self) -> &'static str {
         match self {
             Self::Devices(..) => "Devices",
-            Self::Allowed(..) => "Allowed",
             Self::Menu(_) => "Menu",
             #[cfg(target_os = "macos")]
             Self::ThemeChanged => "ThemeChanged",
@@ -330,13 +328,7 @@ impl App {
         crate::watchdog::beat(crate::watchdog::Watched::Ui);
         let _span = log::span_fmt(format_args!("handle {}", event.name()));
         match event {
-            UserEvent::Devices(devices, scope) => self.on_devices(devices, scope),
-            // Config writes stay on this thread, so a check never races a settings save.
-            UserEvent::Allowed(vid, pid) => {
-                if let Err(error) = self.config.allow_and_save(vid, pid) {
-                    eprintln!("saving config failed: {error:#}");
-                }
-            }
+            UserEvent::Devices(devices, file) => self.on_devices(devices, *file),
             UserEvent::Menu(event) => {
                 // muda flips check items on click; a forced rebuild restores the config's ticks.
                 #[cfg(target_os = "macos")]
@@ -391,7 +383,7 @@ impl App {
         ControlFlow::Wait
     }
 
-    fn on_devices(&mut self, mut devices: Vec<DeviceView>, scope: ReadScope) {
+    fn on_devices(&mut self, mut devices: Vec<DeviceView>, file: Config) {
         log::trace(format_args!("devices received {}", devices.len()));
         // Same-kind devices sit together in the strip and menu, highest level first and offline last within a kind.
         sort_grouped(&mut devices);
@@ -404,14 +396,12 @@ impl App {
         }
         self.devices = devices;
         self.has_read = true;
-        // Hand edits change `allow` in the file; the worker read it for this cycle, so the menu's
-        // "Check battery now" items follow it without a second read.
-        if let ReadScope::Full { allow } = scope {
-            self.config.allow = allow;
-            #[cfg(windows)]
-            {
-                self.last_refresh = Some(Instant::now());
-            }
+        // Hand edits change the device keys in the file; the worker read it for this cycle, so
+        // this thread follows them without a second read.
+        self.config.take_device_lists(file);
+        #[cfg(windows)]
+        {
+            self.last_refresh = Some(Instant::now());
         }
     }
 
@@ -424,7 +414,6 @@ impl App {
             MenuAction::CustomLow => self.prompt_low(),
             MenuAction::CustomHideOffline => self.prompt_hide_offline(),
             MenuAction::CustomColor(id, theme) => self.prompt_color(&id, theme),
-            MenuAction::CheckBattery(id) => self.tell_worker(Command::CheckReceiver(id)),
             MenuAction::SetLow(percent) => {
                 self.config.low_battery_percent = percent;
                 self.save_config();

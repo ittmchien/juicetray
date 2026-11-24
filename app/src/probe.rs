@@ -1,5 +1,5 @@
-//! `juicetray probe [--online] <VID:PID>`: one query to one known device through the door:
-//! battery by default, the online-status getter (Compx, ATK serial) with `--online`. The query floor is
+//! `juicetray probe [--online] <VID:PID>`: one query to one known device (a catalogue model or a
+//! custom device from the config) through the door: battery by default, the online-status getter (Compx, ATK serial) with `--online`. The query floor is
 //! checked before any device is listed or opened, and the query time is saved before the write,
 //! so a failed or unanswered query still counts.
 
@@ -7,10 +7,10 @@ use std::process::ExitCode;
 use std::time::SystemTime;
 
 use door::{Door, Exchange};
-use protocol::{
-    Decoded, KNOWN, KnownDevice, Link, Online, battery_query, is_recovery, known, online_query,
-};
+use protocol::{Decoded, KNOWN, Link, Online, battery_query, is_recovery, online_query};
 
+use crate::config::Config;
+use crate::device::{Device, lookup};
 use crate::query::{
     ClaimError, USAGE, claim_query, claim_refusal, floor_check, open_hid_target,
     open_serial_target, parse_vid_pid, refusal, refusal_for, target_refusal,
@@ -47,13 +47,27 @@ fn parse_probe_args(args: &[String]) -> Result<(Option<&str>, bool), String> {
     Ok((device, online))
 }
 
-/// Refusals before the log or any device is touched: `--online` needs a family with an online
-/// query (Compx, ATK serial), and a device with no known working battery command is refused
-/// for the battery query.
-fn early_refusal(device: &KnownDevice, online: bool) -> Result<(), String> {
+/// Refusals before the log or any device is touched: `--online` needs a catalogue model of a
+/// family with an online query (Compx, ATK serial), a device with no known working battery
+/// command is refused for the battery query, and a custom BITMOUSE device must be a receiver.
+fn early_refusal(device: &Device, online: bool) -> Result<(), String> {
     let (vid, pid) = (device.vid, device.pid);
     if online && online_query(device.family).is_none() {
         return Err(refusal(vid, pid, "this family has no online query"));
+    }
+    if online && device.custom {
+        return Err(refusal(
+            vid,
+            pid,
+            "the online query is for catalogue models only",
+        ));
+    }
+    if device.is_custom_bitmouse_cable() {
+        return Err(refusal(
+            vid,
+            pid,
+            "BITMOUSE is queried through its receiver only",
+        ));
     }
     if device.needs_capture && !online {
         return Err(refusal(vid, pid, "not supported yet: needs a capture"));
@@ -75,9 +89,10 @@ fn probe(arg: Option<&str>, online: bool) -> Result<(String, bool), String> {
             "recovery or bootloader mode; never queried",
         ));
     }
-    let device = known(vid, pid).ok_or_else(|| unknown_device("probe", vid, pid))?;
+    let device = lookup(vid, pid, &Config::load().custom())
+        .ok_or_else(|| unknown_device("probe", vid, pid))?;
     let family = device.family;
-    early_refusal(device, online)?;
+    early_refusal(&device, online)?;
 
     let log_path = query_log::path()
         .ok_or_else(|| refusal(vid, pid, "no data directory to record the query time"))?;
@@ -104,12 +119,15 @@ fn probe(arg: Option<&str>, online: bool) -> Result<(String, bool), String> {
     claim_query(&log_path, family, vid, pid, SystemTime::now()).map_err(refuse)?;
 
     let mut door = Door::new(1);
+    // A custom device is outside the catalogue, so the door checks its family on the device.
     let (sent, sent_result) = match online_query(family).filter(|_| online) {
         Some(frame) => (frame, door.send_online(&mut target)),
+        None if device.custom => (battery_query(family), door.send_as(&mut target, family)),
         None => (battery_query(family), door.send(&mut target)),
     };
-    let exchange = sent_result.map_err(|error| send_failed(device, sent, &format!("{error:#}")))?;
-    let mut text = exchange_text(device, &target_line, &exchange);
+    let exchange =
+        sent_result.map_err(|error| send_failed(&device, sent, &format!("{error:#}")))?;
+    let mut text = exchange_text(&device, &target_line, &exchange);
     // An online answer is not a battery reading: nothing is recorded for it.
     if matches!(exchange.reply, Some((_, Decoded::Online(_)))) {
         return Ok((text, true));
@@ -149,7 +167,7 @@ pub(crate) fn unknown_device(command: &str, vid: u16, pid: u16) -> String {
 /// A door error. Door refusals before the write say "nothing was sent"; any other error comes
 /// from the write or the read, so the query `sent` went out (or may have) and the floor applies;
 /// a refused HID write is usually a vendor app holding the device, hence the hint.
-fn send_failed(device: &KnownDevice, sent: &[u8], error: &str) -> String {
+fn send_failed(device: &Device, sent: &[u8], error: &str) -> String {
     let head = format!("probe {:04X}:{:04X}: {error}", device.vid, device.pid);
     if error.contains("nothing was sent") {
         return head;
@@ -164,7 +182,7 @@ fn send_failed(device: &KnownDevice, sent: &[u8], error: &str) -> String {
 }
 
 /// Header, target, every byte sent and received, then the decoded result.
-fn exchange_text(device: &KnownDevice, target_line: &str, exchange: &Exchange) -> String {
+fn exchange_text(device: &Device, target_line: &str, exchange: &Exchange) -> String {
     let mut lines = vec![
         format!(
             "probe {:04X}:{:04X} · {} · {}",
@@ -243,7 +261,13 @@ mod tests {
     use protocol::{Family, Reading, decode};
 
     use super::*;
+    use crate::device::tests::custom;
     use crate::query::USAGE;
+
+    /// A catalogue row as probe sees it; leaked so a test can hold `&'static` rows.
+    fn catalogue(vid: u16, pid: u16) -> &'static Device {
+        Box::leak(Box::new(Device::from(protocol::known(vid, pid).unwrap())))
+    }
 
     const MCHOSE: (u16, u16) = (0x3837, 0x6011);
 
@@ -263,8 +287,8 @@ mod tests {
         )
     }
 
-    fn mchose() -> &'static KnownDevice {
-        known(MCHOSE.0, MCHOSE.1).unwrap()
+    fn mchose() -> &'static Device {
+        catalogue(MCHOSE.0, MCHOSE.1)
     }
 
     fn exchange(family: Family, reply: Option<Vec<u8>>) -> Exchange {
@@ -349,7 +373,7 @@ mod tests {
 
     #[test]
     fn probe_text_no_reply_serial() {
-        let n9 = known(0x373B, 0x1204).unwrap();
+        let n9 = catalogue(0x373B, 0x1204);
         let text = exchange_text(n9, "target serial COM3", &exchange(Family::AtkSerial, None));
         assert!(text.contains("sent (64 B): "), "{text}");
         assert_eq!(text.lines().last(), Some("result: no reply within 1 s"));
@@ -457,15 +481,15 @@ mod tests {
 
     #[test]
     fn early_refusal_online_rules() {
-        let vgn = &KnownDevice {
+        let vgn = &Device {
             needs_capture: true,
-            ..*known(0x3554, 0xFA09).unwrap()
+            ..catalogue(0x3554, 0xFA09).clone()
         };
-        let cable = &KnownDevice {
+        let cable = &Device {
             needs_capture: true,
-            ..*known(0x391D, 0x1A05).unwrap()
+            ..catalogue(0x391D, 0x1A05).clone()
         };
-        let x1 = known(0x373B, 0x1107).unwrap();
+        let x1 = catalogue(0x373B, 0x1107);
 
         // needs_capture blocks the battery query but not the online one (where the family has one).
         let refusal = early_refusal(cable, false).unwrap_err();
@@ -474,7 +498,7 @@ mod tests {
         assert_eq!(early_refusal(cable, true), Ok(()));
         assert_eq!(early_refusal(x1, true), Ok(()));
         assert_eq!(early_refusal(x1, false), Ok(()));
-        let n9 = known(0x373B, 0x1204).unwrap();
+        let n9 = catalogue(0x373B, 0x1204);
         assert_eq!(early_refusal(n9, true), Ok(()));
 
         for online in [false, true] {
@@ -495,8 +519,29 @@ mod tests {
     }
 
     #[test]
+    fn early_refusal_custom_rules() {
+        // The online getter is catalogue-only; the battery query goes through `send_as`.
+        let compx = custom(0x1234, 0x5678, Family::Compx);
+        let text = early_refusal(&compx, true).unwrap_err();
+        assert!(text.contains("catalogue models only"), "{text}");
+        assert!(text.ends_with("nothing was sent"), "{text}");
+        assert_eq!(early_refusal(&compx, false), Ok(()));
+
+        // A custom BITMOUSE device is probed only through its receiver.
+        let receiver = custom(0x373B, 0x2000, Family::AtkBitmouse);
+        assert_eq!(early_refusal(&receiver, false), Ok(()));
+        let cable = Device {
+            cable: true,
+            ..receiver
+        };
+        let text = early_refusal(&cable, false).unwrap_err();
+        assert!(text.contains("through its receiver only"), "{text}");
+        assert!(text.ends_with("nothing was sent"), "{text}");
+    }
+
+    #[test]
     fn probe_text_online_atk_serial() {
-        let n9 = known(0x373B, 0x1204).unwrap();
+        let n9 = catalogue(0x373B, 0x1204);
         let frame = online_query(Family::AtkSerial).unwrap();
         for (linked, last) in [(1, "online: yes"), (0, "online: no")] {
             let bytes = padded(&[0x05, 0x00, 0x04, 0x00, linked], 64);
@@ -517,7 +562,7 @@ mod tests {
 
     #[test]
     fn probe_text_online() {
-        let cable = known(0x391D, 0x1A05).unwrap();
+        let cable = catalogue(0x391D, 0x1A05);
         let frame = online_query(Family::Compx).unwrap();
         let reply = |status: u8, value: u8| {
             let mut bytes = padded(&[0x08, 0x03, status, 0, 0, 0, value], 17);
@@ -548,7 +593,7 @@ mod tests {
 
     #[test]
     fn send_failed_shows_the_frame_that_went_out() {
-        let cable = known(0x391D, 0x1A05).unwrap();
+        let cable = catalogue(0x391D, 0x1A05);
         let frame = online_query(Family::Compx).unwrap();
         let text = send_failed(cable, frame, "write failed: boom");
         assert_eq!(

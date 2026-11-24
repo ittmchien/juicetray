@@ -6,6 +6,7 @@ mod config;
 // Windows only: the context menu runs on its own thread, so a stuck menu never stops the app.
 #[cfg(windows)]
 mod context_menu;
+mod device;
 mod dialog;
 mod efficiency;
 mod instance;
@@ -83,7 +84,12 @@ fn run_scan() -> ExitCode {
     let inventory = door::inventory(&[]);
     println!(
         "\n{}",
-        scan::usb_report(&inventory.hid, &inventory.serial, &inventory.errors)
+        scan::usb_report(
+            &inventory.hid,
+            &inventory.serial,
+            &inventory.errors,
+            &config::Config::load().custom()
+        )
     );
     // Layout data for diagnosing the taskbar strip on a machine nobody can inspect.
     #[cfg(windows)]

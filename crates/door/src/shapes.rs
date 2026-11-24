@@ -23,7 +23,8 @@ impl ShapeCache {
 
     /// Keeps `shapes` only when `before` and `after` (two `present_all` reads `STABLE_GAP`
     /// apart) list `vid:pid` with the same counts: a device still enumerating is read again
-    /// later. Returns whether the shapes were kept.
+    /// later. `shapes` must be read after the `after` count, so they describe the stable
+    /// device. Returns whether the shapes were kept.
     pub fn insert(
         &mut self,
         vid: u16,

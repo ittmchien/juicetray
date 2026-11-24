@@ -7,11 +7,14 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
+use protocol::{Family, Kind, is_recovery};
 use toml::{Table, Value};
 use ui_model::{DisplayOptions, IconChoice, IconColor};
 
+use crate::device::Device;
 use crate::interval::INTERVAL_SECONDS;
 use crate::log;
+use crate::query::parse_vid_pid;
 
 /// Auto-refresh quick choices in seconds; any other value in `INTERVAL_SECONDS` is a custom one.
 pub const REFRESH_CHOICES: [Option<u32>; 6] =
@@ -45,6 +48,21 @@ pub struct DeviceConfig {
     pub options: DisplayOptions,
 }
 
+/// One `custom_devices` entry as the file holds it (missing text fields are empty); kept
+/// verbatim so a typo is never lost, and checked by `Config::custom`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CustomEntry {
+    /// `VID:PID`.
+    pub id: String,
+    pub name: String,
+    /// A `protocol::Family` variant name, as in the catalogue files.
+    pub family: String,
+    /// `mouse`, `headset`, `keyboard`, `gamepad` or `other`.
+    pub kind: String,
+    /// `receiver` or `cable`.
+    pub connection: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub refresh_seconds: Option<u32>,
@@ -56,8 +74,13 @@ pub struct Config {
     pub hide_offline_minutes: Option<u32>,
     /// Keyed by device id; entries of devices not seen this run are kept.
     pub devices: BTreeMap<String, DeviceConfig>,
-    /// Hand-edited `VID:PID` entries that let unconfirmed receivers be queried; kept verbatim.
+    /// `VID:PID` entries of unverified catalogue models the owner added, so the worker queries
+    /// them; hand-editable, kept verbatim.
     pub allow: Vec<String>,
+    /// `VID:PID` entries the owner declined in the new-device popup; kept verbatim.
+    pub declined: Vec<String>,
+    /// Devices outside the catalogue the owner added with a family; kept verbatim.
+    pub custom_devices: Vec<CustomEntry>,
     /// Keep auto-refreshing while a laptop runs on battery; off by default.
     pub refresh_on_battery: bool,
     /// Ask GitHub Releases for a newer version once a day (Windows); on by default.
@@ -76,6 +99,8 @@ impl Default for Config {
             hide_offline_minutes: DEFAULT_HIDE_OFFLINE_MINUTES,
             devices: BTreeMap::new(),
             allow: Vec::new(),
+            declined: Vec::new(),
+            custom_devices: Vec::new(),
             refresh_on_battery: false,
             check_updates: true,
             notified_update: None,
@@ -106,6 +131,8 @@ impl Config {
             ),
             devices: devices(&table),
             allow: string_items(&table, "allow"),
+            declined: string_items(&table, "declined"),
+            custom_devices: custom_entries(&table),
             refresh_on_battery: table
                 .get("refresh_on_battery")
                 .and_then(Value::as_bool)
@@ -156,6 +183,13 @@ impl Config {
         if !self.allow.is_empty() {
             table.insert("allow".into(), string_array(&self.allow));
         }
+        if !self.declined.is_empty() {
+            table.insert("declined".into(), string_array(&self.declined));
+        }
+        if !self.custom_devices.is_empty() {
+            let entries = self.custom_devices.iter().map(custom_table).collect();
+            table.insert("custom_devices".into(), Value::Array(entries));
+        }
         table.to_string()
     }
 
@@ -165,6 +199,32 @@ impl Config {
             .iter()
             .filter_map(|entry| crate::query::parse_vid_pid(entry).ok())
             .collect()
+    }
+
+    /// The valid `custom_devices` entries; an invalid one stays in the file but is ignored,
+    /// with a log line naming why.
+    pub fn custom(&self) -> Vec<Device> {
+        self.custom_devices
+            .iter()
+            .filter_map(|entry| {
+                custom_device(entry)
+                    .map_err(|why| {
+                        log::line(&format!(
+                            "config: custom device {:?} ignored: {why}",
+                            entry.id
+                        ));
+                    })
+                    .ok()
+            })
+            .collect()
+    }
+
+    /// Takes the owner-edited device keys (`allow`, `declined`, `custom_devices`) from `file`,
+    /// the config as last read from disk, so hand edits made while the app runs win.
+    pub fn take_device_lists(&mut self, file: Config) {
+        self.allow = file.allow;
+        self.declined = file.declined;
+        self.custom_devices = file.custom_devices;
     }
 
     /// Hidden by id, or by name in the milestone-1 list.
@@ -220,18 +280,20 @@ impl Config {
         self.save_to(&path)
     }
 
-    /// Adds a device the owner confirmed from the menu to `allow`, in memory and in the file.
+    /// Adds a catalogue model the owner added in the Add window to `allow`, in memory and in the
+    /// file.
+    #[allow(dead_code, reason = "the Add window's [Add] button calls it")]
     pub fn allow_and_save(&mut self, vid: u16, pid: u16) -> Result<()> {
         let _span = log::span("config allow and save");
         let path = path().context("no config directory available")?;
         self.allow_and_save_to(&path, vid, pid)
     }
 
-    /// The file's `allow` (hand edits win, as in `save_to`) plus this device, written with the
-    /// rest of the in-memory config; `save_to` itself would drop the new entry.
+    /// The file's device keys (hand edits win, as in `save_to`) plus this device in `allow`,
+    /// written with the rest of the in-memory config; `save_to` itself would drop the new entry.
     fn allow_and_save_to(&mut self, path: &Path, vid: u16, pid: u16) -> Result<()> {
         if let Ok(text) = fs::read_to_string(path) {
-            self.allow = Self::parse(&text).allow;
+            self.take_device_lists(Self::parse(&text));
         }
         if !self.allow_device(vid, pid) {
             return Ok(());
@@ -239,11 +301,12 @@ impl Config {
         write_atomically(path, &self.to_toml())
     }
 
-    /// `allow` is owner-edited while the app runs, so the file's value wins over the in-memory one.
+    /// The device keys are owner-edited while the app runs, so the file's values win over the
+    /// in-memory ones.
     fn save_to(&self, path: &Path) -> Result<()> {
         let mut config = self.clone();
         if let Ok(text) = fs::read_to_string(path) {
-            config.allow = Self::parse(&text).allow;
+            config.take_device_lists(Self::parse(&text));
         }
         write_atomically(path, &config.to_toml())
     }
@@ -414,6 +477,97 @@ fn string_array(items: &[String]) -> Value {
     Value::Array(items.iter().cloned().map(Value::String).collect())
 }
 
+/// The `custom_devices` array; items that are not tables are dropped, text fields kept as is.
+fn custom_entries(table: &Table) -> Vec<CustomEntry> {
+    let Some(items) = table.get("custom_devices").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(Value::as_table)
+        .map(|entry| {
+            let text = |key: &str| {
+                entry
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            CustomEntry {
+                id: text("id"),
+                name: text("name"),
+                family: text("family"),
+                kind: text("kind"),
+                connection: text("connection"),
+            }
+        })
+        .collect()
+}
+
+/// An entry's non-empty text fields, so a missing field stays missing in the file.
+fn custom_table(entry: &CustomEntry) -> Value {
+    let fields = [
+        ("id", &entry.id),
+        ("name", &entry.name),
+        ("family", &entry.family),
+        ("kind", &entry.kind),
+        ("connection", &entry.connection),
+    ];
+    Value::Table(
+        fields
+            .into_iter()
+            .filter(|(_, text)| !text.is_empty())
+            .map(|(key, text)| (key.to_owned(), Value::String(text.clone())))
+            .collect(),
+    )
+}
+
+/// A checked custom device, or why the entry is ignored. ATK serial is refused because the door
+/// sends it to catalogue PIDs only; an empty name shows the id.
+fn custom_device(entry: &CustomEntry) -> Result<Device, String> {
+    let (vid, pid) = parse_vid_pid(&entry.id).map_err(|_| "id is not VID:PID".to_owned())?;
+    if is_recovery(vid, pid) {
+        return Err("recovery or bootloader id".to_owned());
+    }
+    let family = match entry.family.as_str() {
+        "Compx" => Family::Compx,
+        "Report13" => Family::Report13,
+        "Mchose" => Family::Mchose,
+        "AtkBitmouse" => Family::AtkBitmouse,
+        "AtkSerial" => return Err("ATK serial works only for catalogue models".to_owned()),
+        other => return Err(format!("unknown family {other:?}")),
+    };
+    let kind = match entry.kind.as_str() {
+        "mouse" => Kind::Mouse,
+        "headset" => Kind::Headset,
+        "keyboard" => Kind::Keyboard,
+        "gamepad" => Kind::Gamepad,
+        "other" => Kind::Other,
+        other => return Err(format!("unknown kind {other:?}")),
+    };
+    let cable = match entry.connection.as_str() {
+        "receiver" => false,
+        "cable" => true,
+        other => return Err(format!("unknown connection {other:?}")),
+    };
+    let name = if entry.name.is_empty() {
+        format!("{vid:04X}:{pid:04X}")
+    } else {
+        entry.name.clone()
+    };
+    Ok(Device {
+        vid,
+        pid,
+        name,
+        family,
+        kind,
+        verified: false,
+        cable,
+        needs_capture: false,
+        custom: true,
+    })
+}
+
 /// The `[devices]` table; entries that are not tables are dropped.
 fn devices(table: &Table) -> BTreeMap<String, DeviceConfig> {
     let Some(devices) = table.get("devices").and_then(Value::as_table) else {
@@ -509,6 +663,14 @@ mod tests {
             hide_offline_minutes: Some(30),
             devices: BTreeMap::new(),
             allow: vec!["373B:1204".into(), "junk".into()],
+            declined: vec!["3554:FA09".into()],
+            custom_devices: vec![CustomEntry {
+                id: "1234:5678".into(),
+                name: "My \"mouse\"".into(),
+                family: "Compx".into(),
+                kind: "mouse".into(),
+                connection: "receiver".into(),
+            }],
             refresh_on_battery: true,
             check_updates: false,
             notified_update: Some("0.2.0".into()),
@@ -721,6 +883,112 @@ mod tests {
         assert_eq!(config.allow, ["373B:1204", "373B:1216"]);
         assert_eq!(loaded.allow, ["373B:1204", "373B:1216"]);
         assert_eq!(loaded.refresh_seconds, Some(300));
+    }
+
+    #[test]
+    fn device_lists_absent_are_empty_and_not_written() {
+        // An old config without the keys loads unchanged and writes none of them.
+        let config = Config::parse("refresh_seconds = 300\nallow = [\"373B:1204\"]\n");
+        assert!(config.declined.is_empty() && config.custom_devices.is_empty());
+        let written: Table = config.to_toml().parse().unwrap();
+        assert!(!written.contains_key("declined"));
+        assert!(!written.contains_key("custom_devices"));
+        assert_eq!(Config::parse(&config.to_toml()), config);
+    }
+
+    const CUSTOM: &str = concat!(
+        "declined = [\"3554:FA09\", 5]\n",
+        "[[custom_devices]]\n",
+        "id = \"1234:5678\"\n",
+        "name = \"My mouse\"\n",
+        "family = \"Compx\"\n",
+        "kind = \"mouse\"\n",
+        "connection = \"receiver\"\n",
+        "[[custom_devices]]\n",
+        "id = \"1234:0001\"\n",
+        "family = \"Compx2\"\n",
+        "kind = \"mouse\"\n",
+        "connection = \"receiver\"\n",
+    );
+
+    #[test]
+    fn declined_and_custom_devices_parse_and_keep_bad_entries() {
+        let config = Config::parse(CUSTOM);
+        assert_eq!(config.declined, ["3554:FA09"]);
+        assert_eq!(config.custom_devices.len(), 2);
+        // The typo stays in the file; only the valid entry is used.
+        assert_eq!(config.custom_devices[1].family, "Compx2");
+        assert_eq!(config.custom_devices[1].name, "");
+        let custom = config.custom();
+        assert_eq!(custom.len(), 1);
+        let mine = &custom[0];
+        assert_eq!((mine.vid, mine.pid), (0x1234, 0x5678));
+        assert_eq!(mine.name, "My mouse");
+        assert_eq!((mine.family, mine.kind), (Family::Compx, Kind::Mouse));
+        assert!(mine.custom && !mine.cable && !mine.verified && !mine.needs_capture);
+
+        // A missing field is not written back as an empty one.
+        let written = config.to_toml();
+        assert_eq!(written.matches("name = ").count(), 1, "{written}");
+        assert_eq!(Config::parse(&written), config);
+    }
+
+    #[test]
+    fn custom_entry_validation() {
+        let entry = |id: &str, family: &str, kind: &str, connection: &str| CustomEntry {
+            id: id.into(),
+            name: String::new(),
+            family: family.into(),
+            kind: kind.into(),
+            connection: connection.into(),
+        };
+        let good = custom_device(&entry("373b:2000", "AtkBitmouse", "headset", "cable")).unwrap();
+        assert_eq!(good.name, "373B:2000");
+        assert_eq!(
+            (good.family, good.kind),
+            (Family::AtkBitmouse, Kind::Headset)
+        );
+        assert!(good.cable && good.custom);
+        for family in ["Compx", "Report13", "Mchose", "AtkBitmouse"] {
+            assert!(custom_device(&entry("0001:0002", family, "other", "receiver")).is_ok());
+        }
+        let bad = [
+            entry("nope", "Compx", "mouse", "receiver"),
+            entry("3554:F2FF", "Compx", "mouse", "receiver"),
+            entry("1:2", "compx", "mouse", "receiver"),
+            entry("1:2", "AtkSerial", "headset", "receiver"),
+            entry("1:2", "Compx", "Mouse", "receiver"),
+            entry("1:2", "Compx", "mouse", "dongle"),
+            entry("1:2", "", "mouse", "receiver"),
+        ];
+        for item in bad {
+            assert!(custom_device(&item).is_err(), "{item:?}");
+        }
+    }
+
+    #[test]
+    fn save_keeps_device_lists_edited_on_disk() {
+        let root =
+            std::env::temp_dir().join(format!("juicetray-lists-test-{}", std::process::id()));
+        let path = root.join("config.toml");
+        let mut config = Config::default();
+        config.save_to(&path).unwrap();
+        fs::write(&path, CUSTOM).unwrap();
+
+        config.save_to(&path).unwrap();
+        let saved = Config::parse(&fs::read_to_string(&path).unwrap());
+        // Adding to `allow` keeps the file's other device keys too.
+        config.allow_and_save_to(&path, 0x373B, 0x1216).unwrap();
+        let added = Config::parse(&fs::read_to_string(&path).unwrap());
+        fs::remove_dir_all(&root).unwrap();
+
+        let file = Config::parse(CUSTOM);
+        assert_eq!(saved.declined, file.declined);
+        assert_eq!(saved.custom_devices, file.custom_devices);
+        assert_eq!(added.declined, file.declined);
+        assert_eq!(added.custom_devices, file.custom_devices);
+        assert_eq!(added.allow, ["373B:1216"]);
+        assert_eq!(config.custom_devices, file.custom_devices);
     }
 
     #[test]
