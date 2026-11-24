@@ -146,8 +146,8 @@ git clone -b dev https://github.com/ittmchien/juicetray
 A model is one line in its brand's file under `crates/protocol/devices/` (for example
 `atk.toml`), with `vid` and `pid` as 4 hex digits, `name`, `family`, `kind` (`mouse`, `headset`,
 `keyboard`, `gamepad` or `other`), `connection` (`receiver` or `cable`) and `verified`. `family`
-is one of `Compx`, `Report13`, `Mchose`, `AtkSerial` or `AtkBitmouse`; a model that needs another
-protocol needs a new family in code first. The build checks every line (unknown family or kind,
+is one of `Compx`, `Report13`, `Mchose`, `AtkSerial`, `AtkBitmouse`, `VgnKc2` or `RongYuanF7`;
+a model that needs another protocol needs a new family in code first. The build checks every line (unknown family or kind,
 bad hex, duplicate VID:PID) and fails with the file and entry named. Open the pull request against
 `dev` with `verified = false`; a model becomes `verified = true` only after a hardware check
 (`juicetray probe <VID:PID>` read the same level as the vendor app).

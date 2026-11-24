@@ -143,6 +143,20 @@ mod tests {
     }
 
     #[test]
+    fn turbo_plus_and_rongyuan_dongles_are_unverified_receivers() {
+        let rows = [
+            (0x391D, 0x1A21, Family::VgnKc2, Kind::Mouse),
+            (0x3151, 0x5038, Family::RongYuanF7, Kind::Keyboard),
+            (0x3151, 0x5006, Family::RongYuanF7, Kind::Keyboard),
+        ];
+        for (vid, pid, family, kind) in rows {
+            let device = known(vid, pid).expect("row is in the catalogue");
+            assert_eq!((device.family, device.kind), (family, kind));
+            assert!(!device.verified && !device.cable && !device.needs_capture);
+        }
+    }
+
+    #[test]
     fn n9_ultra_is_serial_only() {
         let n9 = known(0x373B, 0x1204).expect("N9 Ultra is in the catalogue");
         assert_eq!(n9.family, Family::AtkSerial);

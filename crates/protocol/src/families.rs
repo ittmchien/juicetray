@@ -11,10 +11,12 @@ const PULSAR_VID: u16 = 0x3710;
 const ATK_VID: u16 = 0x373B;
 const REPORT13_VID: u16 = 0x3554;
 const MCHOSE_VID: u16 = 0x3837;
+const VGN_VID: u16 = 0x391D;
 
 /// The families `vid:pid` can be queried as, in `Family` order. HID families need their
 /// `pick_target` collection among `collections`; ATK serial needs a port and a catalogue ATK
-/// serial PID. A recovery id has none.
+/// serial PID; RongYuan F7 needs a catalogue RongYuan PID, since other protocols share its
+/// shape. A recovery id has none.
 pub fn families_for(
     vid: u16,
     pid: u16,
@@ -27,9 +29,8 @@ pub fn families_for(
     let has_target = |family| pick_target(family, collections).is_ok();
     let compx_vid =
         COMPX_VIDS.contains(&vid) && !(vid == PULSAR_VID && PULSAR_NOT_COMPX.contains(&pid));
-    let atk_serial = vid == ATK_VID
-        && serial_present
-        && known(vid, pid).is_some_and(|device| device.family == Family::AtkSerial);
+    let catalogue_is = |family| known(vid, pid).is_some_and(|device| device.family == family);
+    let atk_serial = vid == ATK_VID && serial_present && catalogue_is(Family::AtkSerial);
     [
         (Family::Compx, compx_vid && has_target(Family::Compx)),
         (
@@ -44,6 +45,11 @@ pub fn families_for(
         (
             Family::AtkBitmouse,
             vid == ATK_VID && has_target(Family::AtkBitmouse),
+        ),
+        (Family::VgnKc2, vid == VGN_VID && has_target(Family::VgnKc2)),
+        (
+            Family::RongYuanF7,
+            catalogue_is(Family::RongYuanF7) && has_target(Family::RongYuanF7),
         ),
     ]
     .into_iter()
@@ -146,22 +152,70 @@ mod tests {
         );
     }
 
+    /// A RongYuan dongle's FFFF:0002 collection: feature report 0, 64 bytes.
+    fn rongyuan() -> HidShape {
+        let feature = ReportSize {
+            kind: ReportKind::Feature,
+            id: 0,
+            bytes: 64,
+        };
+        shape(0xFFFF, 0x0002, vec![feature])
+    }
+
+    /// The Dragonfly 3 Turbo+ if1 collection: 64-byte B3 out, B4 in.
+    fn vgn_kc2() -> HidShape {
+        let report = |kind, id| ReportSize {
+            kind,
+            id,
+            bytes: 64,
+        };
+        shape(
+            0xFFC1,
+            0x0001,
+            vec![
+                report(ReportKind::Output, 0xB3),
+                report(ReportKind::Input, 0xB4),
+            ],
+        )
+    }
+
+    /// The Turbo+ if2 firmware-update channel.
+    fn dfu() -> HidShape {
+        shape(0x008C, 0x0001, both(0xB4, 64))
+    }
+
     #[test]
     fn shared_391d_vid_goes_by_shape() {
-        // 391D also hosts RongYuan receivers (FFFF:0002, feature 65): no Compx collection, no family.
-        let rongyuan = HidShape {
-            reports: vec![ReportSize {
-                kind: ReportKind::Feature,
-                id: 0,
-                bytes: 65,
-            }],
-            ..shape(0xFFFF, 0x0002, Vec::new())
-        };
-        assert!(families_for(0x391D, 0x1A04, &[rongyuan], false).is_empty());
+        // 391D also hosts RongYuan receivers outside the catalogue: no family for them.
+        assert!(families_for(0x391D, 0x1A04, &[rongyuan()], false).is_empty());
         assert_eq!(
             families_for(0x391D, 0x1A05, &[compx()], false),
             [Family::Compx]
         );
+        assert_eq!(
+            families_for(0x391D, 0x1A21, &[vgn_kc2(), dfu()], false),
+            [Family::VgnKc2]
+        );
+    }
+
+    #[test]
+    fn vgn_kc2_only_on_391d_and_never_on_the_dfu_channel() {
+        assert!(families_for(0x3554, 0x1A21, &[vgn_kc2()], false).is_empty());
+        assert!(families_for(0x391D, 0x1A21, &[dfu()], false).is_empty());
+        assert!(families_for(0x391D, 0x1A21, &[system_mouse()], false).is_empty());
+    }
+
+    #[test]
+    fn rongyuan_needs_a_catalogue_pid_and_its_shape() {
+        let push = shape(0xFFFF, 0x0001, both(0x05, 32));
+        assert_eq!(
+            families_for(0x3151, 0x5038, &[push.clone(), rongyuan()], false),
+            [Family::RongYuanF7]
+        );
+        assert!(families_for(0x3151, 0x5038, &[push], false).is_empty());
+        // The same shape on an id outside the catalogue is another protocol until listed.
+        assert!(families_for(0x3151, 0x9999, &[rongyuan()], false).is_empty());
+        assert!(families_for(0x046D, 0x5038, &[rongyuan()], false).is_empty());
     }
 
     #[test]

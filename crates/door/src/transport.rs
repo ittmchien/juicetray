@@ -16,6 +16,17 @@ pub(crate) trait Transport {
     fn write(&mut self, bytes: &[u8]) -> anyhow::Result<()>;
     /// Bytes read before `timeout`; 0 means nothing arrived in time.
     fn read(&mut self, buf: &mut [u8], timeout: Duration) -> anyhow::Result<usize>;
+    /// One SetFeature of `request` (report id first), a `settle` pause, then one GetFeature of
+    /// the same report id into `buf`; returns the length read, id included. Only `write.rs`
+    /// calls it; transports without feature reports refuse.
+    fn feature_exchange(
+        &mut self,
+        _request: &[u8],
+        _settle: Duration,
+        _buf: &mut [u8],
+    ) -> anyhow::Result<usize> {
+        bail!("this transport has no feature reports")
+    }
 }
 
 /// An opened device. `vid`/`pid` always come from the inventory entry it was opened from.
@@ -134,6 +145,21 @@ impl Transport for HidTransport {
             .unwrap_or(i32::MAX)
             .max(1);
         Ok(self.0.read_timeout(buf, millis)?)
+    }
+
+    /// No retry: a failed SetFeature skips the GetFeature, and a failed GetFeature is an error.
+    fn feature_exchange(
+        &mut self,
+        request: &[u8],
+        settle: Duration,
+        buf: &mut [u8],
+    ) -> anyhow::Result<usize> {
+        let id = *request.first().context("empty feature report")?;
+        self.0.send_feature_report(request)?;
+        std::thread::sleep(settle);
+        let first = buf.first_mut().context("empty feature buffer")?;
+        *first = id;
+        Ok(self.0.get_feature_report(buf)?)
     }
 }
 

@@ -145,7 +145,8 @@ git clone -b dev https://github.com/ittmchien/juicetray
 Mỗi model là một dòng trong file của hãng đó dưới `crates/protocol/devices/` (ví dụ
 `atk.toml`), gồm `vid` và `pid` (4 chữ số hex), `name`, `family`, `kind` (`mouse`, `headset`,
 `keyboard`, `gamepad` hoặc `other`), `connection` (`receiver` hoặc `cable`) và `verified`.
-`family` là một trong `Compx`, `Report13`, `Mchose`, `AtkSerial` hoặc `AtkBitmouse`; model cần
+`family` là một trong `Compx`, `Report13`, `Mchose`, `AtkSerial`, `AtkBitmouse`, `VgnKc2` hoặc
+`RongYuanF7`; model cần
 giao thức khác thì phải thêm family vào code trước. Bước build kiểm từng dòng (family hoặc kind
 lạ, hex sai, VID:PID trùng) và báo lỗi kèm tên file và vị trí dòng. Mở pull request vào `dev`
 với `verified = false`; model chỉ được đổi thành `verified = true` sau khi kiểm trên thiết bị

@@ -1,0 +1,10 @@
+# Device models juicetray knows, one line per VID:PID. Fields: vid, pid (4 hex digits),
+# name, family (protocol family in code), kind (mouse|headset|keyboard|gamepad|other),
+# connection (receiver|cable), verified (read on real hardware), optional needs_capture.
+
+# RongYuan 2.4 GHz keyboard dongles (VID 3151) answering the F7 status query on FFFF:0002.
+# Mouse dongles of the same list are not listed: the family reads the keyboard slot only.
+devices = [
+  { vid = "3151", pid = "5038", name = "Weikav NUT75 / MonsGeek 2.4G dongle", family = "RongYuanF7", kind = "keyboard", connection = "receiver", verified = false },
+  { vid = "3151", pid = "5006", name = "Akko Air 01 2.4G dongle", family = "RongYuanF7", kind = "keyboard", connection = "receiver", verified = false },
+]

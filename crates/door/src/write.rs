@@ -1,5 +1,6 @@
 //! The one write door: a write budget, the family's fixed battery query (plus the Compx and
-//! ATK serial online-status query), one write per query and a bounded wait for the reply. No
+//! ATK serial online-status query), one write (or one SetFeature + GetFeature pair for a
+//! feature-report family) per query and a bounded wait for the reply. No
 //! API here takes raw bytes. `send` takes the family from the catalogue; `send_as` takes it from
 //! the caller and checks it against what the device exposes.
 
@@ -144,8 +145,6 @@ impl Door {
         }
 
         self.writes_left -= 1;
-        target.transport.write(sent).context("write failed")?;
-
         let mut exchange = Exchange {
             family,
             sent,
@@ -153,6 +152,20 @@ impl Door {
             unrelated: Vec::new(),
             dropped: 0,
         };
+        // A feature family's query is one SetFeature + GetFeature pair, never an output report.
+        if family.uses_feature_report() {
+            let mut reply = vec![0u8; sent.len()];
+            let len = target
+                .transport
+                .feature_exchange(sent, family.reply_timeout(), &mut reply)
+                .context("feature exchange failed (the query may have been sent)")?;
+            reply.truncate(len);
+            if !reply.is_empty() {
+                exchange.take(query, reply);
+            }
+            return Ok(exchange);
+        }
+        target.transport.write(sent).context("write failed")?;
         await_reply(target, query, deadline, &mut exchange)
             .context("reading the reply failed (the query was sent)")?;
         Ok(exchange)
@@ -261,6 +274,8 @@ mod tests {
     struct Log {
         writes: Vec<Vec<u8>>,
         timeouts: Vec<Duration>,
+        /// Each feature exchange: the SetFeature bytes and the settle pause.
+        features: Vec<(Vec<u8>, Duration)>,
     }
 
     enum Step {
@@ -291,6 +306,31 @@ mod tests {
                 Some(Step::Fail) => bail!("fake read error"),
                 Some(Step::Bytes(bytes)) => {
                     assert!(bytes.len() <= buf.len(), "scripted read exceeds the buffer");
+                    buf[..bytes.len()].copy_from_slice(&bytes);
+                    Ok(bytes.len())
+                }
+            }
+        }
+
+        /// Logs the SetFeature, then plays the next scripted step as the GetFeature.
+        fn feature_exchange(
+            &mut self,
+            request: &[u8],
+            settle: Duration,
+            buf: &mut [u8],
+        ) -> anyhow::Result<usize> {
+            self.log
+                .borrow_mut()
+                .features
+                .push((request.to_vec(), settle));
+            match self.reads.pop_front() {
+                None => Ok(0),
+                Some(Step::Fail) => bail!("fake feature error"),
+                Some(Step::Bytes(bytes)) => {
+                    assert!(
+                        bytes.len() <= buf.len(),
+                        "scripted reply exceeds the buffer"
+                    );
                     buf[..bytes.len()].copy_from_slice(&bytes);
                     Ok(bytes.len())
                 }
@@ -823,13 +863,19 @@ mod tests {
                 continue;
             }
             battery.expect("battery send");
-            assert_eq!(
-                log.borrow().writes,
-                vec![battery_query(device.family).to_vec()],
-                "{:04X}:{:04X}",
-                device.vid,
-                device.pid
-            );
+            // A feature family sends through SetFeature only; every other family writes only.
+            let (written, featured): (Vec<Vec<u8>>, Vec<Vec<u8>>) = {
+                let log = log.borrow();
+                let featured = log.features.iter().map(|(bytes, _)| bytes.clone());
+                (log.writes.clone(), featured.collect())
+            };
+            let expected = vec![battery_query(device.family).to_vec()];
+            let id = format!("{:04X}:{:04X}", device.vid, device.pid);
+            if device.family.uses_feature_report() {
+                assert_eq!((written, featured), (Vec::new(), expected), "{id}");
+            } else {
+                assert_eq!((written, featured), (expected, Vec::new()), "{id}");
+            }
 
             let (mut target, log) = open();
             let online = Door::new(1).send_online(&mut target);
@@ -849,9 +895,89 @@ mod tests {
                     );
                     assert!(log.borrow().writes.is_empty());
                     assert!(log.borrow().timeouts.is_empty());
+                    assert!(log.borrow().features.is_empty());
                 }
             }
         }
+    }
+
+    /// A NUT75-style GetFeature reply: id 0, canRead 1, keyboard 87 %, connected.
+    fn rongyuan_reply() -> Vec<u8> {
+        padded(&[0x00, 0x01, 0x57, 0x00, 0x00, 0x01, 0x01], 65)
+    }
+
+    #[test]
+    fn rongyuan_is_one_feature_exchange_of_the_f7_frame() {
+        let (mut target, log) = target(0x3151, 0x5038, Link::Hid, bytes(&[rongyuan_reply()]));
+        let exchange = Door::new(1).send(&mut target).expect("send");
+        let frame = battery_query(Family::RongYuanF7);
+        assert_eq!(&frame[..2], &[0x00, 0xF7]);
+        assert!(frame[2..].iter().all(|&byte| byte == 0));
+        assert_eq!(
+            log.borrow().features,
+            vec![(frame.to_vec(), Family::RongYuanF7.reply_timeout())]
+        );
+        // No output report and no input read on this channel.
+        assert!(log.borrow().writes.is_empty());
+        assert!(log.borrow().timeouts.is_empty());
+        assert_eq!(exchange.sent, frame);
+        assert_eq!(exchange.reply, Some((rongyuan_reply(), reading(87, false))));
+    }
+
+    #[test]
+    fn rongyuan_feature_failure_is_not_retried() {
+        let mut door = Door::new(1);
+        let reads = vec![Step::Fail, Step::Bytes(rongyuan_reply())];
+        let (mut failing, log) = target(0x3151, 0x5038, Link::Hid, reads);
+        assert!(error_text(door.send(&mut failing)).contains("feature exchange failed"));
+        assert!(error_text(door.send(&mut failing)).contains("budget"));
+        assert_eq!(log.borrow().features.len(), 1);
+        // An online query is refused before any I/O.
+        let (mut online, log) = target(0x3151, 0x5038, Link::Hid, Vec::new());
+        let result = Door::new(1).send_online(&mut online);
+        assert!(error_text(result).contains("no online query"));
+        assert!(log.borrow().features.is_empty());
+    }
+
+    #[test]
+    fn rongyuan_empty_or_echoed_reply_is_no_reply() {
+        let (mut empty, _log) = target(0x3151, 0x5038, Link::Hid, Vec::new());
+        let exchange = Door::new(1).send(&mut empty).expect("send");
+        assert_eq!(exchange.reply, None);
+
+        let echo = battery_query(Family::RongYuanF7).to_vec();
+        let reads = bytes(std::slice::from_ref(&echo));
+        let (mut echoed, _log) = target(0x3151, 0x5038, Link::Hid, reads);
+        let exchange = Door::new(1).send(&mut echoed).expect("send");
+        assert_eq!(exchange.reply, None);
+        assert_eq!(exchange.unrelated, vec![echo]);
+
+        // An unfilled all-zero reply is the reply, but carries no level.
+        let zeros = vec![0u8; 65];
+        let reads = bytes(std::slice::from_ref(&zeros));
+        let (mut unfilled, _log) = target(0x3151, 0x5038, Link::Hid, reads);
+        let exchange = Door::new(1).send(&mut unfilled).expect("send");
+        assert_eq!(
+            exchange.reply,
+            Some((zeros, Decoded::Invalid("percent 0: no data")))
+        );
+    }
+
+    #[test]
+    fn vgn_kc2_skips_pushes_until_the_b4_06_reply() {
+        let push = padded(&[0xB6, 0xE2, 0x01, 0x00, 0x55], 21);
+        let mut reply = padded(&[0xB4, 0x06], 64);
+        reply[20] = 0x4B;
+        let reads = bytes(&[push.clone(), reply.clone()]);
+        let (mut target, log) = target(0x391D, 0x1A21, Link::Hid, reads);
+        let exchange = Door::new(1).send_until(&mut target, far()).expect("send");
+        assert_eq!(
+            log.borrow().writes,
+            vec![battery_query(Family::VgnKc2).to_vec()]
+        );
+        assert!(log.borrow().features.is_empty());
+        assert_eq!(exchange.reply, Some((reply, reading(75, false))));
+        assert_eq!(exchange.unrelated, vec![push]);
     }
 
     #[test]
