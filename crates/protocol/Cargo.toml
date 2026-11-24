@@ -6,3 +6,9 @@ license = "GPL-3.0-or-later"
 
 [lib]
 name = "protocol"
+
+# The device catalogue (devices/*.toml) is compiled into `KNOWN` by build.rs; nothing parses it
+# at run time.
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "1"

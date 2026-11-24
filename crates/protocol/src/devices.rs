@@ -1,6 +1,18 @@
-//! Devices the probe may query, with the family that decides which frame they get.
+//! The device catalogue: every model juicetray knows, with the family that decides which frame
+//! it gets. The rows live in `crates/protocol/devices/*.toml` and build.rs compiles them into
+//! `KNOWN`; nothing is parsed at run time.
 
 use crate::Family;
+
+/// What a catalogue model is; the app maps it to its own icon and group kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Mouse,
+    Headset,
+    Keyboard,
+    Gamepad,
+    Other,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KnownDevice {
@@ -8,138 +20,16 @@ pub struct KnownDevice {
     pub pid: u16,
     pub name: &'static str,
     pub family: Family,
-    /// A real reply was seen on this model; only confirmed devices are queried unasked.
-    pub confirmed: bool,
-    /// Wired to the PC (cable), not a receiver.
+    pub kind: Kind,
+    /// Read on real hardware; only verified devices are queried unasked.
+    pub verified: bool,
+    /// Wired to the PC (`connection = "cable"`), not a receiver.
     pub cable: bool,
     /// No reply to the known commands: never opened or queried until a capture shows the frame.
     pub needs_capture: bool,
 }
 
-const fn device(
-    vid: u16,
-    pid: u16,
-    name: &'static str,
-    family: Family,
-    confirmed: bool,
-    cable: bool,
-    needs_capture: bool,
-) -> KnownDevice {
-    KnownDevice {
-        vid,
-        pid,
-        name,
-        family,
-        confirmed,
-        cable,
-        needs_capture,
-    }
-}
-
-// Columns: vid, pid, name, family, confirmed, cable, needs_capture.
-// 0x373B:0x1204 is serial-only: it must never receive a Compx frame.
-pub const KNOWN: &[KnownDevice] = &[
-    device(
-        0x3837,
-        0x6011,
-        "MCHOSE V9 Pro 2",
-        Family::Mchose,
-        true,
-        false,
-        false,
-    ),
-    device(
-        0x3837,
-        0x6010,
-        "MCHOSE V9 Pro 2",
-        Family::Mchose,
-        false,
-        true,
-        false,
-    ),
-    device(
-        0x373B,
-        0x1107,
-        "ATK X1 SE NK",
-        Family::Compx,
-        false,
-        false,
-        false,
-    ),
-    device(
-        0x373B,
-        0x1299,
-        "ATK X1 SE Nearlink",
-        Family::Compx,
-        false,
-        false,
-        false,
-    ),
-    device(
-        0x373B,
-        0x130E,
-        "ATK X1 SE NK",
-        Family::Compx,
-        false,
-        false,
-        false,
-    ),
-    device(
-        0x373B,
-        0x1216,
-        "ATK X1 SE",
-        Family::AtkBitmouse,
-        // Confirmed 2026-11-24: probe read 53 %, matching the owner's vendor app.
-        true,
-        false,
-        false,
-    ),
-    device(
-        0x3554,
-        0xFA09,
-        "AULA F75",
-        Family::Report13,
-        false,
-        false,
-        false,
-    ),
-    device(
-        0x391D,
-        0x1A05,
-        "VGN Dragonfly 3 Master+",
-        Family::Compx,
-        false,
-        false,
-        false,
-    ),
-    device(
-        0x373B,
-        0x11CB,
-        "ATK N9 Pro",
-        Family::AtkSerial,
-        false,
-        false,
-        false,
-    ),
-    device(
-        0x373B,
-        0x11CA,
-        "ATK N9 Pro",
-        Family::AtkSerial,
-        false,
-        true,
-        false,
-    ),
-    device(
-        0x373B,
-        0x1204,
-        "ATK N9 Ultra",
-        Family::AtkSerial,
-        false,
-        false,
-        false,
-    ),
-];
+include!(concat!(env!("OUT_DIR"), "/known.rs"));
 
 pub fn known(vid: u16, pid: u16) -> Option<&'static KnownDevice> {
     KNOWN
@@ -150,76 +40,112 @@ pub fn known(vid: u16, pid: u16) -> Option<&'static KnownDevice> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Link;
+    use crate::{Link, is_recovery};
     use std::collections::HashSet;
 
-    #[test]
-    fn known_table_resolves() {
-        let expected = [
-            (0x3837, 0x6011, Family::Mchose),
-            (0x3837, 0x6010, Family::Mchose),
-            (0x373B, 0x1107, Family::Compx),
-            (0x373B, 0x1299, Family::Compx),
-            (0x373B, 0x130E, Family::Compx),
-            (0x373B, 0x1216, Family::AtkBitmouse),
-            (0x3554, 0xFA09, Family::Report13),
-            (0x391D, 0x1A05, Family::Compx),
-            (0x373B, 0x11CB, Family::AtkSerial),
-            (0x373B, 0x11CA, Family::AtkSerial),
-            (0x373B, 0x1204, Family::AtkSerial),
-        ];
-        assert_eq!(KNOWN.len(), expected.len());
-        for (vid, pid, family) in expected {
-            assert_eq!(known(vid, pid).map(|d| d.family), Some(family));
-        }
+    /// Ids of the rows `pick` selects, sorted so file order does not matter.
+    fn ids(pick: fn(&KnownDevice) -> bool) -> Vec<(u16, u16)> {
+        let mut ids: Vec<(u16, u16)> = KNOWN
+            .iter()
+            .filter(|d| pick(d))
+            .map(|d| (d.vid, d.pid))
+            .collect();
+        ids.sort();
+        ids
     }
 
     #[test]
-    fn confirmed_and_cable_flags() {
-        let ids = |pick: fn(&KnownDevice) -> bool| -> Vec<(u16, u16)> {
-            KNOWN
-                .iter()
-                .filter(|d| pick(d))
-                .map(|d| (d.vid, d.pid))
-                .collect()
-        };
-        assert_eq!(ids(|d| d.confirmed), [(0x3837, 0x6011), (0x373B, 0x1216)]);
-        assert_eq!(ids(|d| d.cable), [(0x3837, 0x6010), (0x373B, 0x11CA)]);
+    fn owner_rows_resolve() {
+        // The owner's table survives the catalogue; 1299 and 130E are BITMOUSE as in the HUB.
+        let expected = [
+            (0x3837, 0x6011, Family::Mchose, Kind::Headset),
+            (0x3837, 0x6010, Family::Mchose, Kind::Headset),
+            (0x373B, 0x1107, Family::Compx, Kind::Mouse),
+            (0x373B, 0x1299, Family::AtkBitmouse, Kind::Mouse),
+            (0x373B, 0x130E, Family::AtkBitmouse, Kind::Mouse),
+            (0x373B, 0x1216, Family::AtkBitmouse, Kind::Mouse),
+            (0x3554, 0xFA09, Family::Report13, Kind::Keyboard),
+            (0x391D, 0x1A05, Family::Compx, Kind::Mouse),
+            (0x373B, 0x11CB, Family::AtkSerial, Kind::Headset),
+            (0x373B, 0x11CA, Family::AtkSerial, Kind::Headset),
+            (0x373B, 0x1204, Family::AtkSerial, Kind::Headset),
+        ];
+        for (vid, pid, family, kind) in expected {
+            let device = known(vid, pid).expect("owner row is in the catalogue");
+            assert_eq!(
+                (device.family, device.kind),
+                (family, kind),
+                "{vid:04X}:{pid:04X}"
+            );
+        }
+        // The ATK HUB Compx and BITMOUSE PIDs are imported too.
+        assert_eq!(KNOWN.len(), 293);
+        assert_eq!(known(0x373B, 0x11FE).map(|d| d.family), Some(Family::Compx));
+        assert_eq!(known(0x3554, 0xF58A).map(|d| d.family), Some(Family::Compx));
+        assert_eq!(
+            known(0x373B, 0x1155).map(|d| d.family),
+            Some(Family::AtkBitmouse)
+        );
+    }
+
+    #[test]
+    fn verified_and_cable_flags() {
+        assert_eq!(
+            ids(|d| d.verified),
+            [(0x373B, 0x1204), (0x373B, 0x1216), (0x3837, 0x6011)]
+        );
+        let cable = ids(|d| d.cable);
+        for id in [(0x3837, 0x6010), (0x373B, 0x11CA)] {
+            assert!(cable.contains(&id), "{id:04X?}");
+        }
+        let receivers = [
+            (0x3837, 0x6011),
+            (0x373B, 0x1107),
+            (0x373B, 0x1299),
+            (0x373B, 0x130E),
+            (0x373B, 0x1216),
+            (0x3554, 0xFA09),
+            (0x391D, 0x1A05),
+            (0x373B, 0x11CB),
+            (0x373B, 0x1204),
+        ];
+        for id in receivers {
+            assert!(!cable.contains(&id), "{id:04X?}");
+        }
+        // HUB receivers are receivers; other HUB PIDs are the mouse on its cable.
+        assert!(!known(0x373B, 0x1155).unwrap().cable);
+        assert!(known(0x373B, 0x1014).unwrap().cable);
     }
 
     #[test]
     fn needs_capture_flags() {
-        let ids: Vec<(u16, u16)> = KNOWN
-            .iter()
-            .filter(|d| d.needs_capture)
-            .map(|d| (d.vid, d.pid))
-            .collect();
         // The flag stays as the mechanism for a future device without a known command.
-        assert!(ids.is_empty());
-        assert!(KNOWN.iter().all(|d| !(d.needs_capture && d.confirmed)));
+        assert!(ids(|d| d.needs_capture).is_empty());
+        assert!(KNOWN.iter().all(|d| !(d.needs_capture && d.verified)));
     }
 
     #[test]
-    fn fa09_is_report13_and_unconfirmed() {
-        let fa09 = known(0x3554, 0xFA09).expect("FA09 is in the table");
+    fn fa09_is_report13_and_unverified() {
+        let fa09 = known(0x3554, 0xFA09).expect("FA09 is in the catalogue");
         assert_eq!(fa09.name, "AULA F75");
         assert_eq!(fa09.family, Family::Report13);
-        assert!(!fa09.confirmed);
+        assert!(!fa09.verified);
     }
 
     #[test]
     fn x1_se_dongle_is_bitmouse_and_dragonfly_receiver_is_compx() {
-        let dongle = known(0x373B, 0x1216).expect("X1 SE dongle is in the table");
+        let dongle = known(0x373B, 0x1216).expect("X1 SE dongle is in the catalogue");
         assert_eq!(dongle.family, Family::AtkBitmouse);
-        assert!(dongle.confirmed);
-        let receiver = known(0x391D, 0x1A05).expect("Dragonfly receiver is in the table");
+        assert_eq!(dongle.name, "ATK X1 SE");
+        assert!(dongle.verified);
+        let receiver = known(0x391D, 0x1A05).expect("Dragonfly receiver is in the catalogue");
         assert_eq!(receiver.family, Family::Compx);
-        assert!(!receiver.cable && !receiver.confirmed);
+        assert!(!receiver.cable && !receiver.verified);
     }
 
     #[test]
     fn n9_ultra_is_serial_only() {
-        let n9 = known(0x373B, 0x1204).expect("N9 Ultra is in the table");
+        let n9 = known(0x373B, 0x1204).expect("N9 Ultra is in the catalogue");
         assert_eq!(n9.family, Family::AtkSerial);
         assert_eq!(n9.family.link(), Link::Serial);
     }
@@ -229,6 +155,25 @@ mod tests {
         assert!(known(0x046D, 0xC52B).is_none());
         assert!(known(0x373B, 0x9999).is_none());
         assert!(known(0x3554, 0x0001).is_none());
+        // HUB families without a battery protocol here (HOLTEK, EVISION) are not imported.
+        assert!(known(0x373B, 0x10F0).is_none());
+        assert!(known(0x373B, 0x108C).is_none());
+    }
+
+    #[test]
+    fn recovery_ids_are_never_listed() {
+        assert!(KNOWN.iter().all(|d| !is_recovery(d.vid, d.pid)));
+        assert!(known(0x3554, 0xF2FF).is_none());
+        assert!(known(0x3554, 0xF400).is_none());
+    }
+
+    #[test]
+    fn pid_in_both_hub_lists_is_listed_once() {
+        let rows = KNOWN
+            .iter()
+            .filter(|d| (d.vid, d.pid) == (0x373B, 0x12AF))
+            .count();
+        assert_eq!(rows, 1);
     }
 
     #[test]

@@ -1,0 +1,8 @@
+# Device models juicetray knows, one line per VID:PID. Fields: vid, pid (4 hex digits),
+# name, family (protocol family in code), kind (mouse|headset|keyboard|gamepad|other),
+# connection (receiver|cable), verified (read on real hardware), optional needs_capture.
+
+devices = [
+  { vid = "3837", pid = "6011", name = "MCHOSE V9 Pro 2", family = "Mchose", kind = "headset", connection = "receiver", verified = true },
+  { vid = "3837", pid = "6010", name = "MCHOSE V9 Pro 2", family = "Mchose", kind = "headset", connection = "cable", verified = false },
+]

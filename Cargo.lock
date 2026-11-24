@@ -1005,6 +1005,10 @@ dependencies = [
 [[package]]
 name = "juicetray-protocol"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml 1.2.2+spec-1.1.0",
+]
 
 [[package]]
 name = "juicetray-strip-render"

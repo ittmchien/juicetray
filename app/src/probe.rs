@@ -7,7 +7,9 @@ use std::process::ExitCode;
 use std::time::SystemTime;
 
 use door::{Door, Exchange};
-use protocol::{Decoded, KNOWN, KnownDevice, Link, Online, battery_query, known, online_query};
+use protocol::{
+    Decoded, KNOWN, KnownDevice, Link, Online, battery_query, is_recovery, known, online_query,
+};
 
 use crate::query::{
     ClaimError, USAGE, claim_query, claim_refusal, floor_check, open_hid_target,
@@ -58,12 +60,20 @@ fn early_refusal(device: &KnownDevice, online: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// The whole probe flow in its fixed safety order: parse, known device, capture / online
-/// refusals, floor check (no device touched), list, pick, open, claim the query time, then the
-/// one write. A device that needs a capture has no battery command yet, so only `--online`
-/// (a different, read-only getter) may reach it.
+/// The whole probe flow in its fixed safety order: parse, recovery id, known device, capture /
+/// online refusals, floor check (no device touched), list, pick, open, claim the query time,
+/// then the one write. A device that needs a capture has no battery command yet, so only
+/// `--online` (a different, read-only getter) may reach it.
 fn probe(arg: Option<&str>, online: bool) -> Result<(String, bool), String> {
     let (vid, pid) = parse_vid_pid(arg.unwrap_or_default())?;
+    // A recovery or bootloader id is refused before the catalogue lookup, whatever it holds.
+    if is_recovery(vid, pid) {
+        return Err(refusal(
+            vid,
+            pid,
+            "recovery or bootloader mode; never queried",
+        ));
+    }
     let device = known(vid, pid).ok_or_else(|| unknown_device("probe", vid, pid))?;
     let family = device.family;
     early_refusal(device, online)?;
@@ -121,25 +131,17 @@ fn probe(arg: Option<&str>, online: bool) -> Result<(String, bool), String> {
     Ok((text, true))
 }
 
-/// The known-device table as a refusal for `command` (`probe` or `listen`).
+/// The refusal for an id outside the catalogue, for `command` (`probe` or `listen`): the
+/// catalogue size and where its files are, not every row.
 pub(crate) fn unknown_device(command: &str, vid: u16, pid: u16) -> String {
-    let rows: String = KNOWN
-        .iter()
-        .map(|device| {
-            format!(
-                "\n  {:04X}:{:04X}  {} · {}",
-                device.vid,
-                device.pid,
-                device.name,
-                device.family.name()
-            )
-        })
-        .collect();
     refusal_for(
         command,
         vid,
         pid,
-        &format!("is not a known device; known:{rows}"),
+        &format!(
+            "is not a known device; the catalogue lists {} models (see crates/protocol/devices)",
+            KNOWN.len()
+        ),
     )
 }
 
@@ -290,11 +292,21 @@ mod tests {
         let text = probe(Some("046D:C52B"), false).expect_err("unknown device must be refused");
         assert!(text.contains("046D:C52B"), "{text}");
         assert!(text.contains("not a known device"), "{text}");
-        assert!(
-            text.contains("3837:6011  MCHOSE V9 Pro 2 · MCHOSE"),
-            "{text}"
+        // The catalogue is too long to print: its size and location stand in for the rows.
+        let hint = format!(
+            "the catalogue lists {} models (see crates/protocol/devices)",
+            KNOWN.len()
         );
+        assert!(text.contains(&hint), "{text}");
+        assert!(!text.contains("3837:6011"), "{text}");
         assert!(text.ends_with("nothing was sent"), "{text}");
+
+        // A recovery id is refused before the lookup, so no device is listed or opened.
+        for id in ["3554:F2FF", "3554:F40A"] {
+            let text = probe(Some(id), false).expect_err("recovery id must be refused");
+            assert!(text.contains("recovery or bootloader"), "{text}");
+            assert!(text.ends_with("nothing was sent"), "{text}");
+        }
 
         let usage = probe(None, false).expect_err("missing argument");
         assert_eq!(usage, USAGE);

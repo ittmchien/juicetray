@@ -1,5 +1,5 @@
 //! Receiver and cable devices (USB HID or serial) for the refresh worker: presence is checked
-//! from the device lists alone, only confirmed or allowed devices are ever opened, one door per
+//! from the device lists alone, only verified or allowed devices are ever opened, one door per
 //! read, at most one query per such device, never past the query floor.
 //! Every decision before the first I/O is the pure `plan`; `view` turns the outcome into a row.
 //! An owner-asked check (`check_receiver`) is the same plan for one device with its
@@ -10,9 +10,7 @@ use std::path::Path as FsPath;
 use std::time::{Duration, SystemTime};
 
 use door::{Door, HidCollection, Inventory, SerialEntry};
-use protocol::{
-    Decoded, Family, KNOWN, KnownDevice, Link, ON_CABLE_TEXT, PickError, Reading, known,
-};
+use protocol::{Decoded, KNOWN, Kind, KnownDevice, Link, ON_CABLE_TEXT, PickError, Reading, known};
 use ui_model::{DeviceKind, DeviceView, Level, Path};
 
 use crate::log;
@@ -102,7 +100,7 @@ pub fn read_receivers(
 pub type CheckNotes = HashMap<String, String>;
 
 /// An owner-asked check's result: the device's new row, and the `VID:PID` to add to `allow`
-/// (only a valid reading of a device not confirmed in the table).
+/// (only a valid reading of a device not verified in the catalogue).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Checked {
     pub row: DeviceView,
@@ -193,8 +191,8 @@ fn known_receiver(id: &str) -> Option<&'static KnownDevice> {
     KNOWN.iter().find(|device| row_id(device) == id)
 }
 
-/// The row of a check; only a valid reading confirms, and only a device the table leaves
-/// unconfirmed.
+/// The row of a check; only a valid reading confirms, and only a device the catalogue leaves
+/// unverified.
 fn checked(
     device: &KnownDevice,
     outcome: Outcome,
@@ -205,7 +203,7 @@ fn checked(
     let is_reading = matches!(outcome, Outcome::Reading(..));
     Checked {
         row: view(device, outcome, stored, last_query, now),
-        confirm: (is_reading && !device.confirmed).then_some((device.vid, device.pid)),
+        confirm: (is_reading && !device.verified).then_some((device.vid, device.pid)),
         outcome,
     }
 }
@@ -277,12 +275,12 @@ fn attempt(
 }
 
 /// Whether the device may be opened at all: it must have a known working command, and be
-/// confirmed or allowed by the owner.
+/// verified or allowed by the owner.
 fn gate(device: &KnownDevice, allow: &[(u16, u16)]) -> Result<(), Outcome> {
     if device.needs_capture {
         return Err(Outcome::NeedsCapture);
     }
-    if device.confirmed || allow.contains(&(device.vid, device.pid)) {
+    if device.verified || allow.contains(&(device.vid, device.pid)) {
         return Ok(());
     }
     Err(Outcome::Unconfirmed)
@@ -475,11 +473,14 @@ fn row_id(device: &KnownDevice) -> String {
     format!("usb-{:04x}-{:04x}", device.vid, device.pid)
 }
 
-fn kind(family: Family) -> DeviceKind {
-    match family {
-        Family::Report13 => DeviceKind::Keyboard,
-        Family::Compx | Family::AtkBitmouse => DeviceKind::Mouse,
-        Family::Mchose | Family::AtkSerial => DeviceKind::Headset,
+/// The row kind (icon and group) of a catalogue model.
+fn kind(kind: Kind) -> DeviceKind {
+    match kind {
+        Kind::Mouse => DeviceKind::Mouse,
+        Kind::Headset => DeviceKind::Headset,
+        Kind::Keyboard => DeviceKind::Keyboard,
+        Kind::Gamepad => DeviceKind::Gamepad,
+        Kind::Other => DeviceKind::Other,
     }
 }
 
@@ -506,7 +507,7 @@ fn view(
     let row = DeviceView {
         id: row_id(device),
         name: device.name.to_owned(),
-        kind: kind(device.family),
+        kind: kind(device.kind),
         path: if device.cable {
             Path::Cable
         } else {
@@ -602,7 +603,7 @@ mod tests {
         assert_eq!(gate(vgn, &[(0x3837, 0x6011)]), Err(Outcome::Unconfirmed));
         assert_eq!(gate(vgn, &[(0x391D, 0x1A05)]), Ok(()));
         assert_eq!(gate(mchose(), &[]), Ok(()));
-        // X1 SE is confirmed in the table, so it passes with no allow entry.
+        // X1 SE is verified in the catalogue, so it passes with no allow entry.
         assert_eq!(gate(device(0x373B, 0x1216), &[]), Ok(()));
     }
 
@@ -627,7 +628,7 @@ mod tests {
         assert_eq!((vgn.vid, vgn.pid), VGN);
         let opened_unconfirmed: Vec<(u16, u16)> = openable(&all, &allow)
             .into_iter()
-            .filter(|&(vid, pid)| !device(vid, pid).confirmed)
+            .filter(|&(vid, pid)| !device(vid, pid).verified)
             .collect();
         assert_eq!(opened_unconfirmed, [VGN]);
         assert_eq!(
@@ -689,7 +690,7 @@ mod tests {
             assert_eq!(row.row.note.as_deref(), note, "{outcome:?}");
         }
 
-        // A table-confirmed device needs no `allow` entry.
+        // A verified catalogue device needs no `allow` entry.
         let mchose_reading = Outcome::Reading(reading(50, false, false), at(NOW));
         assert_eq!(
             checked(mchose(), mchose_reading, None, None, at(NOW)).confirm,
