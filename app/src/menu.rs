@@ -247,13 +247,18 @@ pub fn menu_entries(
     has_battery: bool,
     now: SystemTime,
 ) -> Vec<MenuEntry> {
-    let mut entries = device_entries(devices, config, now);
-    if entries.is_empty() {
+    // "Refresh now" leads the menu, above the devices it refreshes.
+    let mut entries = vec![
+        MenuEntry::item("refresh", "Refresh now"),
+        MenuEntry::separator(),
+    ];
+    let devices = device_entries(devices, config, now);
+    if devices.is_empty() {
         entries.push(MenuEntry::label(EMPTY_MENU_TEXT));
     }
+    entries.extend(devices);
     entries.extend([
         MenuEntry::separator(),
-        MenuEntry::item("refresh", "Refresh now"),
         MenuEntry::submenu("Auto-refresh", refresh_entries(config.refresh_seconds)),
     ]);
     if has_battery {
@@ -646,8 +651,31 @@ mod tests {
         }
     }
 
+    /// The menu below its leading "Refresh now" and separator, so tests index from the devices.
     fn entries(devices: &[DeviceView], config: &Config, login: LoginState) -> Vec<MenuEntry> {
-        menu_entries(devices, config, login, false, SystemTime::UNIX_EPOCH)
+        let mut all = menu_entries(devices, config, login, false, SystemTime::UNIX_EPOCH);
+        all.drain(..2);
+        all
+    }
+
+    #[test]
+    fn refresh_now_leads_the_menu() {
+        let all = menu_entries(
+            &[],
+            &Config::default(),
+            LoginState::Disabled,
+            false,
+            SystemTime::UNIX_EPOCH,
+        );
+        assert_eq!(all[0].id.as_deref(), Some("refresh"));
+        assert_eq!(all[0].text, "Refresh now");
+        assert!(all[1].is_separator());
+        assert_eq!(
+            all.iter()
+                .filter(|e| e.id.as_deref() == Some("refresh"))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1252,7 +1280,7 @@ mod tests {
         );
         // The existing separator between devices and settings stays.
         assert!(entries[9].is_separator());
-        assert_eq!(entries[10].id.as_deref(), Some("refresh"));
+        assert_eq!(entries[10].text, "Auto-refresh");
     }
 
     #[test]

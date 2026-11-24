@@ -670,8 +670,10 @@ impl App {
             has_battery,
             now,
         );
-        if self.has_read && self.devices.is_empty() && instance::is_bundled() {
-            entries.insert(1, MenuEntry::label(BLUETOOTH_PERMISSION_HINT));
+        // The hint sits right under the "no devices" line.
+        let empty_line = entries.iter().position(|e| e.text == EMPTY_MENU_TEXT);
+        if let Some(at) = empty_line.filter(|_| self.has_read && instance::is_bundled()) {
+            entries.insert(at + 1, MenuEntry::label(BLUETOOTH_PERMISSION_HINT));
         }
         entries
     }
