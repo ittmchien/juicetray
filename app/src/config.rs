@@ -14,9 +14,12 @@ use crate::log;
 pub const REFRESH_CHOICES: [Option<u32>; 6] =
     [None, Some(60), Some(120), Some(300), Some(600), Some(1800)];
 pub const LOW_CHOICES: [Option<u8>; 6] = [None, Some(5), Some(10), Some(15), Some(20), Some(30)];
+/// "Hide offline after" choices in minutes; `None` is Never (`0` in the file).
+pub const HIDE_OFFLINE_CHOICES: [Option<u32>; 5] = [None, Some(5), Some(15), Some(30), Some(60)];
 
 const DEFAULT_REFRESH_SECONDS: Option<u32> = Some(120);
 const DEFAULT_LOW_PERCENT: Option<u8> = Some(15);
+const DEFAULT_HIDE_OFFLINE_MINUTES: Option<u32> = Some(15);
 const SECONDS_PER_MINUTE: i64 = 60;
 
 const ICON_AUTO: &str = "auto";
@@ -39,7 +42,8 @@ pub struct Config {
     /// compat: device names hidden by milestone 1; still matched, never added to.
     pub hidden: Vec<String>,
     pub hidden_ids: Vec<String>,
-    pub show_disconnected: bool,
+    /// Minutes an offline device stays on the strip before it is dropped; `None` = never.
+    pub hide_offline_minutes: Option<u32>,
     /// Keyed by device id; entries of devices not seen this run are kept.
     pub devices: BTreeMap<String, DeviceConfig>,
     /// Hand-edited `VID:PID` entries that let unconfirmed receivers be queried; kept verbatim.
@@ -53,7 +57,7 @@ impl Default for Config {
             low_battery_percent: DEFAULT_LOW_PERCENT,
             hidden: Vec::new(),
             hidden_ids: Vec::new(),
-            show_disconnected: false,
+            hide_offline_minutes: DEFAULT_HIDE_OFFLINE_MINUTES,
             devices: BTreeMap::new(),
             allow: Vec::new(),
         }
@@ -75,16 +79,18 @@ impl Config {
             ),
             hidden: string_list(&table, "hidden").unwrap_or(defaults.hidden),
             hidden_ids: string_list(&table, "hidden_ids").unwrap_or(defaults.hidden_ids),
-            show_disconnected: table
-                .get("show_disconnected")
-                .and_then(Value::as_bool)
-                .unwrap_or(defaults.show_disconnected),
+            hide_offline_minutes: choice(
+                &table,
+                "hide_offline_minutes",
+                &HIDE_OFFLINE_CHOICES,
+                legacy_hide_offline(&table),
+            ),
             devices: devices(&table),
             allow: string_items(&table, "allow"),
         }
     }
 
-    /// `0` stands for Off in the file; `refresh_minutes` is never written again.
+    /// `0` stands for Off in the file; `refresh_minutes` and `show_disconnected` are never written again.
     pub fn to_toml(&self) -> String {
         let mut table = Table::new();
         table.insert(
@@ -98,8 +104,8 @@ impl Config {
         table.insert("hidden".into(), string_array(&self.hidden));
         table.insert("hidden_ids".into(), string_array(&self.hidden_ids));
         table.insert(
-            "show_disconnected".into(),
-            Value::Boolean(self.show_disconnected),
+            "hide_offline_minutes".into(),
+            Value::Integer(self.hide_offline_minutes.map_or(0, i64::from)),
         );
         let devices: Table = self
             .devices
@@ -281,6 +287,15 @@ fn refresh_seconds(table: &Table) -> Option<u32> {
     }
 }
 
+/// compat: the old `show_disconnected` toggle; true meant "keep them", so Never hide,
+/// anything else the default. Only the fallback when `hide_offline_minutes` is missing or invalid.
+fn legacy_hide_offline(table: &Table) -> Option<u32> {
+    match table.get("show_disconnected").and_then(Value::as_bool) {
+        Some(true) => None,
+        _ => DEFAULT_HIDE_OFFLINE_MINUTES,
+    }
+}
+
 /// An integer key matching one of `choices` (`0` = Off); anything else gives `default`.
 fn choice<T: Copy + Into<i64>>(
     table: &Table,
@@ -402,11 +417,49 @@ mod tests {
             low_battery_percent: None,
             hidden: vec!["Pixel \"Watch\"".into(), "FIIL Atom".into()],
             hidden_ids: vec![MAC_ID.into()],
-            show_disconnected: true,
+            hide_offline_minutes: Some(30),
             devices: BTreeMap::new(),
             allow: vec!["373B:1204".into(), "junk".into()],
         };
         assert_eq!(Config::parse(&config.to_toml()), config);
+    }
+
+    #[test]
+    fn hide_offline_parse_write_and_compat() {
+        let minutes = |text: &str| Config::parse(text).hide_offline_minutes;
+        assert_eq!(minutes(""), Some(15));
+        assert_eq!(minutes("hide_offline_minutes = 0"), None);
+        assert_eq!(minutes("hide_offline_minutes = 60"), Some(60));
+        // Not one of the choices, or not a number: default, other fields survive.
+        assert_eq!(minutes("hide_offline_minutes = 7"), Some(15));
+        assert_eq!(minutes("hide_offline_minutes = \"5\""), Some(15));
+        let bad = Config::parse("hide_offline_minutes = \"x\"\nlow_battery_percent = 20\n");
+        assert_eq!(bad.low_battery_percent, Some(20));
+        // compat: show_disconnected only counts without a valid new key.
+        assert_eq!(minutes("show_disconnected = true"), None);
+        assert_eq!(minutes("show_disconnected = false"), Some(15));
+        assert_eq!(
+            minutes("show_disconnected = true\nhide_offline_minutes = 5"),
+            Some(5)
+        );
+        assert_eq!(
+            minutes("show_disconnected = true\nhide_offline_minutes = 7"),
+            None
+        );
+
+        let never = Config {
+            hide_offline_minutes: None,
+            ..Config::default()
+        };
+        let written: Table = never.to_toml().parse().unwrap();
+        assert_eq!(
+            written
+                .get("hide_offline_minutes")
+                .and_then(Value::as_integer),
+            Some(0)
+        );
+        assert!(!written.contains_key("show_disconnected"));
+        assert_eq!(Config::parse(&never.to_toml()), never);
     }
 
     #[test]
@@ -486,7 +539,8 @@ mod tests {
         );
         assert_eq!(config.refresh_seconds, Some(120));
         assert_eq!(config.low_battery_percent, Some(20));
-        assert!(config.show_disconnected);
+        // The old toggle still maps: true = never hide.
+        assert_eq!(config.hide_offline_minutes, None);
         assert_eq!(
             Config::parse("refresh_minutes = -1").refresh_seconds,
             Some(120)

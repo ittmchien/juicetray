@@ -29,17 +29,17 @@ pub struct Segment {
 }
 
 /// One segment per shown device, in the given order; a single placeholder when none qualify.
+/// Offline devices are drawn dimmed; the caller drops those offline too long (`hidden_when_offline`).
 /// `options` returns the display options of a device id.
 pub fn build_strip(
     devices: &[DeviceView],
     low_threshold: Option<u8>,
     hidden: &[String],
-    show_disconnected: bool,
     options: &dyn Fn(&str) -> DisplayOptions,
 ) -> Vec<Segment> {
     let shown: Vec<(&DeviceView, u8, DisplayOptions)> = devices
         .iter()
-        .filter(|d| !hidden.contains(&d.name) && (d.connected || show_disconnected))
+        .filter(|d| !hidden.contains(&d.name))
         .filter_map(|d| {
             d.shown_percent()
                 .map(|percent| (d, percent, resolve_options(d.kind, options(&d.id))))
@@ -99,8 +99,8 @@ fn placeholder() -> Segment {
 }
 
 fn style_for(device: &DeviceView, percent: u8, threshold: u8) -> SegmentStyle {
-    // A disconnected or stale reading is dimmed, never alarming.
-    if !device.connected || device.stale {
+    // An offline reading is dimmed, never alarming.
+    if device.is_offline() {
         SegmentStyle::Dimmed
     } else if device.charging && percent >= 100 {
         SegmentStyle::Full
@@ -143,7 +143,7 @@ mod tests {
     }
 
     fn one(device: DeviceView, options: DisplayOptions) -> Segment {
-        build_strip(&[device], None, &[], false, &move |_| options.clone()).remove(0)
+        build_strip(&[device], None, &[], &move |_| options.clone()).remove(0)
     }
 
     fn percent(name: &str, value: u8) -> DeviceView {
@@ -151,7 +151,7 @@ mod tests {
     }
 
     fn style_of(device: DeviceView, threshold: Option<u8>) -> SegmentStyle {
-        build_strip(&[device], threshold, &[], false, &default_options)[0].style
+        build_strip(&[device], threshold, &[], &default_options)[0].style
     }
 
     #[test]
@@ -178,42 +178,32 @@ mod tests {
             percent("hidden", 40),
             test_device("nodata", Level::NoData("no battery info".into())),
         ];
-        let segments = build_strip(
-            &devices,
-            Some(15),
-            &["hidden".to_owned()],
-            false,
-            &default_options,
-        );
+        let segments = build_strip(&devices, Some(15), &["hidden".to_owned()], &default_options);
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].text, "50%");
     }
 
     #[test]
-    fn strip_disconnected_only_when_enabled() {
+    fn strip_dims_disconnected_device() {
         let mut device = percent("a", 40);
         device.connected = false;
-        let devices = [device];
-        let off = build_strip(&devices, Some(15), &[], false, &default_options);
-        assert_eq!(off.len(), 1);
-        assert_eq!(off[0].style, SegmentStyle::Placeholder);
-        let on = build_strip(&devices, Some(15), &[], true, &default_options);
-        assert_eq!(on[0].style, SegmentStyle::Dimmed);
-        assert_eq!(on[0].text, "40%");
+        let segments = build_strip(&[device], Some(15), &[], &default_options);
+        assert_eq!(segments[0].style, SegmentStyle::Dimmed);
+        assert_eq!(segments[0].text, "40%");
     }
 
     #[test]
     fn strip_dims_stale_connected_device() {
         let mut device = percent("a", 40);
         device.stale = true;
-        let segments = build_strip(&[device], Some(15), &[], false, &default_options);
+        let segments = build_strip(&[device], Some(15), &[], &default_options);
         assert_eq!(segments[0].style, SegmentStyle::Dimmed);
         assert_eq!(segments[0].text, "40%");
     }
 
     #[test]
     fn strip_empty_shows_placeholder() {
-        let segments = build_strip(&[], Some(15), &[], false, &default_options);
+        let segments = build_strip(&[], Some(15), &[], &default_options);
         assert_eq!(
             segments,
             [Segment {
@@ -229,7 +219,7 @@ mod tests {
 
     #[test]
     fn strip_text_is_percent() {
-        let segments = build_strip(&[percent("a", 84)], None, &[], false, &default_options);
+        let segments = build_strip(&[percent("a", 84)], None, &[], &default_options);
         assert_eq!(segments[0].text, "84%");
     }
 
@@ -238,7 +228,7 @@ mod tests {
         let mut mouse = percent("MX Master", 70);
         mouse.kind = DeviceKind::Mouse;
         let devices = [percent("WH-1000XM4", 50), percent("WH-1000XM5", 60), mouse];
-        let segments = build_strip(&devices, None, &[], false, &default_options);
+        let segments = build_strip(&devices, None, &[], &default_options);
         assert_eq!(segments[0].caption.as_deref(), Some("XM4"));
         assert_eq!(segments[1].caption.as_deref(), Some("XM5"));
         assert_eq!(segments[2].caption, None);
@@ -321,7 +311,7 @@ mod tests {
             show_percent: id != "bt:a",
             ..DisplayOptions::default()
         };
-        let segments = build_strip(&devices, None, &[], false, &options);
+        let segments = build_strip(&devices, None, &[], &options);
         assert_eq!(segments[0].text, "");
         assert_eq!(segments[1].text, "50%");
     }
@@ -340,7 +330,7 @@ mod tests {
             },
             ..DisplayOptions::default()
         };
-        let segments = build_strip(&[first, second], None, &[], false, &custom);
+        let segments = build_strip(&[first, second], None, &[], &custom);
         assert_eq!(segments[0].caption, None);
         assert_eq!(segments[1].caption, None);
     }
@@ -358,7 +348,7 @@ mod tests {
             },
             ..DisplayOptions::default()
         };
-        let segments = build_strip(&[first, second], None, &[], false, &options);
+        let segments = build_strip(&[first, second], None, &[], &options);
         assert_eq!(segments[0].caption.as_deref(), Some("AB1"));
         assert_eq!(segments[1].caption.as_deref(), Some("CD2"));
     }
@@ -370,7 +360,7 @@ mod tests {
             icon: IconChoice::Svg("x.svg".into()),
             ..DisplayOptions::default()
         };
-        let segments = build_strip(&devices, None, &[], false, &shared);
+        let segments = build_strip(&devices, None, &[], &shared);
         // Different first words win over the model tail.
         assert_eq!(segments[0].caption.as_deref(), Some("WH"));
         assert_eq!(segments[1].caption.as_deref(), Some("Pod"));

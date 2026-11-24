@@ -3,7 +3,7 @@ use std::process::ExitCode;
 #[cfg(windows)]
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 #[cfg(target_os = "macos")]
 use strip_render::TextStyle;
@@ -16,7 +16,7 @@ use tray_icon::menu::MenuEvent;
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use ui_model::{
     DeviceView, DisplayOptions, EMPTY_MENU_TEXT, IconChoice, IconColor, Segment, build_strip,
-    sort_weakest_first,
+    sort_grouped,
 };
 
 use crate::alerts::{AlertState, notify_low_battery};
@@ -262,7 +262,8 @@ impl App {
 
     fn on_devices(&mut self, mut devices: Vec<DeviceView>) {
         log::line(&format!("devices received {}", devices.len()));
-        sort_weakest_first(&mut devices);
+        // Same-kind devices sit together in the strip and menu, weakest first within a kind.
+        sort_grouped(&mut devices);
         // Every device is checked so its last reading stays current even while hidden.
         for device in &devices {
             let crossed = self.alerts.check(device, self.config.low_battery_percent);
@@ -300,8 +301,8 @@ impl App {
             MenuAction::SetColor(id, color) => {
                 self.update_device(&id, |options| options.color = color);
             }
-            MenuAction::ToggleShowDisconnected => {
-                self.config.show_disconnected = !self.config.show_disconnected;
+            MenuAction::SetHideOffline(minutes) => {
+                self.config.hide_offline_minutes = minutes;
                 self.save_config();
             }
             MenuAction::ToggleStartAtLogin => {
@@ -458,13 +459,9 @@ impl App {
             })
             .collect();
         // Hiding by id or old name is decided in `visible_devices`, so the strip gets no names.
-        let segments = build_strip(
-            &devices,
-            self.config.low_battery_percent,
-            &[],
-            self.config.show_disconnected,
-            &|id| options.get(id).cloned().unwrap_or_default(),
-        );
+        let segments = build_strip(&devices, self.config.low_battery_percent, &[], &|id| {
+            options.get(id).cloned().unwrap_or_default()
+        });
         let strip = (segments, theme);
         if self.shown_strip.as_ref() != Some(&strip) {
             self.set_icon(&strip.0, theme);
@@ -500,10 +497,17 @@ impl App {
         entries
     }
 
-    /// The devices the strip shows: listed in the menu and not hidden.
+    /// The devices the strip and tooltip show: listed in the menu, not hidden by the user and
+    /// not offline longer than "Hide offline after"; the menu itself keeps them, greyed.
     fn visible_devices(&self) -> Vec<DeviceView> {
-        menu::listed_devices(&self.devices, &self.config)
+        let now = SystemTime::now();
+        let hide_after = self
+            .config
+            .hide_offline_minutes
+            .map(|minutes| Duration::from_secs(u64::from(minutes) * 60));
+        menu::listed_devices(&self.devices)
             .filter(|device| !self.config.is_hidden(&device.id, &device.name))
+            .filter(|device| !device.hidden_when_offline(hide_after, now))
             .cloned()
             .collect()
     }

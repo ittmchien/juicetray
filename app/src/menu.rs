@@ -3,14 +3,18 @@ use std::str::FromStr;
 use std::time::SystemTime;
 
 use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use ui_model::{DeviceKind, DeviceView, EMPTY_MENU_TEXT, IconChoice, IconColor, menu_line};
+use ui_model::{
+    DeviceKind, DeviceView, EMPTY_MENU_TEXT, IconChoice, IconColor, group_label, menu_line,
+};
 
-use crate::config::{Config, LOW_CHOICES, REFRESH_CHOICES, hex, parse_color};
+use crate::config::{Config, HIDE_OFFLINE_CHOICES, LOW_CHOICES, REFRESH_CHOICES, hex, parse_color};
 use crate::interval::format_interval;
 use crate::login::LoginState;
 use crate::receivers::can_check;
 
 const CHOICE_OFF: &str = "off";
+const CHOICE_OFF_LABEL: &str = "Off";
+const MINUTES_PER_HOUR: u32 = 60;
 const CHECK_BATTERY_TEXT: &str = "Check battery now";
 const CUSTOM_REFRESH_ID: &str = "auto:custom";
 const ICON_AUTO: &str = "auto";
@@ -53,7 +57,8 @@ pub enum MenuAction {
     CustomColor(String),
     /// One battery query for an unconfirmed receiver; carries only the row id.
     CheckBattery(String),
-    ToggleShowDisconnected,
+    /// Minutes before an offline device leaves the strip; `None` = never.
+    SetHideOffline(Option<u32>),
     ToggleStartAtLogin,
     Quit,
 }
@@ -119,7 +124,6 @@ impl MenuEntry {
 pub fn action_for(id: &str) -> Option<MenuAction> {
     match id {
         "refresh" => return Some(MenuAction::Refresh),
-        "disc" => return Some(MenuAction::ToggleShowDisconnected),
         "login" => return Some(MenuAction::ToggleStartAtLogin),
         "quit" => return Some(MenuAction::Quit),
         CUSTOM_REFRESH_ID => return Some(MenuAction::CustomRefresh),
@@ -130,6 +134,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
     match action {
         "auto" => choice_from_id(rest, &REFRESH_CHOICES).map(MenuAction::SetRefresh),
         "low" => choice_from_id(rest, &LOW_CHOICES).map(MenuAction::SetLow),
+        "offline" => choice_from_id(rest, &HIDE_OFFLINE_CHOICES).map(MenuAction::SetHideOffline),
         "hide" => Some(MenuAction::ToggleHidden(device)),
         "pct" => Some(MenuAction::TogglePercent(device)),
         "svg" => Some(MenuAction::PickSvg(device)),
@@ -170,14 +175,11 @@ fn choice_id<T: Display>(prefix: &str, choice: Option<T>) -> String {
 }
 
 /// Devices that get a menu line: connected ones, plus disconnected ones that still have a
-/// reading when the user asked to see them (a paired Mac or phone has none, so never shows).
-pub fn listed_devices<'a>(
-    devices: &'a [DeviceView],
-    config: &'a Config,
-) -> impl Iterator<Item = &'a DeviceView> {
-    devices.iter().filter(|device| {
-        device.connected || (config.show_disconnected && device.shown_percent().is_some())
-    })
+/// reading, greyed out (a paired Mac or phone has none, so never shows).
+pub fn listed_devices(devices: &[DeviceView]) -> impl Iterator<Item = &DeviceView> {
+    devices
+        .iter()
+        .filter(|device| device.connected || device.shown_percent().is_some())
 }
 
 /// The whole menu as plain data, rebuilt after every result or action.
@@ -187,9 +189,7 @@ pub fn menu_entries(
     login: LoginState,
     now: SystemTime,
 ) -> Vec<MenuEntry> {
-    let mut entries: Vec<MenuEntry> = listed_devices(devices, config)
-        .map(|device| device_entry(device, config, now))
-        .collect();
+    let mut entries = device_entries(devices, config, now);
     if entries.is_empty() {
         entries.push(MenuEntry::label(EMPTY_MENU_TEXT));
     }
@@ -199,19 +199,46 @@ pub fn menu_entries(
         MenuEntry::submenu("Auto-refresh", refresh_entries(config.refresh_seconds)),
         MenuEntry::submenu(
             "Low-battery alert",
-            choice_entries("low", &LOW_CHOICES, config.low_battery_percent, |percent| {
-                format!("{percent}%")
-            }),
+            choice_entries(
+                "low",
+                &LOW_CHOICES,
+                config.low_battery_percent,
+                CHOICE_OFF_LABEL,
+                |percent| format!("{percent}%"),
+            ),
         ),
-        MenuEntry::check(
-            "disc".to_owned(),
-            "Show disconnected devices",
-            config.show_disconnected,
+        MenuEntry::submenu(
+            "Hide offline after",
+            choice_entries(
+                "offline",
+                &HIDE_OFFLINE_CHOICES,
+                config.hide_offline_minutes,
+                "Never",
+                format_minutes,
+            ),
         ),
         login_entry(login),
         MenuEntry::separator(),
         MenuEntry::item("quit", "Quit"),
     ]);
+    entries
+}
+
+/// Device lines under a disabled group header, a separator between groups; `devices` arrive
+/// already grouped by kind, so a header marks each change of kind.
+fn device_entries(devices: &[DeviceView], config: &Config, now: SystemTime) -> Vec<MenuEntry> {
+    let mut entries = Vec::new();
+    let mut group = None;
+    for device in listed_devices(devices) {
+        if group != Some(device.kind) {
+            if group.is_some() {
+                entries.push(MenuEntry::separator());
+            }
+            entries.push(MenuEntry::label(group_label(device.kind)));
+            group = Some(device.kind);
+        }
+        entries.push(device_entry(device, config, now));
+    }
     entries
 }
 
@@ -234,9 +261,9 @@ fn device_entry(device: &DeviceView, config: &Config, now: SystemTime) -> MenuEn
         MenuEntry::submenu("Icon", icon_entries(id, &options.icon)),
         MenuEntry::submenu("Icon colour", color_entries(id, options.color, is_svg)),
     ]);
-    // A disconnected device's line is greyed out; stale-but-connected ones stay enabled.
+    // An offline device's line (disconnected, or a stale receiver) is greyed out.
     MenuEntry {
-        enabled: device.connected,
+        enabled: !device.is_offline(),
         ..MenuEntry::submenu(menu_line(device, now), children)
     }
 }
@@ -300,9 +327,13 @@ fn color_entries(id: &str, current: IconColor, is_svg: bool) -> Vec<MenuEntry> {
 
 /// Quick choices, then `Custom…` showing and ticking an interval that is not one of them.
 fn refresh_entries(current: Option<u32>) -> Vec<MenuEntry> {
-    let mut entries = choice_entries("auto", &REFRESH_CHOICES, current, |seconds| {
-        format!("{} min", seconds / SECONDS_PER_MINUTE)
-    });
+    let mut entries = choice_entries(
+        "auto",
+        &REFRESH_CHOICES,
+        current,
+        CHOICE_OFF_LABEL,
+        |seconds| format!("{} min", seconds / SECONDS_PER_MINUTE),
+    );
     let custom = current.filter(|_| !REFRESH_CHOICES.contains(&current));
     entries.push(MenuEntry::check(
         CUSTOM_REFRESH_ID.to_owned(),
@@ -315,11 +346,22 @@ fn refresh_entries(current: Option<u32>) -> Vec<MenuEntry> {
     entries
 }
 
-/// One ticked entry per submenu; muda has no radio items, so the menu is rebuilt instead.
+/// `5 min`, `1 h`: whole hours read as hours.
+fn format_minutes(minutes: u32) -> String {
+    if minutes.is_multiple_of(MINUTES_PER_HOUR) {
+        format!("{} h", minutes / MINUTES_PER_HOUR)
+    } else {
+        format!("{minutes} min")
+    }
+}
+
+/// One ticked entry per submenu, `none_label` for the `None` choice; muda has no radio items,
+/// so the menu is rebuilt instead.
 fn choice_entries<T: Copy + PartialEq + Display>(
     prefix: &str,
     choices: &[Option<T>],
     current: Option<T>,
+    none_label: &str,
     label: impl Fn(T) -> String,
 ) -> Vec<MenuEntry> {
     choices
@@ -327,7 +369,7 @@ fn choice_entries<T: Copy + PartialEq + Display>(
         .map(|&choice| {
             MenuEntry::check(
                 choice_id(prefix, choice),
-                choice.map_or_else(|| "Off".to_owned(), &label),
+                choice.map_or_else(|| none_label.to_owned(), &label),
                 choice == current,
             )
         })
@@ -423,6 +465,11 @@ mod tests {
         entry.children.iter().find(|e| e.text == text).unwrap()
     }
 
+    /// The first device line: skips the group header; settings submenus come after the devices.
+    fn first_device(entries: &[MenuEntry]) -> &MenuEntry {
+        entries.iter().find(|e| !e.children.is_empty()).unwrap()
+    }
+
     fn ticked_ids(entry: &MenuEntry) -> Vec<&str> {
         entry
             .children
@@ -500,7 +547,7 @@ mod tests {
         device.id = MAC_ID.to_owned();
         let entries = entries(&[device], &Config::default(), LoginState::Disabled);
         let mut ids = Vec::new();
-        let mut stack: Vec<&MenuEntry> = vec![&entries[0]];
+        let mut stack: Vec<&MenuEntry> = vec![first_device(&entries)];
         while let Some(entry) = stack.pop() {
             ids.extend(entry.id.as_deref());
             stack.extend(&entry.children);
@@ -570,7 +617,7 @@ mod tests {
             };
         });
         let entries = entries(&[device], &config, LoginState::Disabled);
-        let submenu = &entries[0];
+        let submenu = first_device(&entries);
 
         assert_eq!(child(submenu, "Show on strip").checked, Some(true));
         assert_eq!(child(submenu, "Show percentage").checked, Some(false));
@@ -594,7 +641,7 @@ mod tests {
             options.color = IconColor::Rgb(0xFF, 0x88, 0x00);
         });
         let entries = entries(&[device], &config, LoginState::Disabled);
-        let submenu = &entries[0];
+        let submenu = first_device(&entries);
 
         assert_eq!(
             ticked_ids(child(submenu, "Icon")),
@@ -664,14 +711,116 @@ mod tests {
             device("Here", Level::Percent(60), true),
             device("Away", Level::Percent(40), false),
         ];
-        let config = Config {
-            show_disconnected: true,
-            ..Config::default()
+        let entries = entries(&devices, &Config::default(), LoginState::Disabled);
+        // entries[0] is the group header.
+        assert!(entries[1].enabled);
+        assert!(!entries[2].enabled);
+        assert!(!entries[2].text.contains("not connected"));
+    }
+
+    #[test]
+    fn stale_device_entry_is_disabled_and_keeps_its_text() {
+        let mut stale = device("Mouse", Level::Percent(70), true);
+        stale.stale = true;
+        let fresh = device("Mouse", Level::Percent(70), true);
+        let entries_for = |d: DeviceView| entries(&[d], &Config::default(), LoginState::Disabled);
+        let (stale_entries, fresh_entries) = (entries_for(stale), entries_for(fresh));
+        let (stale_line, fresh_line) = (first_device(&stale_entries), first_device(&fresh_entries));
+        assert!(!stale_line.enabled);
+        assert!(fresh_line.enabled);
+        assert!(stale_line.text.starts_with("Mouse — 70% · BT"));
+    }
+
+    #[test]
+    fn hide_offline_radio_roundtrip() {
+        assert_eq!(
+            action_for("offline:off"),
+            Some(MenuAction::SetHideOffline(None))
+        );
+        assert_eq!(
+            action_for("offline:15"),
+            Some(MenuAction::SetHideOffline(Some(15)))
+        );
+        assert_eq!(action_for("offline:7"), None);
+        assert_eq!(action_for("disc"), None);
+
+        let find = |minutes| {
+            let config = Config {
+                hide_offline_minutes: minutes,
+                ..Config::default()
+            };
+            entries(&[], &config, LoginState::Disabled)
+                .into_iter()
+                .find(|e| e.text == "Hide offline after")
+                .unwrap()
         };
-        let entries = entries(&devices, &config, LoginState::Disabled);
-        assert!(entries[0].enabled);
-        assert!(!entries[1].enabled);
-        assert!(!entries[1].text.contains("not connected"));
+        let default = find(Some(15));
+        let labels: Vec<&str> = default.children.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(labels, ["Never", "5 min", "15 min", "30 min", "1 h"]);
+        assert_eq!(ticked_ids(&default), ["offline:15"]);
+        assert_eq!(ticked_ids(&find(None)), ["offline:off"]);
+        assert_eq!(ticked_ids(&find(Some(60))), ["offline:60"]);
+        // Every built id parses back to the choice it ticks.
+        for entry in &default.children {
+            assert!(action_for(entry.id.as_deref().unwrap()).is_some());
+        }
+    }
+
+    fn kinded(name: &str, kind: DeviceKind) -> DeviceView {
+        DeviceView {
+            kind,
+            ..device(name, Level::Percent(50), true)
+        }
+    }
+
+    #[test]
+    fn menu_groups_get_headers_and_separators() {
+        let devices = [
+            kinded("N9", DeviceKind::Headset),
+            kinded("V9", DeviceKind::Headset),
+            kinded("X1", DeviceKind::Mouse),
+            kinded("Pad", DeviceKind::Gamepad),
+        ];
+        let entries = entries(&devices, &Config::default(), LoginState::Disabled);
+        // (is header, is separator, text) of the leading entries up to the settings separator.
+        let shape: Vec<(bool, bool, &str)> = entries
+            .iter()
+            .take(9)
+            .map(|e| {
+                (
+                    e.id.is_none() && !e.enabled,
+                    e.is_separator(),
+                    e.text.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (true, false, "Headset"),
+                (false, false, "N9 — 50% · BT"),
+                (false, false, "V9 — 50% · BT"),
+                (false, true, ""),
+                (true, false, "Mouse"),
+                (false, false, "X1 — 50% · BT"),
+                (false, true, ""),
+                (true, false, "Controller"),
+                (false, false, "Pad — 50% · BT"),
+            ]
+        );
+        // The existing separator between devices and settings stays.
+        assert!(entries[9].is_separator());
+        assert_eq!(entries[10].id.as_deref(), Some("refresh"));
+    }
+
+    #[test]
+    fn single_group_has_one_header_and_no_inner_separator() {
+        let devices = [kinded("N9", DeviceKind::Headset)];
+        let entries = entries(&devices, &Config::default(), LoginState::Disabled);
+        assert_eq!(entries[0].text, "Headset");
+        assert!(!entries[0].enabled);
+        assert!(!entries[1].is_separator());
+        assert!(entries[2].is_separator());
     }
 
     #[test]
@@ -682,21 +831,12 @@ mod tests {
             device("Away with level", Level::Percent(40), false),
             device("Paired Mac", Level::NoData("x".into()), false),
         ];
-        let lines = |show_disconnected| -> Vec<String> {
-            let config = Config {
-                show_disconnected,
-                ..Config::default()
-            };
-            entries(&devices, &config, LoginState::Disabled)
-                .iter()
-                .flat_map(|e| &e.children)
-                .filter_map(|e| e.id.as_deref()?.strip_prefix("hide:bt:").map(str::to_owned))
-                .collect()
-        };
-        assert_eq!(lines(false), ["Connected no data", "Connected"]);
-        assert_eq!(
-            lines(true),
-            ["Connected no data", "Connected", "Away with level"]
-        );
+        let lines: Vec<String> = entries(&devices, &Config::default(), LoginState::Disabled)
+            .iter()
+            .flat_map(|e| &e.children)
+            .filter_map(|e| e.id.as_deref()?.strip_prefix("hide:bt:").map(str::to_owned))
+            .collect();
+        // A disconnected device with a reading stays (greyed); one without never lists.
+        assert_eq!(lines, ["Connected no data", "Connected", "Away with level"]);
     }
 }

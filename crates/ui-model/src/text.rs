@@ -1,6 +1,6 @@
 use std::time::{Duration, SystemTime};
 
-use crate::device::{DeviceKind, DeviceView, Level};
+use crate::device::{DeviceView, KIND_GROUPS, Level};
 
 pub const EMPTY_MENU_TEXT: &str = "No devices with battery info";
 
@@ -29,19 +29,11 @@ pub fn menu_line(d: &DeviceView, now: SystemTime) -> String {
 }
 
 /// Devices with a number grouped under a kind header (`name 60%` indented two spaces), kinds in
-/// a fixed order and devices in input order; whole lines are dropped from the end to fit `max_utf16`.
+/// the shared group order and devices in input order; whole lines are dropped from the end to fit `max_utf16`.
 pub fn tooltip_compact(devices: &[DeviceView], max_utf16: usize) -> String {
-    const GROUPS: [(DeviceKind, &str); 6] = [
-        (DeviceKind::Headset, "Headset"),
-        (DeviceKind::Earbuds, "Earbuds"),
-        (DeviceKind::Mouse, "Mouse"),
-        (DeviceKind::Keyboard, "Keyboard"),
-        (DeviceKind::Gamepad, "Controller"),
-        (DeviceKind::Other, "Other"),
-    ];
     let mut text = String::new();
     let mut used = 0;
-    for (kind, header) in GROUPS {
+    for (kind, header) in KIND_GROUPS {
         let mut header_pending = true;
         for d in devices.iter().filter(|d| d.kind == kind) {
             let Some(percent) = d.shown_percent() else {
@@ -99,7 +91,7 @@ fn age_text(age: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::{Path, test_device};
+    use crate::device::{DeviceKind, Path, test_device};
 
     fn now() -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000)
