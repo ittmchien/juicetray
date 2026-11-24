@@ -124,23 +124,6 @@ pub fn confirm_or_alt(
     answer(run_task_dialog(title, message, &buttons))
 }
 
-/// Like `confirm_or_alt` with the cancel button in the middle and the alternative last, for a
-/// final choice that Esc must never pick. Blocks the calling thread.
-pub fn confirm_or_alt_last(
-    title: &str,
-    message: &str,
-    ok_label: &str,
-    cancel_label: &str,
-    alt_label: &str,
-) -> Answer {
-    let buttons = [
-        (IDOK.0, ok_label),
-        (IDCANCEL.0, cancel_label),
-        (ALT_ID, alt_label),
-    ];
-    answer(run_task_dialog(title, message, &buttons))
-}
-
 /// The pressed button as an `Answer`; Esc, the close box and a failed dialog cancel.
 fn answer(pressed: Option<i32>) -> Answer {
     match pressed {

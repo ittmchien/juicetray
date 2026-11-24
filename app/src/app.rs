@@ -114,9 +114,10 @@ pub enum UserEvent {
     /// The new-device popup closed; its answer, if any, came just before.
     #[cfg(windows)]
     OfferClosed,
-    /// The owner answered [Never]: the id goes to `declined`.
+    /// The owner answered the popup (OK, Not now or closed it): the id goes to `declined`, so it
+    /// is never offered again.
     #[cfg(windows)]
-    Decline(Id),
+    Asked(Id),
     /// The owner answered [OK]: the Add device window opens with the id preselected.
     #[cfg(windows)]
     OpenAddDevice(Id),
@@ -164,7 +165,7 @@ impl UserEvent {
             #[cfg(windows)]
             Self::OfferClosed => "OfferClosed",
             #[cfg(windows)]
-            Self::Decline(_) => "Decline",
+            Self::Asked(_) => "Asked",
             #[cfg(windows)]
             Self::OpenAddDevice(_) => "OpenAddDevice",
             #[cfg(windows)]
@@ -382,11 +383,6 @@ impl App {
             device_notify,
         };
         app.apply();
-        // Devices already plugged in get the plug-in check once, after the first read.
-        #[cfg(windows)]
-        if app.config.detect_new_devices {
-            app.tell_worker(Command::FindOffers(None));
-        }
         Ok(app)
     }
 
@@ -472,9 +468,9 @@ impl App {
                 return ControlFlow::Wait;
             }
             #[cfg(windows)]
-            UserEvent::Decline((vid, pid)) => {
-                if let Err(error) = self.config.decline_and_save(vid, pid) {
-                    log::line(&format!("saving a declined device failed: {error:#}"));
+            UserEvent::Asked((vid, pid)) => {
+                if let Err(error) = self.config.asked_and_save(vid, pid) {
+                    log::line(&format!("saving an asked device failed: {error:#}"));
                 }
                 return ControlFlow::Wait;
             }
@@ -1147,13 +1143,11 @@ impl App {
     }
 
     /// Turning detection off drops waiting popups (one on screen still answers); turning it on
-    /// checks the devices already plugged in, as at start.
+    /// offers nothing for devices already plugged in, only for later plug-ins.
     fn toggle_detect_new_devices(&mut self) {
         self.config.detect_new_devices = !self.config.detect_new_devices;
         self.save_config();
-        if self.config.detect_new_devices {
-            self.tell_worker(Command::FindOffers(None));
-        } else {
+        if !self.config.detect_new_devices {
             self.offers.drop_waiting();
         }
     }
@@ -1187,11 +1181,11 @@ impl App {
             self.tell_worker(Command::RefreshNow);
         }
         if !candidates.is_empty() {
-            self.tell_worker(Command::FindOffers(Some(candidates)));
+            self.tell_worker(Command::FindOffers(candidates));
         }
     }
 
-    /// Queues the worker's offers, minus ids declined since it looked, and shows the next one.
+    /// Queues the worker's offers, minus ids asked about since it looked, and shows the next one.
     fn queue_offers(&mut self, offers: Vec<Offer>) {
         // Detection was turned off while the worker looked.
         if !self.config.detect_new_devices {
@@ -1208,7 +1202,7 @@ impl App {
 
     /// Shows the next waiting offer unless a popup or the Add device window is open; the Add
     /// window detects devices itself, so offers wait until it closes, and those it added or that
-    /// were declined meanwhile drop out.
+    /// were asked about meanwhile drop out.
     fn show_next_offer(&mut self) {
         if add_device::is_open() {
             return;

@@ -288,7 +288,7 @@ pub fn menu_entries(
     entries.extend(devices);
     entries.push(MenuEntry::separator());
     if DETECT_NEW_AVAILABLE {
-        entries.push(MenuEntry::item(ADD_DEVICE_ID, "Add unsupported device…"));
+        entries.push(MenuEntry::item(ADD_DEVICE_ID, "Add device…"));
     }
     // The main menu keeps the devices and everyday commands; every option lives under Settings.
     entries.extend([
@@ -842,7 +842,7 @@ mod tests {
         assert_eq!(add.is_some(), cfg!(windows));
         if let Some(add) = add {
             assert_eq!(add + 1, settings);
-            assert_eq!(all[add].text, "Add unsupported device…");
+            assert_eq!(all[add].text, "Add device…");
             assert!(all[add - 1].is_separator());
         }
 

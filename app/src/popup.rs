@@ -56,36 +56,41 @@ mod win {
     use tao::event_loop::EventLoopProxy;
 
     use crate::app::UserEvent;
-    use crate::dialog::{self, Answer};
+    use crate::dialog;
     use crate::log;
-    use crate::plug::Offer;
+    use crate::plug::{Id, Offer};
 
     const TITLE: &str = "New device";
 
-    /// Asks about `offer` on a `popup` thread, which answers with `Decline` or `OpenAddDevice`
-    /// and then `OfferClosed`; false when the thread cannot start.
+    /// The events for an answer: the id is recorded as asked whatever the answer (so it is never
+    /// offered again), and OK also opens the Add device window.
+    fn answer_events(ok: bool, id: Id) -> Vec<UserEvent> {
+        let mut events = vec![UserEvent::Asked(id)];
+        if ok {
+            events.push(UserEvent::OpenAddDevice(id));
+        }
+        events
+    }
+
+    /// Asks about `offer` on a `popup` thread, which answers with `Asked` (and `OpenAddDevice`
+    /// on OK) and then `OfferClosed`; false when the thread cannot start.
     pub fn show(proxy: EventLoopProxy<UserEvent>, offer: Offer) -> bool {
         let spawned = std::thread::Builder::new()
             .name("popup".into())
             .spawn(move || {
                 // Main instruction, then content: the task dialog shows them in two sizes.
                 let message = format!("New device found: {}\n\nAdd it to Juicetray?", offer.name);
-                let answer = {
+                // Esc and the close box count as Not now.
+                let ok = {
                     let _span = log::span("dialog new device");
-                    dialog::confirm_or_alt_last(TITLE, &message, "OK", "Not now", "Never")
+                    dialog::confirm(TITLE, &message, "OK", "Not now")
                 };
                 log::trace(format_args!(
-                    "new device {:04X}:{:04X} answered {answer:?}",
+                    "new device {:04X}:{:04X} answered ok={ok}",
                     offer.id.0, offer.id.1
                 ));
-                let event = match answer {
-                    Answer::Ok => Some(UserEvent::OpenAddDevice(offer.id)),
-                    Answer::Alt => Some(UserEvent::Decline(offer.id)),
-                    // Not now: asked again on the next plug-in or app start.
-                    Answer::Cancel => None,
-                };
                 // A closed event loop means the app is exiting.
-                if let Some(event) = event {
+                for event in answer_events(ok, offer.id) {
                     let _ = proxy.send_event(event);
                 }
                 let _ = proxy.send_event(UserEvent::OfferClosed);
@@ -96,6 +101,25 @@ mod win {
                 log::line(&format!("new-device popup unavailable: {error}"));
                 false
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn every_answer_records_the_id_and_only_ok_opens_the_add_window() {
+            let id = (0x3554, 0xFA09);
+            // OK: recorded first, then the Add device window.
+            let ok = answer_events(true, id);
+            assert!(matches!(
+                ok.as_slice(),
+                [UserEvent::Asked(a), UserEvent::OpenAddDevice(b)] if *a == id && *b == id
+            ));
+            // Not now, Esc and the close box: recorded only.
+            let not_now = answer_events(false, id);
+            assert!(matches!(not_now.as_slice(), [UserEvent::Asked(a)] if *a == id));
         }
     }
 }
@@ -128,7 +152,7 @@ mod tests {
         assert_eq!(queue.next(), Some(offer((2, 2))));
         queue.closed();
         assert_eq!(queue.next(), None);
-        // Once closed, an id can be offered again (Not now, then a new plug-in).
+        // Once closed, an id can be queued again; the `declined` list, not the queue, stops repeats.
         queue.push(offer((1, 1)));
         assert_eq!(queue.next(), Some(offer((1, 1))));
 

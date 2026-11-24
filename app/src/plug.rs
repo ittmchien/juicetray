@@ -115,6 +115,7 @@ pub enum Plan {
 pub struct Settings {
     pub allow: Vec<Id>,
     pub custom: Vec<Device>,
+    /// Ids already asked about in the popup (the `declined` config key): never offered again.
     pub declined: Vec<Id>,
     /// `detect_new_devices`: off, nothing is offered; queried devices still refresh.
     pub detect_new: bool,
@@ -133,8 +134,8 @@ impl Settings {
     }
 }
 
-/// The plan for `id` under `settings`. Recovery ids are never touched; a declined id is never
-/// offered again, and nothing is offered while detection is off.
+/// The plan for `id` under `settings`. Recovery ids are never touched; an id already asked about
+/// is never offered again, and nothing is offered while detection is off.
 pub fn plan(id: Id, settings: &Settings) -> Plan {
     let (vid, pid) = id;
     if is_recovery(vid, pid) {
@@ -182,11 +183,12 @@ pub struct Offer {
     pub name: String,
 }
 
-/// The offers among `present`: ids in `only` (every present id when `None`) whose plan is
-/// `Offer` and that have a query channel. `product` gives an id's USB product string.
+/// The offers among `present`: ids in `only` (the plugged-in ones; present devices are never
+/// offered on their own) whose plan is `Offer` and that have a query channel. `product` gives an
+/// id's USB product string.
 pub fn offers<'a>(
     present: &[Presence],
-    only: Option<&[Id]>,
+    only: &[Id],
     settings: &Settings,
     product: impl Fn(Id) -> Option<&'a str>,
 ) -> Vec<Offer> {
@@ -196,7 +198,7 @@ pub fn offers<'a>(
             let id = (presence.vid, presence.pid);
             // A readable model needs a channel; any wireless receiver is offered so the owner
             // can try it or report it from the Add device window.
-            only.is_none_or(|ids| ids.contains(&id))
+            only.contains(&id)
                 && plan(id, settings) == Plan::Offer
                 && ((may_read(id) && has_query_channel(presence)) || is_receiver(product(id)))
         })
@@ -351,9 +353,10 @@ mod win {
         Some(String::from_utf16_lossy(&name[..length]))
     }
 
-    /// Runs on the refresh worker: the offers among the present devices (`only` those ids, or
-    /// all), from one listing that opens nothing; none, unlisted, while detection is off.
-    pub fn find_offers(only: Option<&[Id]>, config: &Config) -> Vec<Offer> {
+    /// Runs on the refresh worker: the offers among the present devices that are in `only` (the
+    /// plugged-in ids), from one listing that opens nothing; none, unlisted, while detection is
+    /// off.
+    pub fn find_offers(only: &[Id], config: &Config) -> Vec<Offer> {
         if !config.detect_new_devices {
             return Vec::new();
         }
@@ -559,7 +562,7 @@ mod tests {
             _ => Some("HD Webcam C270"),
         };
         let plain = settings(&[], &[], &[]);
-        let mut ids: Vec<Id> = offers(&present, None, &plain, product)
+        let mut ids: Vec<Id> = offers(&present, &plugged(&present), &plain, product)
             .iter()
             .map(|offer| offer.id)
             .collect();
@@ -567,7 +570,7 @@ mod tests {
         assert_eq!(ids, [(0x1234, 0x0001), (0x1234, 0x0002), receiver]);
         let declined = settings(&[], &[], &[receiver]);
         assert!(
-            offers(&present, Some(&[receiver]), &declined, product).is_empty(),
+            offers(&present, &[receiver], &declined, product).is_empty(),
             "a declined receiver is never offered again"
         );
         assert!(!is_receiver(None));
@@ -591,7 +594,12 @@ mod tests {
         assert_eq!(plan(unverified, &bare), Plan::Ignore);
         assert_eq!(plan((0x3554, 0x7777), &bare), Plan::Ignore);
         let present = [presence(unverified, 1, 0), presence((0x3554, 0x7777), 1, 0)];
-        assert!(offers(&present, None, &bare, |_| None).is_empty());
+        assert!(offers(&present, &plugged(&present), &bare, |_| None).is_empty());
+    }
+
+    /// Every present id, as if all had just been plugged in.
+    fn plugged(present: &[Presence]) -> Vec<Id> {
+        present.iter().map(|p| (p.vid, p.pid)).collect()
     }
 
     fn presence(id: Id, openable: usize, serial: usize) -> Presence {
@@ -602,6 +610,23 @@ mod tests {
             openable,
             serial,
         }
+    }
+
+    #[test]
+    fn a_device_is_offered_on_plug_in_only_until_it_was_asked_about() {
+        let id = (0x3554, 0x7777);
+        let present = [presence(id, 1, 0)];
+        let mut asked: Vec<Id> = Vec::new();
+        // Plugged in, never asked: one offer.
+        let first = offers(&present, &[id], &settings(&[], &[], &asked), |_| None);
+        assert_eq!(first.len(), 1);
+        // Any answer (OK, Not now, Esc) records the id, so the next plug-in offers nothing.
+        asked.push(id);
+        let second = offers(&present, &[id], &settings(&[], &[], &asked), |_| None);
+        assert!(second.is_empty());
+        // Present but not plugged in (for example at app start): never offered.
+        let fresh = settings(&[], &[], &[]);
+        assert!(offers(&present, &[], &fresh, |_| None).is_empty());
     }
 
     #[test]
@@ -636,7 +661,7 @@ mod tests {
             _ => Some("product string"),
         };
         let plain = settings(&[], &[], &[]);
-        let found = offers(&present, None, &plain, product);
+        let found = offers(&present, &plugged(&present), &plain, product);
         let ids: Vec<Id> = found.iter().map(|offer| offer.id).collect();
         let mut expected = vec![unverified, unknown_family, unnamed];
         // A verified ATK serial row refreshes instead.
@@ -664,11 +689,11 @@ mod tests {
 
         // `only` limits the check to the plugged-in ids; declined ones drop out.
         let only = [unknown_family, VERIFIED];
-        let found = offers(&present, Some(&only), &plain, product);
+        let found = offers(&present, &only, &plain, product);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, unknown_family);
         let declined = settings(&[], &[], &[unknown_family]);
-        let found = offers(&present, Some(&only), &declined, product);
+        let found = offers(&present, &only, &declined, product);
         assert!(found.is_empty());
     }
 }

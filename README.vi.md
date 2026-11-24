@@ -78,9 +78,10 @@ thiết bị.
 ### ➕ Thiết bị khác
 
 Nhiều chuột ATK, VXE và VGN dùng chung giao thức. Khi một model chưa được xác minh, Juicetray
-không bao giờ tự hỏi pin nó. Muốn thử, dùng **Add unsupported device…** trong menu (Windows),
-hoặc bấm **OK** trên popup "New device found" (hiện với các hãng được hỗ trợ và với mọi
-receiver không dây bạn cắm vào): app nhận ra thiết bị khi bạn cắm vào, gửi một
+không bao giờ tự hỏi pin nó. Muốn thử, dùng **Add device…** trong menu (Windows),
+hoặc bấm **OK** trên popup "New device found" (hiện khi bạn cắm một hãng được hỗ trợ hoặc
+receiver không dây bất kỳ lúc Juicetray đang chạy, không bao giờ hiện lúc khởi động, và chỉ
+một lần cho mỗi thiết bị dù bạn trả lời gì): app nhận ra thiết bị, gửi một
 lệnh hỏi pin chỉ-đọc khi bạn bấm **Try**, và thêm thiết bị khi bạn xác nhận mức pin đúng. Nếu
 không được, bấm **Send report** để gửi thông tin qua
 [Google Form](https://forms.gle/Qp5CeBGEiPg2UtkX6) (không cần tài khoản), hoặc **Report on
@@ -129,7 +130,7 @@ khởi động lại; lỗi ở bất kỳ bước nào thì exe cũ được gi
 | Lệnh | Tác dụng |
 |---|---|
 | `juicetray scan` | Liệt kê thiết bị Bluetooth, HID và cổng serial; không ghi gì; che số serial. |
-| `juicetray probe <VID:PID>` | Gửi một lệnh hỏi pin chỉ-đọc tới thiết bị được hỗ trợ và in phản hồi thô. Đóng app của hãng trước; từ chối nếu chưa hết khoảng chờ của thiết bị. Không bắt buộc: mục **Add unsupported device…** trong menu thử thiết bị mà không cần lệnh này. |
+| `juicetray probe <VID:PID>` | Gửi một lệnh hỏi pin chỉ-đọc tới thiết bị được hỗ trợ và in phản hồi thô. Đóng app của hãng trước; từ chối nếu chưa hết khoảng chờ của thiết bị. Không bắt buộc: mục **Add device…** trong menu thử thiết bị mà không cần lệnh này. |
 | `juicetray probe --online <VID:PID>` | Gửi lệnh hỏi trạng thái kết nối chỉ-đọc (Compx và ATK N9 Ultra, cùng khoảng chờ) và in `online: yes/no/unsupported`. |
 | `juicetray listen <VID:PID> [seconds]` | Chỉ đọc (1–60 giây, mặc định 10) và in từng report kèm thời điểm tính bằng ms; không gửi gì. |
 

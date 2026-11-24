@@ -77,7 +77,8 @@ pub struct Config {
     /// `VID:PID` entries of unverified catalogue models the owner added, so the worker queries
     /// them; hand-editable, kept verbatim.
     pub allow: Vec<String>,
-    /// `VID:PID` entries the owner declined in the new-device popup; kept verbatim.
+    /// `VID:PID` entries the new-device popup asked about, whatever the answer (the key keeps its
+    /// old name so existing files still work); never offered again, kept verbatim.
     pub declined: Vec<String>,
     /// Devices outside the catalogue the owner added with a family; kept verbatim.
     pub custom_devices: Vec<CustomEntry>,
@@ -332,14 +333,14 @@ impl Config {
         write_atomically(path, &self.to_toml())
     }
 
-    /// Adds a device the owner declined in the new-device popup to `declined`, in memory and in
-    /// the file, so it is never offered again.
+    /// Adds a device the owner was asked about in the new-device popup (whatever the answer) to
+    /// `declined`, in memory and in the file, so it is never offered again.
     #[cfg_attr(
         not(windows),
         allow(dead_code, reason = "only Windows offers new devices")
     )]
-    pub fn decline_and_save(&mut self, vid: u16, pid: u16) -> Result<()> {
-        let _span = log::span("config decline and save");
+    pub fn asked_and_save(&mut self, vid: u16, pid: u16) -> Result<()> {
+        let _span = log::span("config asked and save");
         let path = path().context("no config directory available")?;
         self.add_id_and_save_to(&path, |config| &mut config.declined, vid, pid)
     }
@@ -1033,7 +1034,7 @@ mod tests {
     }
 
     #[test]
-    fn decline_and_save_adds_once_and_keeps_hand_edits() {
+    fn asked_ids_are_added_once_and_keep_hand_edits() {
         let root = std::env::temp_dir().join(format!(
             "juicetray-decline-save-test-{}",
             std::process::id()

@@ -1,4 +1,4 @@
-//! The "Add device" window (Windows): menu "Add unsupported device…" or a new-device popup's
+//! The "Add device" window (Windows): menu "Add device…" or a new-device popup's
 //! [OK] opens it on its own thread, one at a time. The steps are the pure `flow`; the device
 //! work runs on the refresh worker (`inspect`, `try_as`); the UI thread writes the config.
 

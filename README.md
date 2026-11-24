@@ -79,10 +79,11 @@ Battery read correctly on the owner's devices; these are read automatically.
 ### ➕ Other devices
 
 Many ATK, VXE and VGN mice use the same protocols. Until a model is verified, Juicetray never
-queries it on its own. To try one, use **Add unsupported device…** in the menu (Windows), or
-**OK** on the "New device found" popup (shown for supported brands and for any wireless
-receiver you plug in): it detects the device when you plug it in, sends one
-read-only battery query when you press **Try**, and adds it once you confirm the level. If it does
+queries it on its own. To try one, use **Add device…** in the menu (Windows), or
+**OK** on the "New device found" popup (shown when you plug in a supported brand or any
+wireless receiver while Juicetray runs, never at start-up, and only once per device whatever
+you answer): it detects the device, sends one read-only battery query when you press **Try**,
+and adds it once you confirm the level. If it does
 not work, press **Send report** to send the details through a
 [Google Form](https://forms.gle/Qp5CeBGEiPg2UtkX6) (no account needed), or **Report on GitHub**
 to [open an issue](https://github.com/ittmchien/juicetray/issues) with them filled in; either way
@@ -129,7 +130,7 @@ the exe's folder is not writable it opens the download page instead.
 | Command | What it does |
 |---|---|
 | `juicetray scan` | Lists Bluetooth, HID and serial devices; writes nothing; redacts serial numbers. |
-| `juicetray probe <VID:PID>` | Sends one read-only battery query to a supported device and prints the raw reply. Close the vendor app first; refuses within the device's floor. Optional: **Add unsupported device…** in the menu tries a device without it. |
+| `juicetray probe <VID:PID>` | Sends one read-only battery query to a supported device and prints the raw reply. Close the vendor app first; refuses within the device's floor. Optional: **Add device…** in the menu tries a device without it. |
 | `juicetray probe --online <VID:PID>` | Sends the read-only online-status query instead (Compx and ATK N9 Ultra, same floor) and prints `online: yes/no/unsupported`. |
 | `juicetray listen <VID:PID> [seconds]` | Only reads (1–60 s, default 10) and prints each report with its time in ms; nothing is sent. |
 

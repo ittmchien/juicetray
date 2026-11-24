@@ -17,11 +17,11 @@ pub enum Command {
     SetInterval(Option<u32>),
     /// The power source or the battery option changed; a pause ending earns one read.
     SetPower(PowerState),
-    /// Looks for devices to offer in the new-device popup among these plugged-in ids (all
-    /// present devices when `None`), from the device lists alone; answers with
-    /// `UserEvent::Offers`.
+    /// Looks for devices to offer in the new-device popup among these plugged-in ids, from the
+    /// device lists alone; answers with `UserEvent::Offers`. Devices present at start are never
+    /// offered, so the ids always come from a plug-in.
     #[cfg(windows)]
-    FindOffers(Option<Vec<crate::plug::Id>>),
+    FindOffers(Vec<crate::plug::Id>),
     /// The Add window asks for a device's interfaces and matching families; a closed reply
     /// channel (the window closed) is ignored.
     #[cfg(windows)]
@@ -121,7 +121,7 @@ fn run(
             #[cfg(windows)]
             Ok(Command::FindOffers(ids)) => {
                 read_now = false;
-                let offers = crate::plug::find_offers(ids.as_deref(), &Config::load());
+                let offers = crate::plug::find_offers(&ids, &Config::load());
                 if !offers.is_empty() && proxy.send_event(UserEvent::Offers(offers)).is_err() {
                     log::trace(format_args!("worker exit: event loop gone"));
                     return;
