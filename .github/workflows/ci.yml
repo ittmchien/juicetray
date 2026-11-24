@@ -67,6 +67,10 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      # The app's self-update checks the downloaded exe against this list before replacing itself.
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS.txt
       - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
