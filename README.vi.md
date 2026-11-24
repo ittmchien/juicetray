@@ -99,7 +99,7 @@ allow = ["391D:1A05"]
 ## 🔄 Cập nhật
 
 Juicetray kiểm tra [GitHub Releases](https://github.com/ittmchien/juicetray/releases) mỗi ngày
-một lần (và một phút sau khi mở app). Tắt bằng mục **Check for updates automatically** trong
+tối đa một lần (mở lại app cũng không kiểm thêm). Tắt bằng mục **Check for updates automatically** trong
 menu, hoặc kiểm tay bằng **Check for updates…**. Yêu cầu chỉ gửi số phiên bản trong User-Agent
 (`juicetray/<version>`).
 

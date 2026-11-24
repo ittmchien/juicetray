@@ -101,7 +101,7 @@ allow = ["391D:1A05"]
 ## 🔄 Updates
 
 Juicetray checks [GitHub Releases](https://github.com/ittmchien/juicetray/releases) for a newer
-version once a day (and a minute after start). Turn it off with **Check for updates
+version at most once a day (restarting the app does not check again). Turn it off with **Check for updates
 automatically** in the menu, or check by hand with **Check for updates…**. The request sends
 nothing but the version in the User-Agent (`juicetray/<version>`).
 

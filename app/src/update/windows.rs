@@ -6,7 +6,7 @@ use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use tao::event_loop::EventLoopProxy;
 use windows::Win32::Networking::WinHttp::{
@@ -72,22 +72,68 @@ pub fn spawn_cleanup() {
     }
 }
 
-/// Sends `UserEvent::UpdateDue` once after `FIRST_CHECK_DELAY` and then every `CHECK_INTERVAL`
-/// from one sleeping thread: no timer or polling on the event loop, and the UI thread decides
-/// whether a check may run (setting, power).
+/// Sends `UserEvent::UpdateDue` at most once a day from one sleeping thread, counting from the
+/// last check stored on disk so restarts do not check again; the UI thread decides whether a
+/// check may run (setting, power).
 /// shortcut: the sleep clock stops while the PC is suspended, so a day counts awake time only.
 pub fn spawn_scheduler(proxy: EventLoopProxy<UserEvent>) {
     let spawned = thread::Builder::new()
         .name("update-schedule".into())
         .spawn(move || {
-            thread::sleep(FIRST_CHECK_DELAY);
-            // A closed event loop means the app is exiting.
-            while proxy.send_event(UserEvent::UpdateDue).is_ok() {
-                thread::sleep(CHECK_INTERVAL);
+            let mut wait = check::next_check_wait(
+                last_check(),
+                SystemTime::now(),
+                CHECK_INTERVAL,
+                FIRST_CHECK_DELAY,
+            );
+            loop {
+                thread::sleep(wait);
+                // A closed event loop means the app is exiting.
+                if proxy.send_event(UserEvent::UpdateDue).is_err() {
+                    return;
+                }
+                save_last_check(SystemTime::now());
+                wait = CHECK_INTERVAL;
             }
         });
     if let Err(error) = spawned {
         eprintln!("update scheduler thread failed: {error}");
+    }
+}
+
+/// File holding the time of the last automatic check, in whole seconds since the Unix epoch.
+fn last_check_path() -> Option<std::path::PathBuf> {
+    Some(
+        crate::config::project_dirs()?
+            .data_local_dir()
+            .join("last-update-check"),
+    )
+}
+
+/// The stored last-check time; a missing or unreadable file means "never".
+fn last_check() -> Option<SystemTime> {
+    let text = std::fs::read_to_string(last_check_path()?).ok()?;
+    let secs: u64 = text.trim().parse().ok()?;
+    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+}
+
+/// Stores the last-check time; failing only means the next start may check a day early.
+fn save_last_check(at: SystemTime) {
+    let Some(path) = last_check_path() else {
+        return;
+    };
+    let secs = at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let saved = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(&path, secs.to_string()));
+    if let Err(error) = saved {
+        log::line(&format!(
+            "saving the last update check failed: {}",
+            error.kind()
+        ));
     }
 }
 

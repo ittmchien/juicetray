@@ -12,6 +12,21 @@ const DOWNLOAD_PREFIX: &str = "https://github.com/ittmchien/juicetray/releases/d
 pub const EXE_ASSET: &str = "juicetray-windows-x86_64.exe";
 pub const SUMS_ASSET: &str = "SHA256SUMS.txt";
 
+/// Wait before the next automatic check: a day after the last one (kept across restarts), but
+/// never less than `min_wait` after launch; a last check in the future (clock moved) is ignored.
+pub fn next_check_wait(
+    last: Option<std::time::SystemTime>,
+    now: std::time::SystemTime,
+    interval: std::time::Duration,
+    min_wait: std::time::Duration,
+) -> std::time::Duration {
+    let since = last.and_then(|last| now.duration_since(last).ok());
+    let due = since.map_or(std::time::Duration::ZERO, |since| {
+        interval.saturating_sub(since)
+    });
+    due.max(min_wait)
+}
+
 /// Where a release's executable and its checksum list can be downloaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateAssets {
@@ -239,6 +254,23 @@ mod tests {
 
     fn check(status: u16, body: &str) -> Result<UpdateCheck, String> {
         evaluate(status, body, "0.1.0")
+    }
+
+    #[test]
+    fn next_check_waits_a_day_from_the_last_check() {
+        use std::time::{Duration, SystemTime};
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10 * 86_400);
+        let (day, minute) = (Duration::from_secs(86_400), Duration::from_secs(60));
+        let ago = |secs| Some(now - Duration::from_secs(secs));
+        assert_eq!(next_check_wait(None, now, day, minute), minute);
+        assert_eq!(
+            next_check_wait(ago(3_600), now, day, minute),
+            day - Duration::from_secs(3_600)
+        );
+        assert_eq!(next_check_wait(ago(2 * 86_400), now, day, minute), minute);
+        assert_eq!(next_check_wait(ago(86_400 - 10), now, day, minute), minute);
+        let future = Some(now + Duration::from_secs(600));
+        assert_eq!(next_check_wait(future, now, day, minute), minute);
     }
 
     #[test]
