@@ -30,7 +30,7 @@ cài phần mềm của từng hãng.**
 - 🖱️ **Receiver 2.4 GHz và cáp** — đọc thẳng từ receiver; không cần chạy app của hãng.
 - 📶 **Mọi thiết bị Bluetooth** — tai nghe, chuột, bàn phím, tay cầm… miễn Windows đã biết mức pin.
 - 🗂️ **Nhóm và sắp xếp** — chia nhóm theo loại, pin cao đứng trước, thiết bị offline xuống cuối và
-  có dấu ⊘; tự ẩn thiết bị offline sau khoảng thời gian bạn chọn.
+  ghi *disconnected*; tự ẩn thiết bị offline sau khoảng thời gian bạn chọn.
 - 🔔 **Cảnh báo pin yếu** — thông báo khi chạm ngưỡng bạn chọn (5–30 % hoặc tự nhập).
 - 🛠️ **Tuỳ chỉnh từng thiết bị** — hiện/ẩn, phần trăm, nhãn, icon, màu icon cho taskbar sáng và tối.
 - 🪶 **Siêu nhẹ** — khoảng 10 MB RAM, ~0,05 % CPU lúc rảnh, file exe portable 2 MB; tự dừng

@@ -31,7 +31,7 @@ without each vendor's software.**
 - 📶 **Every Bluetooth device** — headsets, mice, keyboards, controllers… whatever Windows already
   knows the battery of.
 - 🗂️ **Grouped and sorted** — devices grouped by kind, highest level first, offline ones last and
-  marked ⊘; hide offline devices after a delay you choose.
+  marked *disconnected*; hide offline devices after a delay you choose.
 - 🔔 **Low-battery alert** — a notification at the threshold you pick (5–30 % or custom).
 - 🛠️ **Per-device options** — show or hide, percentage, label, icon, and icon colours for a light
   and a dark taskbar.

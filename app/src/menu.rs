@@ -382,15 +382,8 @@ fn device_entries(devices: &[DeviceView], config: &Config, now: SystemTime) -> V
             entries.push(MenuEntry::label(group_label(device.kind)));
             group = Some(device.kind);
         }
-        // An offline line stays clickable and shows a ring in its indent: a native menu greys only
-        // disabled lines, which cannot open their settings, and owner-drawn lines turn it light.
-        let indent = if device.is_offline() {
-            OFFLINE_INDENT
-        } else {
-            GROUP_INDENT
-        };
         let mut entry = device_entry(device, config, now);
-        entry.text.insert_str(0, indent);
+        entry.text.insert_str(0, GROUP_INDENT);
         entries.push(entry);
     }
     entries
@@ -415,10 +408,13 @@ fn device_entry(device: &DeviceView, config: &Config, now: SystemTime) -> MenuEn
             color_entries(id, (options.color_light, options.color_dark), is_svg),
         ),
     ];
-    // A native menu cannot colour text, so a low device says it in words.
+    // A native menu cannot colour or grey a clickable line, so states are said in words.
     let mut line = menu_line(device, now);
     if needs_charge(device, config.low_battery_percent) {
         line.push_str(NEEDS_CHARGE_TEXT);
+    }
+    if device.is_offline() {
+        line.push_str(DISCONNECTED_TEXT);
     }
     MenuEntry::submenu(line, children)
 }
@@ -426,12 +422,11 @@ fn device_entry(device: &DeviceView, config: &Config, now: SystemTime) -> MenuEn
 /// Tail of a device line at or below the low-battery threshold.
 const NEEDS_CHARGE_TEXT: &str = " · needs charge";
 
+/// Tail of an offline device line, which stays clickable so its settings still open.
+const DISCONNECTED_TEXT: &str = " · disconnected";
+
 /// Lead of a device line under its group header (two em spaces: menus keep them, unlike tabs).
 const GROUP_INDENT: &str = "\u{2003}\u{2003}";
-
-/// Lead of an offline device line: an em space, a circled slash and a thin space, about as wide
-/// as `GROUP_INDENT` (shortcut: widths are estimated for Segoe UI, check alignment by eye).
-const OFFLINE_INDENT: &str = "\u{2003}\u{2298}\u{2009}";
 
 /// Built-in icons then `Custom SVG…`, the current choice ticked.
 fn icon_entries(id: &str, current: &IconChoice) -> Vec<MenuEntry> {
@@ -1324,9 +1319,10 @@ mod tests {
         assert!(entries[1].enabled && entries[1].text.starts_with(GROUP_INDENT));
         let away = &entries[2];
         assert!(away.enabled && !away.children.is_empty());
-        assert!(away.text.starts_with(OFFLINE_INDENT));
-        assert!(away.text[OFFLINE_INDENT.len()..].starts_with("Away — BT · 40%"));
-        assert!(!away.text.contains("not connected"));
+        assert!(away.text.starts_with(GROUP_INDENT));
+        assert!(away.text[GROUP_INDENT.len()..].starts_with("Away — BT · 40%"));
+        assert!(away.text.ends_with(DISCONNECTED_TEXT));
+        assert!(!entries[1].text.contains(DISCONNECTED_TEXT));
     }
 
     #[test]
@@ -1337,9 +1333,9 @@ mod tests {
         let entries_for = |d: DeviceView| entries(&[d], &Config::default(), LoginState::Disabled);
         let (stale_entries, fresh_entries) = (entries_for(stale), entries_for(fresh));
         let (stale_line, fresh_line) = (first_device(&stale_entries), first_device(&fresh_entries));
-        assert!(stale_line.enabled && stale_line.text.starts_with(OFFLINE_INDENT));
-        assert!(fresh_line.enabled && fresh_line.text.starts_with(GROUP_INDENT));
-        let text = stale_line.text.strip_prefix(OFFLINE_INDENT).unwrap();
+        assert!(stale_line.enabled && stale_line.text.ends_with(DISCONNECTED_TEXT));
+        assert!(fresh_line.enabled && !fresh_line.text.contains(DISCONNECTED_TEXT));
+        let text = stale_line.text.strip_prefix(GROUP_INDENT).unwrap();
         assert!(text.starts_with("Mouse — BT · 70%"));
     }
 
