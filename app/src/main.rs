@@ -8,6 +8,7 @@ mod instance;
 mod interval;
 mod licenses;
 mod listen;
+mod log;
 mod login;
 mod menu;
 mod probe;

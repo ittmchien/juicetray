@@ -33,6 +33,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
+use crate::log;
+
 use super::layout::{
     Placement, Rect, natural_container, place_secondary_strip, place_strip, shrink_to_clear,
     strip_height,
@@ -60,8 +62,28 @@ pub enum Signal {
 static NOTIFY: OnceLock<Box<dyn Fn(Signal) + Send + Sync>> = OnceLock::new();
 
 fn notify(signal: Signal) {
+    // Written from the window procedure, so a missing line means the UI thread is not pumping.
+    log::line(&format!("wndproc signal {signal:?}"));
     if let Some(callback) = NOTIFY.get() {
         callback(signal);
+    }
+}
+
+/// The Explorer window class a dock's strip is a child of, for the trace.
+fn taskbar_class(is_primary: bool) -> &'static str {
+    if is_primary {
+        "Shell_TrayWnd"
+    } else {
+        "Shell_SecondaryTrayWnd"
+    }
+}
+
+/// The Explorer window class of the task-button container a dock resizes, for the trace.
+fn container_class(is_primary: bool) -> &'static str {
+    if is_primary {
+        "ReBarWindow32"
+    } else {
+        "WorkerW"
     }
 }
 
@@ -107,6 +129,7 @@ pub struct TaskbarStrip {
 impl TaskbarStrip {
     /// Registers the window classes and starts the keeper timer; `callback` receives every signal.
     pub fn new(callback: impl Fn(Signal) + Send + Sync + 'static) -> Result<Self> {
+        let _span = log::span("TaskbarStrip::new");
         if NOTIFY.set(Box::new(callback)).is_err() {
             bail!("the taskbar strip already exists");
         }
@@ -159,6 +182,7 @@ impl TaskbarStrip {
     /// Shows the strip with `tooltip` on every taskbar, calling `render` once per distinct
     /// (height px, DPI) among them, and creates the windows that are missing.
     pub fn show(&mut self, render: &mut RenderStrip, tooltip: &str) {
+        let _span = log::span("taskbar show");
         self.active = true;
         tooltip.clone_into(&mut self.tooltip);
         self.sync(render, true);
@@ -167,11 +191,13 @@ impl TaskbarStrip {
     /// Keeper tick: recreates copies after an Explorer restart or a display change, re-renders
     /// copies whose taskbar height or DPI changed and re-docks them.
     pub fn keep(&mut self, render: &mut RenderStrip) {
+        let _span = log::span("keeper tick");
         self.sync(render, false);
     }
 
     /// Removes every strip copy, gives back the reserved space and stops showing anything.
     pub fn hide(&mut self) {
+        let _span = log::span("taskbar hide");
         self.active = false;
         self.docks.drain(..).for_each(Dock::destroy);
     }
@@ -182,6 +208,7 @@ impl TaskbarStrip {
         if !self.active {
             return;
         }
+        let _span = log::span(format!("sync repaint={repaint}"));
         let primary = find_taskbar();
         let taskbars: Vec<HWND> = primary
             .into_iter()
@@ -191,6 +218,9 @@ impl TaskbarStrip {
         let (live, gone): (Vec<Dock>, Vec<Dock>) = std::mem::take(&mut self.docks)
             .into_iter()
             .partition(|dock| dock.strip.is_alive() && taskbars.contains(&dock.taskbar));
+        if !gone.is_empty() {
+            log::line(&format!("docks gone {}", gone.len()));
+        }
         gone.into_iter().for_each(Dock::destroy);
         self.docks = live;
         // Taskbars with the same (height, DPI) share one render within this call.
@@ -206,11 +236,16 @@ impl TaskbarStrip {
             let bitmap = rendered
                 .entry(size)
                 .or_insert_with(|| render(size.0, size.1));
-            match StripWindow::create(taskbar, self.instance, bitmap) {
+            let is_primary = Some(taskbar) == primary;
+            let created = {
+                let _span = log::span(format!("dock add in {}", taskbar_class(is_primary)));
+                StripWindow::create(taskbar, self.instance, bitmap)
+            };
+            match created {
                 Ok(strip) => {
                     self.docks.push(Dock {
                         taskbar,
-                        is_primary: Some(taskbar) == primary,
+                        is_primary,
                         strip,
                         reserved: false,
                         shown: None,
@@ -258,6 +293,7 @@ impl Drop for TaskbarStrip {
 impl Dock {
     /// Docks the copy and reserves its space, or hides it and gives the space back when it does not fit.
     fn place(&mut self, width: i32, height: i32) {
+        let _span = log::span(format!("dock place in {}", taskbar_class(self.is_primary)));
         let placement = client_rect_on_screen(self.taskbar).map_or(Placement::Fallback, |bar| {
             if self.is_primary {
                 place_strip(bar, notification_area(self.taskbar), width, height)
@@ -276,6 +312,7 @@ impl Dock {
     /// Shrinks the task-button container to end at `strip_x` (taskbar client coordinates),
     /// moving it only when its rect differs from the wanted one.
     fn reserve(&mut self, strip_x: i32) {
+        let _span = log::span(format!("reserve strip_x={strip_x}"));
         // No container (Windows 11 XAML taskbar) leaves the strip floating as before; `reserved`
         // stays as it is, since a sibling being recreated hides a container this copy shrank.
         let Some((container, natural, current)) = self.container_layout() else {
@@ -283,7 +320,7 @@ impl Dock {
         };
         let wanted = shrink_to_clear(natural, strip_x).unwrap_or(natural);
         if wanted != current {
-            set_child_rect(container, wanted);
+            set_child_rect(container, wanted, container_class(self.is_primary));
         }
         self.reserved = true;
     }
@@ -293,10 +330,11 @@ impl Dock {
         if !std::mem::take(&mut self.reserved) {
             return;
         }
+        let _span = log::span("release");
         if let Some((container, natural, current)) = self.container_layout()
             && natural != current
         {
-            set_child_rect(container, natural);
+            set_child_rect(container, natural, container_class(self.is_primary));
         }
     }
 
@@ -320,6 +358,7 @@ impl Dock {
     }
 
     fn destroy(mut self) {
+        let _span = log::span(format!("dock remove in {}", taskbar_class(self.is_primary)));
         self.release();
         self.strip.destroy();
     }
@@ -327,6 +366,8 @@ impl Dock {
 
 impl StripWindow {
     fn create(taskbar: HWND, instance: HINSTANCE, bitmap: &Bitmap) -> windows::core::Result<Self> {
+        // The parent lives in Explorer's thread, so the system notifies it while this call waits.
+        let _span = log::span("CreateWindowExW JuicetrayTaskbarStrip (parent in Explorer)");
         // SAFETY: the class is registered; `taskbar` is a live window handle.
         let hwnd = unsafe {
             CreateWindowExW(
@@ -358,6 +399,7 @@ impl StripWindow {
 
     fn destroy(self) {
         if self.is_alive() {
+            let _span = log::span("DestroyWindow JuicetrayTaskbarStrip (parent in Explorer)");
             // SAFETY: the window belongs to this thread; destroying it also destroys its tooltip.
             let _ = unsafe { DestroyWindow(self.hwnd) };
         }
@@ -424,6 +466,7 @@ impl StripWindow {
             SourceConstantAlpha: 255,
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
+        let _span = log::span("UpdateLayeredWindow JuicetrayTaskbarStrip");
         // SAFETY: all pointers refer to locals that outlive the call; `pptdst` is None because
         // the position belongs to SetWindowPos in parent coordinates.
         unsafe {
@@ -463,6 +506,7 @@ impl StripWindow {
             ..Default::default()
         };
         let lparam = LPARAM(ptr::from_ref(&info) as isize);
+        let _span = log::span("SendMessageW tooltips_class32 TTM_DELTOOLW + TTM_ADDTOOLW");
         // SAFETY: `info` and `wide` outlive both calls; the control copies the text.
         unsafe {
             SendMessageW(tooltip, TTM_DELTOOLW, None, Some(lparam));
@@ -474,6 +518,7 @@ impl StripWindow {
     fn place(&self, placement: Placement) {
         match placement {
             Placement::Docked(rect) => {
+                let _span = log::span("SetWindowPos JuicetrayTaskbarStrip");
                 // SAFETY: the window is ours; the position is in the parent's client coordinates.
                 let moved = unsafe {
                     SetWindowPos(
@@ -491,6 +536,7 @@ impl StripWindow {
                 }
             }
             Placement::Fallback => {
+                let _span = log::span("ShowWindow SW_HIDE JuicetrayTaskbarStrip");
                 // SAFETY: the window is ours; the result is the previous visibility, not an error.
                 let _ = unsafe { ShowWindow(self.hwnd, SW_HIDE) };
             }
@@ -546,6 +592,7 @@ fn register_class(name: PCWSTR, procedure: WNDPROC, instance: HINSTANCE) -> Resu
 }
 
 fn create_tooltip(owner: HWND, instance: HINSTANCE) -> windows::core::Result<HWND> {
+    let _span = log::span("CreateWindowExW tooltips_class32");
     // SAFETY: the control class is registered by `InitCommonControlsEx`; `owner` is a live window.
     let tooltip = unsafe {
         CreateWindowExW(
@@ -714,7 +761,10 @@ fn child_rect(child: HWND, parent: HWND) -> Option<Rect> {
 
 /// Sets a taskbar child's rect; `SWP_NOSENDCHANGING` because Explorer's `WM_WINDOWPOSCHANGING`
 /// handler snaps any outside shrink back to its own layout.
-fn set_child_rect(window: HWND, rect: Rect) {
+fn set_child_rect(window: HWND, rect: Rect, class: &str) {
+    // Synchronous into Explorer's thread (no SWP_ASYNCWINDOWPOS): it returns when Explorer has
+    // handled the move, so a busy taskbar thread stalls this one.
+    let _span = log::span(format!("SetWindowPos {class} (Explorer, synchronous)"));
     // SAFETY: only repositions a window by handle; a stale handle fails the call.
     let moved = unsafe {
         SetWindowPos(

@@ -42,7 +42,7 @@ pub const KNOWN: &[KnownDevice] = &[
     device(
         0x3837,
         0x6011,
-        "MCHOSE V9 Pro 2 (dongle)",
+        "MCHOSE V9 Pro 2",
         Family::Mchose,
         true,
         false,
@@ -51,7 +51,7 @@ pub const KNOWN: &[KnownDevice] = &[
     device(
         0x3837,
         0x6010,
-        "MCHOSE V9 Pro 2 (cable)",
+        "MCHOSE V9 Pro 2",
         Family::Mchose,
         false,
         true,
@@ -87,7 +87,7 @@ pub const KNOWN: &[KnownDevice] = &[
     device(
         0x373B,
         0x1216,
-        "ATK X1 SE (dongle)",
+        "ATK X1 SE",
         Family::AtkBitmouse,
         // Confirmed 2026-11-24: probe read 53 %, matching the owner's vendor app.
         true,
@@ -97,7 +97,7 @@ pub const KNOWN: &[KnownDevice] = &[
     device(
         0x3554,
         0xFA09,
-        "AULA F75 (2.4G receiver)",
+        "AULA F75",
         Family::Report13,
         false,
         false,
@@ -106,7 +106,7 @@ pub const KNOWN: &[KnownDevice] = &[
     device(
         0x391D,
         0x1A05,
-        "VGN Dragonfly 3 Master+ (receiver)",
+        "VGN Dragonfly 3 Master+",
         Family::Compx,
         false,
         false,
@@ -115,7 +115,7 @@ pub const KNOWN: &[KnownDevice] = &[
     device(
         0x373B,
         0x11CB,
-        "ATK N9 Pro (dongle)",
+        "ATK N9 Pro",
         Family::AtkSerial,
         false,
         false,
@@ -124,7 +124,7 @@ pub const KNOWN: &[KnownDevice] = &[
     device(
         0x373B,
         0x11CA,
-        "ATK N9 Pro (cable)",
+        "ATK N9 Pro",
         Family::AtkSerial,
         false,
         true,
@@ -133,7 +133,7 @@ pub const KNOWN: &[KnownDevice] = &[
     device(
         0x373B,
         0x1204,
-        "ATK N9 Ultra (dongle)",
+        "ATK N9 Ultra",
         Family::AtkSerial,
         false,
         false,
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn fa09_is_report13_and_unconfirmed() {
         let fa09 = known(0x3554, 0xFA09).expect("FA09 is in the table");
-        assert_eq!(fa09.name, "AULA F75 (2.4G receiver)");
+        assert_eq!(fa09.name, "AULA F75");
         assert_eq!(fa09.family, Family::Report13);
         assert!(!fa09.confirmed);
     }

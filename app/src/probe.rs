@@ -291,7 +291,7 @@ mod tests {
         assert!(text.contains("046D:C52B"), "{text}");
         assert!(text.contains("not a known device"), "{text}");
         assert!(
-            text.contains("3837:6011  MCHOSE V9 Pro 2 (dongle) · MCHOSE"),
+            text.contains("3837:6011  MCHOSE V9 Pro 2 · MCHOSE"),
             "{text}"
         );
         assert!(text.ends_with("nothing was sent"), "{text}");
@@ -309,10 +309,7 @@ mod tests {
         );
         let lines: Vec<&str> = text.lines().collect();
 
-        assert_eq!(
-            lines[0],
-            "probe 3837:6011 · MCHOSE V9 Pro 2 (dongle) · MCHOSE"
-        );
+        assert_eq!(lines[0], "probe 3837:6011 · MCHOSE V9 Pro 2 · MCHOSE");
         assert_eq!(lines[1], "target HID if 3 FF07:0222 · path P");
         let query = battery_query(Family::Mchose);
         assert_eq!(lines[2], format!("sent (64 B): {}", hex(query)));

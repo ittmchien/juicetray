@@ -4,6 +4,8 @@ use std::time::{Duration, SystemTime};
 use notify_rust::Notification;
 use ui_model::DeviceView;
 
+use crate::log;
+
 /// Readings older than this say nothing about the battery now, so they never alert.
 const MAX_READING_AGE: Duration = Duration::from_secs(15 * 60);
 
@@ -47,9 +49,11 @@ pub fn notify_low_battery(device: &DeviceView) {
         return;
     };
     let name = device.name.clone();
+    log::line(&format!("notification spawn {name} {percent}%"));
     let spawned = std::thread::Builder::new()
         .name("notify".into())
         .spawn(move || {
+            let _span = log::span("notification show");
             let shown = Notification::new()
                 .summary(&format!("{name} battery low"))
                 .body(&format!("{percent}% left"))

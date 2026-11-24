@@ -347,7 +347,7 @@ mod tests {
 
         let header = lines
             .iter()
-            .position(|line| *line == "373B:1204  ATK N9 Ultra (dongle) · ATK serial")
+            .position(|line| *line == "373B:1204  ATK N9 Ultra · ATK serial")
             .expect("one header for the N9");
         assert_eq!(
             lines
@@ -375,7 +375,7 @@ mod tests {
                 .any(|line| line.starts_with("  HID if 1 FF00:0001 vendor"))
         );
         // The VGN device keeps its own header; the instance id is the only elision.
-        assert!(lines.contains(&"3554:FA09  AULA F75 (2.4G receiver) · VGN report 0x13"));
+        assert!(lines.contains(&"3554:FA09  AULA F75 · VGN report 0x13"));
         assert_eq!(report.matches('…').count(), 3);
     }
 
@@ -388,7 +388,7 @@ mod tests {
 
         let report = usb_report(&hids, &[], &[]);
 
-        assert!(report.contains("3837:6011  MCHOSE V9 Pro 2 (dongle) · MCHOSE"));
+        assert!(report.contains("3837:6011  MCHOSE V9 Pro 2 · MCHOSE"));
         assert!(report.contains("046D:C52B  unknown device"));
     }
 

@@ -371,7 +371,8 @@ mod tests {
             ..DisplayOptions::default()
         };
         let segments = build_strip(&devices, None, &[], false, &shared);
-        assert_eq!(segments[0].caption.as_deref(), Some("XM4"));
-        assert_eq!(segments[1].caption.as_deref(), Some("AB1"));
+        // Different first words win over the model tail.
+        assert_eq!(segments[0].caption.as_deref(), Some("WH"));
+        assert_eq!(segments[1].caption.as_deref(), Some("Pod"));
     }
 }

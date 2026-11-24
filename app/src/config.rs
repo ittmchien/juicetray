@@ -8,6 +8,7 @@ use toml::{Table, Value};
 use ui_model::{DisplayOptions, IconChoice, IconColor};
 
 use crate::interval::INTERVAL_SECONDS;
+use crate::log;
 
 /// Auto-refresh quick choices in seconds; any other value in `INTERVAL_SECONDS` is a custom one.
 pub const REFRESH_CHOICES: [Option<u32>; 6] =
@@ -161,18 +162,21 @@ impl Config {
 
     /// Unreadable or missing file means defaults.
     pub fn load() -> Self {
+        let _span = log::span("config load");
         path()
             .and_then(|path| fs::read_to_string(path).ok())
             .map_or_else(Self::default, |text| Self::parse(&text))
     }
 
     pub fn save(&self) -> Result<()> {
+        let _span = log::span("config save");
         let path = path().context("no config directory available")?;
         self.save_to(&path)
     }
 
     /// Adds a device the owner confirmed from the menu to `allow`, in memory and in the file.
     pub fn allow_and_save(&mut self, vid: u16, pid: u16) -> Result<()> {
+        let _span = log::span("config allow and save");
         let path = path().context("no config directory available")?;
         self.allow_and_save_to(&path, vid, pid)
     }

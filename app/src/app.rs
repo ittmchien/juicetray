@@ -22,14 +22,11 @@ use crate::refresh::{self, Command};
 use crate::svg_cache::SvgCache;
 #[cfg(windows)]
 use crate::taskbar::{self, TaskbarStrip};
-use crate::{dialog, instance, theme, ui_font};
+use crate::{dialog, instance, log, theme, ui_font};
 
 /// The tray icon reads at 22 pt; twice that gives sharp pixels on Retina bars.
 #[cfg(target_os = "macos")]
 const MAC_STRIP_HEIGHT_PX: u32 = 44;
-/// Square tray icon holding the weakest number.
-#[cfg(windows)]
-const WINDOWS_ICON_PX: u32 = 32;
 /// Longest tooltip the Windows tray accepts, in UTF-16 units.
 #[cfg(windows)]
 const WINDOWS_TOOLTIP_MAX_UTF16: usize = 127;
@@ -53,12 +50,31 @@ pub enum UserEvent {
     Taskbar(taskbar::Signal),
 }
 
+impl UserEvent {
+    /// The variant name, for the trace.
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Devices(_) => "Devices",
+            Self::Allowed(..) => "Allowed",
+            Self::Menu(_) => "Menu",
+            #[cfg(target_os = "macos")]
+            Self::ThemeChanged => "ThemeChanged",
+            #[cfg(windows)]
+            Self::Taskbar(taskbar::Signal::KeeperTick) => "Taskbar::KeeperTick",
+            #[cfg(windows)]
+            Self::Taskbar(taskbar::Signal::Click) => "Taskbar::Click",
+        }
+    }
+}
+
 /// Runs the event loop until Quit; never returns.
 pub fn run() -> ExitCode {
     if instance::another_instance_running() {
         eprintln!("juicetray is already running");
         return ExitCode::SUCCESS;
     }
+    // After the instance check, so a refused second copy never restarts the running one's log.
+    log::init();
 
     let event_loop = new_event_loop();
     let proxy = event_loop.create_proxy();
@@ -75,13 +91,17 @@ pub fn run() -> ExitCode {
         *control_flow = ControlFlow::Wait;
         match event {
             // The tray icon can only be created once the loop runs.
-            Event::NewEvents(StartCause::Init) => match App::new(proxy.clone()) {
-                Ok(created) => app = Some(created),
-                Err(error) => {
-                    eprintln!("start failed: {error:#}");
-                    *control_flow = ControlFlow::Exit;
+            Event::NewEvents(StartCause::Init) => {
+                let _span = log::span("App::new");
+                match App::new(proxy.clone()) {
+                    Ok(created) => app = Some(created),
+                    Err(error) => {
+                        eprintln!("start failed: {error:#}");
+                        log::line(&format!("start failed: {error:#}"));
+                        *control_flow = ControlFlow::Exit;
+                    }
                 }
-            },
+            }
             Event::UserEvent(event) => {
                 if let Some(app) = app.as_mut() {
                     *control_flow = app.handle(event);
@@ -142,9 +162,11 @@ impl App {
     fn new(proxy: EventLoopProxy<UserEvent>) -> anyhow::Result<Self> {
         let config = Config::load();
         let current_menu = menu::build_menu(&[]);
-        let tray = TrayIconBuilder::new()
-            .with_menu(Box::new(current_menu.clone()))
-            .build()?;
+        let builder = TrayIconBuilder::new().with_menu(Box::new(current_menu.clone()));
+        // Windows: the tray shows the app icon (resource 1); levels live on the strip.
+        #[cfg(windows)]
+        let builder = builder.with_icon(Icon::from_resource(1, None)?);
+        let tray = builder.build()?;
         #[cfg(windows)]
         let taskbar = new_taskbar_strip(proxy.clone());
         let worker = refresh::spawn_worker(proxy, config.refresh_seconds)?;
@@ -177,6 +199,7 @@ impl App {
 
     /// Handles one event and says whether the loop keeps running.
     fn handle(&mut self, event: UserEvent) -> ControlFlow {
+        let _span = log::span(format!("handle {}", event.name()));
         match event {
             UserEvent::Devices(devices) => self.on_devices(devices),
             // Config writes stay on this thread, so a check never races a settings save.
@@ -189,6 +212,7 @@ impl App {
                 // muda flips check items on click; a forced rebuild restores the config's ticks.
                 self.shown_entries.clear();
                 if let Some(action) = menu::action_for(event.id.as_ref()) {
+                    log::line(&format!("menu action {action:?}"));
                     if action == MenuAction::Quit {
                         #[cfg(windows)]
                         self.hide_taskbar();
@@ -214,6 +238,7 @@ impl App {
     }
 
     fn on_devices(&mut self, mut devices: Vec<DeviceView>) {
+        log::line(&format!("devices received {}", devices.len()));
         sort_weakest_first(&mut devices);
         // Every device is checked so its last reading stays current even while hidden.
         for device in &devices {
@@ -280,6 +305,7 @@ impl App {
             .refresh_seconds
             .map(format_interval)
             .unwrap_or_default();
+        let _span = log::span("dialog refresh prompt");
         if let Some(seconds) = dialog::prompt_parsed(
             REFRESH_PROMPT_TITLE,
             REFRESH_PROMPT,
@@ -296,6 +322,7 @@ impl App {
             IconColor::Rgb(red, green, blue) => format!("#{}", config::hex(red, green, blue)),
             IconColor::Auto | IconColor::Original => String::new(),
         };
+        let _span = log::span("dialog color prompt");
         if let Some(color) =
             dialog::prompt_parsed(COLOR_PROMPT_TITLE, COLOR_PROMPT, &current, parse_hex_color)
         {
@@ -305,7 +332,11 @@ impl App {
 
     /// Lets the owner pick an SVG file as the device's icon.
     fn pick_svg(&mut self, id: &str) {
-        let Some(path) = dialog::pick_svg() else {
+        let picked = {
+            let _span = log::span("dialog svg picker");
+            dialog::pick_svg()
+        };
+        let Some(path) = picked else {
             return;
         };
         let path = match path.into_os_string().into_string() {
@@ -347,6 +378,7 @@ impl App {
     }
 
     fn tell_worker(&self, command: Command) {
+        log::line("tell worker");
         if self.worker.send(command).is_err() {
             eprintln!("refresh worker has stopped");
         }
@@ -360,10 +392,12 @@ impl App {
 
     /// Pushes strip, tooltip and menu to the OS, each only when it differs from what is shown.
     fn apply(&mut self) {
+        let _span = log::span("apply");
         self.apply_strip();
 
         let tooltip = self.tooltip(SystemTime::now());
         if tooltip != self.shown_tooltip {
+            let _span = log::span("tooltip set");
             if let Err(error) = self.tray.set_tooltip(Some(&tooltip)) {
                 eprintln!("setting tooltip failed: {error}");
             }
@@ -372,6 +406,7 @@ impl App {
 
         let entries = self.entries(SystemTime::now());
         if entries != self.shown_entries {
+            let _span = log::span("menu rebuild");
             self.current_menu = menu::build_menu(&entries);
             self.tray
                 .set_menu(Some(Box::new(self.current_menu.clone())));
@@ -384,6 +419,7 @@ impl App {
 
     /// Re-reads the theme and rebuilds the tray icon when the strip or theme changed.
     fn apply_strip(&mut self) {
+        let _span = log::span("apply_strip");
         let theme = theme::current_theme(&self.tray);
         let devices = self.visible_devices();
         // Resolved up front: loading an SVG updates the cache, which the strip builder cannot.
@@ -410,6 +446,7 @@ impl App {
     }
 
     fn set_icon(&self, segments: &[Segment], theme: Theme) {
+        let _span = log::span("tray icon render and set");
         let Some(bitmap) = self.tray_bitmap(segments, theme) else {
             return;
         };
@@ -427,6 +464,7 @@ impl App {
 
     /// The menu, plus a permission hint when a bundled app reads no device at all.
     fn entries(&self, now: SystemTime) -> Vec<MenuEntry> {
+        let _span = log::span("menu entries");
         let mut entries =
             menu::menu_entries(&self.devices, &self.config, login::login_state(), now);
         if self.has_read && self.devices.is_empty() && instance::is_bundled() {
@@ -475,6 +513,7 @@ impl App {
     /// Re-reads the theme (which re-renders the tray icon too), then renders the taskbar strip
     /// again when it changed and re-docks the window.
     fn keep_taskbar(&mut self) {
+        let _span = log::span("keep_taskbar");
         self.apply_strip();
         self.sync_taskbar();
         self.keep_taskbar_windows();
@@ -519,6 +558,8 @@ impl App {
     fn show_menu_for_strip(&self) {
         use tray_icon::menu::ContextMenu;
 
+        // Modal: returns only when the menu closes.
+        let _span = log::span("context menu");
         // SAFETY: the tray icon's hidden top-level window stays valid as long as `self.tray`.
         let _ = unsafe {
             self.current_menu
@@ -543,6 +584,7 @@ fn render_taskbar_strip(
     height: u32,
     dpi: u32,
 ) -> Bitmap {
+    let _span = log::span(format!("render taskbar strip {height}px dpi {dpi}"));
     let text = texts
         .entry((dpi, height))
         .or_insert_with(|| ui_font::status_text(dpi, height));
@@ -587,11 +629,9 @@ impl App {
 
 #[cfg(windows)]
 impl App {
-    /// The Windows tray icon is one square with the weakest device's number.
-    fn tray_bitmap(&self, segments: &[Segment], theme: Theme) -> Option<Bitmap> {
-        segments
-            .first()
-            .map(|weakest| strip_render::render_square(weakest, WINDOWS_ICON_PX, theme))
+    /// The Windows tray keeps the app icon set at start; levels show on the taskbar strip.
+    fn tray_bitmap(&self, _segments: &[Segment], _theme: Theme) -> Option<Bitmap> {
+        None
     }
 }
 

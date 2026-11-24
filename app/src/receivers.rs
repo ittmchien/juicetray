@@ -13,6 +13,7 @@ use door::{Door, HidCollection, Inventory, SerialEntry};
 use protocol::{Decoded, Family, KNOWN, KnownDevice, Link, PickError, Reading, known};
 use ui_model::{DeviceKind, DeviceView, Level, Path};
 
+use crate::log;
 use crate::query::{
     ClaimError, TargetError, claim_query, floor_check, open_hid_target, open_serial_target,
     pick_hid, pick_port, wait_text,
@@ -67,7 +68,7 @@ pub fn read_receivers(
         .iter()
         .map(|device| (device.vid, device.pid))
         .collect();
-    let present = door::present(&ids);
+    let present = present_ids(&ids);
     let inventory = list_in_depth(&openable(&present, allow));
     let log_path = query_log::path();
     let log = load_log(log_path.as_deref());
@@ -142,7 +143,7 @@ fn with_check_note(mut row: DeviceView, outcome: Outcome, notes: &CheckNotes) ->
 /// only this device listed in depth. `None` for an id outside `KNOWN` or an unplugged device.
 pub fn check_receiver(id: &str, allow: &[(u16, u16)], now: SystemTime) -> Option<Checked> {
     let (device, allow) = check_scope(id, allow)?;
-    let present = door::present(&[(device.vid, device.pid)]);
+    let present = present_ids(&[(device.vid, device.pid)]);
     if present.is_empty() {
         return None;
     }
@@ -210,6 +211,12 @@ fn checked(
     }
 }
 
+/// `door::present`, traced: it lists HID and serial devices, which is slow while one unplugs.
+fn present_ids(ids: &[(u16, u16)]) -> Vec<(u16, u16)> {
+    let _span = log::span("door::present");
+    door::present(ids)
+}
+
 /// The present devices the gate lets through; only these are listed in depth and opened.
 fn openable(present: &[(u16, u16)], allow: &[(u16, u16)]) -> Vec<(u16, u16)> {
     present
@@ -222,7 +229,10 @@ fn openable(present: &[(u16, u16)], allow: &[(u16, u16)]) -> Vec<(u16, u16)> {
 /// The in-depth listing of `openable`. An empty filter would list every device, so with
 /// nothing openable no inventory is made.
 fn list_in_depth(openable: &[(u16, u16)]) -> Option<Inventory> {
-    let inventory = (!openable.is_empty()).then(|| door::inventory(openable))?;
+    let inventory = (!openable.is_empty()).then(|| {
+        let _span = log::span("door::inventory");
+        door::inventory(openable)
+    })?;
     for error in &inventory.errors {
         eprintln!("receivers: {error}");
     }
@@ -230,6 +240,7 @@ fn list_in_depth(openable: &[(u16, u16)]) -> Option<Inventory> {
 }
 
 fn load_log(log_path: Option<&FsPath>) -> QueryLog {
+    let _span = log::span("query log load");
     log_path.map(QueryLog::load_from).unwrap_or_default()
 }
 
@@ -242,6 +253,10 @@ fn attempt(
     door: &mut Door,
     now: SystemTime,
 ) -> Outcome {
+    let _span = log::span(format!(
+        "device {:04X}:{:04X} attempt",
+        device.vid, device.pid
+    ));
     let gate_result = gate(device, allow);
     let pick = match inventory {
         Some(inv) if gate_result.is_ok() => {
@@ -339,9 +354,12 @@ fn query(
     log_path: Option<&FsPath>,
 ) -> Outcome {
     let (vid, pid, family) = (device.vid, device.pid, device.family);
-    let opened = match family.link() {
-        Link::Hid => open_hid_target(inventory, family, vid, pid),
-        Link::Serial => open_serial_target(inventory, vid, pid),
+    let opened = {
+        let _span = log::span(format!("device {vid:04X}:{pid:04X} open"));
+        match family.link() {
+            Link::Hid => open_hid_target(inventory, family, vid, pid),
+            Link::Serial => open_serial_target(inventory, vid, pid),
+        }
     };
     let mut target = match opened {
         Ok((target, _)) => target,
@@ -350,9 +368,12 @@ fn query(
             return target_outcome(&error);
         }
     };
-    let claimed = match log_path {
-        Some(path) => claim_query(path, family, vid, pid, SystemTime::now()),
-        None => Err(ClaimError::Record("no data directory".to_owned())),
+    let claimed = {
+        let _span = log::span(format!("device {vid:04X}:{pid:04X} claim"));
+        match log_path {
+            Some(path) => claim_query(path, family, vid, pid, SystemTime::now()),
+            None => Err(ClaimError::Record("no data directory".to_owned())),
+        }
     };
     match claimed {
         Ok(()) => {}
@@ -363,7 +384,11 @@ fn query(
         Err(ClaimError::Wait(_) | ClaimError::ClockBack) => return Outcome::Waiting,
     }
 
-    let exchange = match door.send(&mut target) {
+    let sent = {
+        let _span = log::span(format!("device {vid:04X}:{pid:04X} send and decode"));
+        door.send(&mut target)
+    };
+    let exchange = match sent {
         Ok(exchange) => exchange,
         Err(error) => {
             eprintln!("receiver {vid:04X}:{pid:04X}: {error:#}");
@@ -380,10 +405,13 @@ fn query(
         Some((_, Decoded::NotTheReply | Decoded::Online(_))) => Outcome::Invalid("not the reply"),
     };
     if let (Outcome::Reading(reading, _), Some(path)) = (outcome, log_path) {
-        let recorded = QueryLog::update(path, |log| {
-            log.record_reading(vid, pid, reading, read_at);
-            Ok::<_, anyhow::Error>(())
-        });
+        let recorded = {
+            let _span = log::span(format!("device {vid:04X}:{pid:04X} record reading"));
+            QueryLog::update(path, |log| {
+                log.record_reading(vid, pid, reading, read_at);
+                Ok::<_, anyhow::Error>(())
+            })
+        };
         if let Err(error) = recorded {
             eprintln!(
                 "receiver {vid:04X}:{pid:04X}: could not record the reading ({})",
@@ -755,7 +783,7 @@ mod tests {
             row,
             DeviceView {
                 id: "usb-3837-6011".into(),
-                name: "MCHOSE V9 Pro 2 (dongle)".into(),
+                name: "MCHOSE V9 Pro 2".into(),
                 kind: DeviceKind::Headset,
                 path: Path::Dongle,
                 level: Level::Percent(92),

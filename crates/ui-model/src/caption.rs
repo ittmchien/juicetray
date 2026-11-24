@@ -3,25 +3,40 @@ pub fn captions(names: &[&str]) -> Vec<Option<String>> {
     if names.len() < 2 {
         return vec![None; names.len()];
     }
-    let suffixes: Vec<String> = names.iter().map(|name| name_suffix(name)).collect();
-    let distinct = suffixes
-        .iter()
-        .enumerate()
-        .all(|(i, suffix)| !suffix.is_empty() && !suffixes[..i].contains(suffix));
-    if distinct {
-        return suffixes.into_iter().map(Some).collect();
+    // Brand first ("ATK" / "VGN"), then the model tail ("XM4" / "XM5"), then numbers.
+    for label in [name_prefix, name_suffix] {
+        let labels: Vec<String> = names.iter().map(|name| label(name)).collect();
+        let distinct = labels
+            .iter()
+            .enumerate()
+            .all(|(i, label)| !label.is_empty() && !labels[..i].contains(label));
+        if distinct {
+            return labels.into_iter().map(Some).collect();
+        }
     }
     (1..=names.len())
         .map(|index| Some(index.to_string()))
         .collect()
 }
 
+fn tokens(name: &str) -> impl DoubleEndedIterator<Item = &str> {
+    name.split(|c: char| c.is_whitespace() || c == '-')
+        .filter(|token| !token.is_empty())
+}
+
+/// First three characters of the first token (usually the brand).
+fn name_prefix(name: &str) -> String {
+    tokens(name)
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(3)
+        .collect()
+}
+
 /// Last three characters of the last whitespace/hyphen separated token.
 fn name_suffix(name: &str) -> String {
-    let token = name
-        .split(|c: char| c.is_whitespace() || c == '-')
-        .rfind(|token| !token.is_empty())
-        .unwrap_or_default();
+    let token = tokens(name).next_back().unwrap_or_default();
     let tail: Vec<char> = token.chars().rev().take(3).collect();
     tail.into_iter().rev().collect()
 }
@@ -41,5 +56,13 @@ mod tests {
             [Some("1".to_owned()), Some("2".to_owned())]
         );
         assert_eq!(captions(&["Pods"]), [None]);
+        assert_eq!(
+            captions(&["ATK X1 SE", "VGN Dragonfly 3 Master+"]),
+            [Some("ATK".to_owned()), Some("VGN".to_owned())]
+        );
+        assert_eq!(
+            captions(&["ATK X1 SE", "ATK A9 Ultra"]),
+            [Some("SE".to_owned()), Some("tra".to_owned())]
+        );
     }
 }
