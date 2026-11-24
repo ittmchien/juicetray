@@ -2,6 +2,7 @@
 
 use std::fs::File;
 use std::path::Path as FsPath;
+#[cfg(feature = "embedded-font")]
 use std::sync::LazyLock;
 
 use ab_glyph::{Font, FontRef, GlyphId, OutlineCurve, Point};
@@ -13,6 +14,7 @@ const FALLBACK_TEXT_SIZE: f32 = 0.58;
 /// Fallback only; TrueType fonts always declare their units per em.
 const DEFAULT_UNITS_PER_EM: f32 = 1000.0;
 
+#[cfg(feature = "embedded-font")]
 static EMBEDDED_FONT: LazyLock<FontRef<'static>> = LazyLock::new(|| {
     FontRef::try_from_slice(include_bytes!("../assets/Inter-Medium.ttf"))
         .expect("embedded Inter font is valid")
@@ -21,10 +23,13 @@ static EMBEDDED_FONT: LazyLock<FontRef<'static>> = LazyLock::new(|| {
 /// Where the number's font comes from.
 #[derive(Debug)]
 pub enum FontData {
-    /// Inter Medium, compiled in.
+    /// Inter Medium, compiled in (feature `embedded-font`).
+    #[cfg(feature = "embedded-font")]
     Embedded,
     /// A read-only memory-mapped system font file, already checked to parse.
     Mapped(Mmap),
+    /// No usable font: numbers and captions are left out, icons and gauges still draw.
+    Missing,
 }
 
 /// Font and size of the strip's numbers and captions.
@@ -36,21 +41,42 @@ pub struct TextStyle {
 }
 
 impl TextStyle {
-    /// Embedded Inter Medium at 0.58 × the bitmap height.
+    /// The number size used when the OS gives none: 0.58 × the bitmap height.
+    pub fn default_size_px(height_px: u32) -> f32 {
+        FALLBACK_TEXT_SIZE * height_px as f32
+    }
+
+    /// Embedded Inter Medium at the default size.
+    #[cfg(feature = "embedded-font")]
     pub fn fallback(height_px: u32) -> Self {
         Self {
             font: FontData::Embedded,
-            size_px: FALLBACK_TEXT_SIZE * height_px as f32,
+            size_px: Self::default_size_px(height_px),
         }
     }
 
-    /// Memory-maps the font at `path` at `size_px`; a missing or unparsable file gives `fallback`.
+    /// A style without a font; the strip draws no text.
+    pub fn without_font(size_px: f32) -> Self {
+        Self {
+            font: FontData::Missing,
+            size_px,
+        }
+    }
+
+    /// Memory-maps the font at `path` at `size_px`; the reason when the file is missing or
+    /// unparsable.
+    pub fn try_from_font_file(path: &FsPath, size_px: f32) -> Result<Self, String> {
+        map_font(path).map(|map| Self {
+            font: FontData::Mapped(map),
+            size_px,
+        })
+    }
+
+    /// `try_from_font_file`; a missing or unparsable file gives `fallback`.
+    #[cfg(feature = "embedded-font")]
     pub fn from_font_file(path: &FsPath, size_px: f32, height_px: u32) -> Self {
-        match map_font(path) {
-            Ok(map) => Self {
-                font: FontData::Mapped(map),
-                size_px,
-            },
+        match Self::try_from_font_file(path, size_px) {
+            Ok(style) => style,
             Err(reason) => {
                 eprintln!(
                     "font {} unusable ({reason}); using embedded Inter",
@@ -61,16 +87,20 @@ impl TextStyle {
         }
     }
 
-    pub(crate) fn font_ref(&self) -> FontRef<'_> {
+    /// The parsed font, `None` for a style without one.
+    pub(crate) fn font_ref(&self) -> Option<FontRef<'_>> {
         match &self.font {
-            FontData::Embedded => embedded_font(),
-            FontData::Mapped(map) => {
-                FontRef::try_from_slice(map).expect("mapped font was checked when it was opened")
-            }
+            #[cfg(feature = "embedded-font")]
+            FontData::Embedded => Some(embedded_font()),
+            FontData::Mapped(map) => Some(
+                FontRef::try_from_slice(map).expect("mapped font was checked when it was opened"),
+            ),
+            FontData::Missing => None,
         }
     }
 }
 
+#[cfg(feature = "embedded-font")]
 pub(crate) fn embedded_font() -> FontRef<'static> {
     EMBEDDED_FONT.clone()
 }

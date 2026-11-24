@@ -1,23 +1,10 @@
-//! The OS UI font and size for the strip's number; anything unusable gives the embedded Inter.
-
-use std::path::Path;
-
-use strip_render::TextStyle;
+//! The OS UI font and size for the strip's number. macOS falls back to the embedded Inter;
+//! Windows falls back to another system font file, so Inter is not compiled in there.
 
 #[cfg(target_os = "macos")]
 pub use mac::menu_bar_text;
 #[cfg(windows)]
 pub use win::status_text;
-
-/// Maps `font_file` at `size_px`; a size that is not a positive number gives the fallback.
-fn text_style(font_file: &Path, size_px: f32, height_px: u32) -> TextStyle {
-    if size_px.is_finite() && size_px > 0.0 {
-        TextStyle::from_font_file(font_file, size_px, height_px)
-    } else {
-        eprintln!("OS font size {size_px} unusable; using embedded Inter");
-        TextStyle::fallback(height_px)
-    }
-}
 
 #[cfg(target_os = "macos")]
 mod mac {
@@ -25,6 +12,16 @@ mod mac {
 
     use objc2_app_kit::NSFont;
     use strip_render::TextStyle;
+
+    /// Maps `font_file` at `size_px`; a size that is not a positive number gives the fallback.
+    pub(super) fn text_style(font_file: &Path, size_px: f32, height_px: u32) -> TextStyle {
+        if size_px.is_finite() && size_px > 0.0 {
+            TextStyle::from_font_file(font_file, size_px, height_px)
+        } else {
+            eprintln!("OS font size {size_px} unusable; using embedded Inter");
+            TextStyle::fallback(height_px)
+        }
+    }
 
     /// SF Pro, the menu bar's system font, read at its default instance.
     const SYSTEM_FONT_FILE: &str = "/System/Library/Fonts/SFNS.ttf";
@@ -36,7 +33,7 @@ mod mac {
         // Size 0 asks for the menu bar's default size.
         let points = NSFont::menuBarFontOfSize(0.0).pointSize() as f32;
         let size_px = points * height_px as f32 / MENU_BAR_POINTS;
-        super::text_style(Path::new(SYSTEM_FONT_FILE), size_px, height_px)
+        text_style(Path::new(SYSTEM_FONT_FILE), size_px, height_px)
     }
 }
 
@@ -52,20 +49,35 @@ mod win {
     const VARIABLE_FACE_PREFIX: &str = "Segoe UI Variable";
     const VARIABLE_FONT_FILE: &str = "SegUIVar.ttf";
     const CLASSIC_FONT_FILE: &str = "segoeui.ttf";
+    /// Tried in order after the status-bar face's own file.
+    const FALLBACK_FONT_FILES: [&str; 3] = [CLASSIC_FONT_FILE, "arial.ttf", "tahoma.ttf"];
     const DEFAULT_WINDOWS_DIR: &str = r"C:\Windows";
 
-    /// The status-bar font (`lfStatusFont`) at `dpi`: `|lfHeight|` pixels per em.
+    /// The status-bar font (`lfStatusFont`) at `dpi`: `|lfHeight|` pixels per em. A font or size
+    /// that cannot be used falls back to the next system font file; with none the strip has no text.
     pub fn status_text(dpi: u32, height_px: u32) -> TextStyle {
-        match status_font(dpi) {
-            Ok((face, size_px)) => {
-                let file = fonts_dir().join(font_file_for_face(&face));
-                super::text_style(&file, size_px, height_px)
+        let (face, size_px) = match status_font(dpi) {
+            Ok((face, size)) if size.is_finite() && size > 0.0 => (Some(face), size),
+            unusable => {
+                eprintln!("status bar font unusable ({unusable:?}); using a system font");
+                (None, TextStyle::default_size_px(height_px))
             }
-            Err(error) => {
-                eprintln!("reading the status bar font failed: {error}; using embedded Inter");
-                TextStyle::fallback(height_px)
+        };
+        let fonts = fonts_dir();
+        let preferred = face.as_deref().map(font_file_for_face);
+        for file in font_candidates(preferred) {
+            match TextStyle::try_from_font_file(&fonts.join(file), size_px) {
+                Ok(style) => return style,
+                Err(reason) => eprintln!("font {file} unusable ({reason})"),
             }
         }
+        eprintln!("no system font usable; the strip draws no text");
+        TextStyle::without_font(size_px)
+    }
+
+    /// Font files to try, best first: the status-bar face's own, then the fixed fallbacks.
+    fn font_candidates(preferred: Option<&'static str>) -> Vec<&'static str> {
+        preferred.into_iter().chain(FALLBACK_FONT_FILES).collect()
     }
 
     /// Face name and pixel size of the status-bar font at `dpi`.
@@ -120,14 +132,28 @@ mod win {
             assert_eq!(font_file_for_face("Segoe UI"), "segoeui.ttf");
             assert_eq!(font_file_for_face("Tahoma"), "segoeui.ttf");
         }
+
+        #[test]
+        fn candidates_start_with_the_face_file() {
+            assert_eq!(
+                font_candidates(Some("SegUIVar.ttf")),
+                ["SegUIVar.ttf", "segoeui.ttf", "arial.ttf", "tahoma.ttf"]
+            );
+            assert_eq!(
+                font_candidates(None),
+                ["segoeui.ttf", "arial.ttf", "tahoma.ttf"]
+            );
+        }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use strip_render::FontData;
+    use std::path::Path;
 
-    use super::*;
+    use strip_render::{FontData, TextStyle};
+
+    use super::mac::text_style;
 
     #[test]
     fn bad_size_gives_fallback() {

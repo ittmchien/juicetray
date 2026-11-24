@@ -122,5 +122,5 @@ Protocol notes from M-HUB-linux-port (MCHOSE V9 Pro 2), the OpenMouse device cat
 copied.
 
 Device icons: [Material Symbols](https://github.com/google/material-design-icons) by Google
-([Apache-2.0](crates/strip-render/assets/icons/LICENSE)). Numbers: [Inter](https://rsms.me/inter/)
+([Apache-2.0](crates/strip-render/assets/icons/LICENSE)). Numbers on macOS (fallback font; Windows uses its own system fonts): [Inter](https://rsms.me/inter/)
 ([OFL-1.1](crates/strip-render/assets/OFL.txt)).

@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use ab_glyph::FontRef;
 use gauge::{Gauge, gauge};
 use svg::builtin_icon;
-use text::{Run, digit_height, embedded_font, layout_text};
+#[cfg(feature = "embedded-font")]
+use text::embedded_font;
+use text::{Run, digit_height, layout_text};
 use tiny_skia::{
     Color, FillRule, Mask, MaskType, Paint, Path, Pixmap, PixmapPaint, Stroke, Transform,
 };
@@ -29,8 +31,10 @@ const EDGE_PADDING: f32 = 0.25;
 /// Largest number size, so a huge OS font size never overflows the strip.
 const MAX_TEXT_SIZE: f32 = 0.75;
 /// Number size of the square tray icon.
+#[cfg(feature = "embedded-font")]
 const SQUARE_TEXT_SIZE: f32 = 0.78;
 /// Share of a square icon the number may fill horizontally.
+#[cfg(feature = "embedded-font")]
 const SQUARE_TEXT_FILL: f32 = 0.9;
 
 /// Opacity of the ink for dimmed and placeholder segments.
@@ -71,7 +75,8 @@ struct Scene<'a> {
     height: f32,
     theme: Theme,
     svgs: &'a HashMap<String, SvgIcon>,
-    font: FontRef<'a>,
+    /// `None` draws no text.
+    font: Option<FontRef<'a>>,
     text_px: f32,
 }
 
@@ -120,6 +125,7 @@ pub fn render_strip(
 }
 
 /// Only the number (the gauge's level, no `%`, no icon), shrunk to fit and tinted by the segment style.
+#[cfg(feature = "embedded-font")]
 pub fn render_square(segment: &Segment, size_px: u32, theme: Theme) -> Bitmap {
     let Some(mut canvas) = Canvas::new(size_px, size_px) else {
         return Bitmap::empty();
@@ -165,12 +171,16 @@ struct SegmentLayout {
 impl SegmentLayout {
     fn new(segment: &Segment, scene: &Scene) -> Self {
         let height = scene.height;
-        let caption = segment
-            .caption
-            .as_deref()
-            .map(|caption| layout_text(&scene.font, caption, CAPTION_SIZE * height));
-        let number = (!segment.text.is_empty())
-            .then(|| layout_text(&scene.font, &segment.text, scene.text_px));
+        let caption = scene
+            .font
+            .as_ref()
+            .zip(segment.caption.as_deref())
+            .map(|(font, caption)| layout_text(font, caption, CAPTION_SIZE * height));
+        let number = scene
+            .font
+            .as_ref()
+            .filter(|_| !segment.text.is_empty())
+            .map(|font| layout_text(font, &segment.text, scene.text_px));
 
         let mut width = ICON_SIZE * height;
         if let Some(caption) = &caption {
@@ -233,9 +243,9 @@ fn draw_segment(
     }
 
     // The number's digits are centred vertically on the gauge.
-    if let Some(number) = &layout.number {
+    if let (Some(number), Some(font)) = (&layout.number, &scene.font) {
         cursor += PART_GAP * height;
-        let baseline = height / 2.0 + digit_height(&scene.font, scene.text_px) / 2.0;
+        let baseline = height / 2.0 + digit_height(font, scene.text_px) / 2.0;
         if let Some(path) = &number.path {
             canvas.fill(
                 path,
@@ -956,6 +966,27 @@ mod tests {
         let drawn = (last - first + 1) as f32;
         assert!(drawn <= limit + 2.0, "{drawn} vs {limit}");
         assert!(first > 0 && last < TEST_HEIGHT - 1, "{first}..{last}");
+    }
+
+    #[test]
+    fn style_without_font_draws_the_icon_but_no_text() {
+        let captioned = Segment {
+            caption: Some("A".to_owned()),
+            ..segment(SegmentStyle::Normal)
+        };
+        let render = |text: &TextStyle| {
+            render_strip(
+                std::slice::from_ref(&captioned),
+                TEST_HEIGHT,
+                Theme::Light,
+                &HashMap::new(),
+                text,
+            )
+        };
+        let with_text = render(&TextStyle::fallback(TEST_HEIGHT));
+        let without_text = render(&TextStyle::without_font(26.0));
+        assert!(without_text.width < with_text.width);
+        assert!(without_text.pixels().iter().any(|p| p[3] > 0));
     }
 
     #[test]

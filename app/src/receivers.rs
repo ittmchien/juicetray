@@ -72,9 +72,16 @@ pub fn read_receivers(
         .collect();
     let listing = list_devices();
     let present = listing.present(&ids);
-    let inventory = list_in_depth(listing, &openable(&present, allow));
     let log_path = query_log::path();
     let log = load_log(log_path.as_deref());
+    let openable = openable(&present, allow);
+    // Every openable device would only show its stored reading as waiting: no descriptor reads.
+    let inventory = if only_waiting(&openable, &log, now) {
+        log::trace(format_args!("inventory skipped: all openable devices wait"));
+        None
+    } else {
+        list_in_depth(listing, &openable)
+    };
     let mut door = Door::new(READ_BUDGET);
 
     let outcomes: Vec<(&KnownDevice, Outcome)> = KNOWN
@@ -251,6 +258,23 @@ fn list_in_depth(listing: Listing, openable: &[(u16, u16)]) -> Option<Inventory>
     }
     let _span = log::span("door::inventory");
     Some(listing.into_inventory(openable))
+}
+
+/// Whether every device in `openable` is inside its query floor with a stored reading, so the
+/// cycle shows each as waiting and needs no descriptor. A future stamp is not a wait (the claim
+/// handles it), so it forces the full listing.
+// shortcut: a channel that vanished inside the floor shows the stored reading, not "unsupported",
+// until the floor ends and the next cycle lists in depth.
+fn only_waiting(openable: &[(u16, u16)], log: &QueryLog, now: SystemTime) -> bool {
+    openable.iter().all(|&(vid, pid)| {
+        known(vid, pid).is_some_and(|device| {
+            log.reading(vid, pid).is_some()
+                && matches!(
+                    floor_check(log, device.family, vid, pid, now),
+                    Err(ClaimError::Wait(_))
+                )
+        })
+    })
 }
 
 fn load_log(log_path: Option<&FsPath>) -> QueryLog {
@@ -672,6 +696,38 @@ mod tests {
             charging,
             asleep,
         }
+    }
+
+    #[test]
+    fn only_waiting_needs_a_floor_wait_and_a_stored_reading_for_every_device() {
+        let (mchose, n9) = ((0x3837, 0x6011), (0x373B, 0x1204));
+        let family = device(mchose.0, mchose.1).family;
+        let floor = family.query_floor().as_secs();
+        let mut log = QueryLog::default();
+
+        // Nothing openable: nothing to list either way.
+        assert!(only_waiting(&[], &log, at(NOW)));
+        // No stamp or reading yet: the device must be queried.
+        assert!(!only_waiting(&[mchose], &log, at(NOW)));
+
+        // Stamped inside the floor, but no stored reading: no stored level to show, list in depth.
+        log.stamp(mchose.0, mchose.1, at(NOW - 1));
+        assert!(!only_waiting(&[mchose], &log, at(NOW)));
+
+        log.record_reading(mchose.0, mchose.1, reading(80, false, false), at(NOW - 1));
+        assert!(only_waiting(&[mchose], &log, at(NOW)));
+        // The floor is over: a query is due.
+        assert!(!only_waiting(&[mchose], &log, at(NOW + floor)));
+        // A future stamp (clock moved back) goes through the claim, not the wait.
+        assert!(!only_waiting(&[mchose], &log, at(NOW - 10)));
+
+        // One device that is due keeps the whole listing.
+        log.stamp(n9.0, n9.1, at(NOW - 1));
+        log.record_reading(n9.0, n9.1, reading(50, false, false), at(NOW - 1));
+        assert!(only_waiting(&[mchose, n9], &log, at(NOW)));
+        assert!(!only_waiting(&[mchose, (0x3554, 0xFA09)], &log, at(NOW)));
+        // An id outside the catalogue is never skipped.
+        assert!(!only_waiting(&[(0x1234, 0x5678)], &log, at(NOW)));
     }
 
     #[test]

@@ -44,6 +44,32 @@ struct Container {
     connected: bool,
 }
 
+/// What one device node reports besides its container id and battery.
+struct NodeProps {
+    class_of_device: Option<u32>,
+    name: Option<String>,
+    connected: bool,
+}
+
+impl Container {
+    /// Folds one node into the container.
+    fn merge(&mut self, node: NodeProps) {
+        let is_main_node = node.class_of_device.is_some();
+        self.class_of_device = self.class_of_device.or(node.class_of_device);
+
+        // A main-node name replaces one taken from a service node; otherwise the first name stays.
+        if node.name.is_some()
+            && (self.name.is_none() || (is_main_node && !self.name_from_main_node))
+        {
+            self.name = node.name;
+            self.name_from_main_node = is_main_node;
+        }
+
+        // A headset's battery node can report disconnected while audio flows, so any node counts.
+        self.connected |= node.connected;
+    }
+}
+
 pub fn read_devices() -> anyhow::Result<Vec<DeviceView>> {
     // SAFETY: no class filter, enumerator or parent window; the list is freed by `Owned`.
     let set = unsafe {
@@ -55,8 +81,10 @@ pub fn read_devices() -> anyhow::Result<Vec<DeviceView>> {
         )?)
     };
 
-    // Keyed by container id: one physical device shows up as several device nodes.
-    let mut containers: BTreeMap<u128, Container> = BTreeMap::new();
+    // First pass reads two cheap keys per node: the container id (one physical device shows up as
+    // several nodes) and the battery. Only containers with a stored battery are ever listed.
+    let mut nodes: Vec<(u128, SP_DEVINFO_DATA)> = Vec::new();
+    let mut batteries: BTreeMap<u128, u8> = BTreeMap::new();
     let mut node = SP_DEVINFO_DATA {
         cbSize: size_of::<SP_DEVINFO_DATA>() as u32,
         ..Default::default()
@@ -69,7 +97,38 @@ pub fn read_devices() -> anyhow::Result<Vec<DeviceView>> {
             }
             return Err(error.into());
         }
-        merge_node(&mut containers, *set, &node);
+        // Nodes that sit in no container are ignored.
+        let Some(id) =
+            fixed_property::<16>(*set, &node, &DEVPKEY_Device_ContainerId, DEVPROP_TYPE_GUID)
+                .map(u128::from_le_bytes)
+                .filter(|&id| id != 0)
+        else {
+            continue;
+        };
+        if let Some(percent) =
+            fixed_property::<1>(*set, &node, &DEVPKEY_BLUETOOTH_BATTERY, DEVPROP_TYPE_BYTE)
+                .and_then(|[raw]| normalize(i64::from(raw)))
+        {
+            batteries.entry(id).or_insert(percent);
+        }
+        nodes.push((id, node));
+    }
+
+    // Second pass: the remaining keys, read only for nodes of listed containers.
+    let mut containers: BTreeMap<u128, Container> = batteries
+        .into_iter()
+        .map(|(id, percent)| {
+            let container = Container {
+                battery: Some(percent),
+                ..Default::default()
+            };
+            (id, container)
+        })
+        .collect();
+    for (id, node) in &nodes {
+        if let Some(container) = containers.get_mut(id) {
+            container.merge(read_node_props(*set, node));
+        }
     }
 
     let now = SystemTime::now();
@@ -79,49 +138,26 @@ pub fn read_devices() -> anyhow::Result<Vec<DeviceView>> {
         .collect())
 }
 
-/// Folds one device node into its container, ignoring nodes that sit in no container.
-fn merge_node(containers: &mut BTreeMap<u128, Container>, set: HDEVINFO, node: &SP_DEVINFO_DATA) {
-    let Some(id) = property(set, node, &DEVPKEY_Device_ContainerId, DEVPROP_TYPE_GUID)
-        .and_then(|bytes| Some(u128::from_le_bytes(bytes.get(..16)?.try_into().ok()?)))
-        .filter(|&id| id != 0)
-    else {
-        return;
-    };
-    let container = containers.entry(id).or_default();
-
-    let class_of_device = property(
-        set,
-        node,
-        &DEVPKEY_Bluetooth_ClassOfDevice,
-        DEVPROP_TYPE_UINT32,
-    )
-    .and_then(|bytes| Some(u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?)));
-    let is_main_node = class_of_device.is_some();
-    container.class_of_device = container.class_of_device.or(class_of_device);
-
-    // A main-node name replaces one taken from a service node; otherwise the first name stays.
-    let name = string_property(set, node, &DEVPKEY_Device_FriendlyName)
-        .or_else(|| string_property(set, node, &DEVPKEY_Device_DeviceDesc));
-    if name.is_some()
-        && (container.name.is_none() || (is_main_node && !container.name_from_main_node))
-    {
-        container.name = name;
-        container.name_from_main_node = is_main_node;
+/// The class of device, name and connection flag of one node.
+fn read_node_props(set: HDEVINFO, node: &SP_DEVINFO_DATA) -> NodeProps {
+    NodeProps {
+        class_of_device: fixed_property::<4>(
+            set,
+            node,
+            &DEVPKEY_Bluetooth_ClassOfDevice,
+            DEVPROP_TYPE_UINT32,
+        )
+        .map(u32::from_le_bytes),
+        name: string_property(set, node, &DEVPKEY_Device_FriendlyName)
+            .or_else(|| string_property(set, node, &DEVPKEY_Device_DeviceDesc)),
+        connected: fixed_property::<1>(
+            set,
+            node,
+            &DEVPKEY_BLUETOOTH_IS_CONNECTED,
+            DEVPROP_TYPE_BOOLEAN,
+        )
+        .is_some_and(|[flag]| flag != 0),
     }
-
-    let battery = property(set, node, &DEVPKEY_BLUETOOTH_BATTERY, DEVPROP_TYPE_BYTE)
-        .and_then(|bytes| normalize(i64::from(*bytes.first()?)));
-    container.battery = container.battery.or(battery);
-
-    // A headset's battery node can report disconnected while audio flows, so any node counts.
-    let connected = property(
-        set,
-        node,
-        &DEVPKEY_BLUETOOTH_IS_CONNECTED,
-        DEVPROP_TYPE_BOOLEAN,
-    )
-    .is_some_and(|bytes| bytes.first().is_some_and(|&flag| flag != 0));
-    container.connected |= connected;
 }
 
 /// A device is listed only when the OS stores a battery value for its container.
@@ -145,14 +181,14 @@ fn view(id: u128, container: Container, now: SystemTime) -> Option<DeviceView> {
     })
 }
 
-/// Raw bytes of a device property, only when it exists with the expected type.
-fn property(
+/// Reads a device property into `buffer`; the bytes written, only when it has the expected type.
+fn read_property<'a>(
     set: HDEVINFO,
     node: &SP_DEVINFO_DATA,
     key: &DEVPROPKEY,
     expected: DEVPROPTYPE,
-) -> Option<Vec<u8>> {
-    let mut buffer = [0u8; PROPERTY_BUFFER_BYTES];
+    buffer: &'a mut [u8],
+) -> Option<&'a [u8]> {
     let mut property_type = DEVPROPTYPE::default();
     let mut size = 0u32;
     // SAFETY: `node` belongs to `set`; the buffer and out-pointers outlive the call.
@@ -162,7 +198,7 @@ fn property(
             node,
             key,
             &mut property_type,
-            Some(&mut buffer),
+            Some(&mut *buffer),
             Some(&mut size),
             0,
         )
@@ -171,12 +207,26 @@ fn property(
     if property_type != expected {
         return None;
     }
-    buffer.get(..size as usize).map(<[u8]>::to_vec)
+    buffer.get(..size as usize)
+}
+
+/// A property of exactly `N` bytes, read without an allocation.
+fn fixed_property<const N: usize>(
+    set: HDEVINFO,
+    node: &SP_DEVINFO_DATA,
+    key: &DEVPROPKEY,
+    expected: DEVPROPTYPE,
+) -> Option<[u8; N]> {
+    let mut buffer = [0u8; N];
+    read_property(set, node, key, expected, &mut buffer)?
+        .try_into()
+        .ok()
 }
 
 /// A UTF-16 string property, cut at the first NUL.
 fn string_property(set: HDEVINFO, node: &SP_DEVINFO_DATA, key: &DEVPROPKEY) -> Option<String> {
-    let bytes = property(set, node, key, DEVPROP_TYPE_STRING)?;
+    let mut buffer = [0u8; PROPERTY_BUFFER_BYTES];
+    let bytes = read_property(set, node, key, DEVPROP_TYPE_STRING, &mut buffer)?;
     let units: Vec<u16> = bytes
         .as_chunks::<2>()
         .0
@@ -185,4 +235,44 @@ fn string_property(set: HDEVINFO, node: &SP_DEVINFO_DATA, key: &DEVPROPKEY) -> O
         .take_while(|&unit| unit != 0)
         .collect();
     Some(String::from_utf16_lossy(&units)).filter(|text| !text.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn props(class_of_device: Option<u32>, name: Option<&str>, connected: bool) -> NodeProps {
+        NodeProps {
+            class_of_device,
+            name: name.map(str::to_owned),
+            connected,
+        }
+    }
+
+    #[test]
+    fn main_node_name_replaces_service_node_name() {
+        let mut container = Container::default();
+        container.merge(props(None, Some("Service"), false));
+        container.merge(props(Some(0x2580), Some("Main"), false));
+        container.merge(props(None, Some("Later service"), false));
+        assert_eq!(container.name.as_deref(), Some("Main"));
+        assert_eq!(container.class_of_device, Some(0x2580));
+    }
+
+    #[test]
+    fn first_name_stays_without_a_main_node() {
+        let mut container = Container::default();
+        container.merge(props(None, Some("First"), false));
+        container.merge(props(None, Some("Second"), false));
+        assert_eq!(container.name.as_deref(), Some("First"));
+    }
+
+    #[test]
+    fn any_connected_node_connects_the_container() {
+        let mut container = Container::default();
+        container.merge(props(None, None, false));
+        container.merge(props(None, None, true));
+        container.merge(props(None, None, false));
+        assert!(container.connected);
+    }
 }

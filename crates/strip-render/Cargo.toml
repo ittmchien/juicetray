@@ -7,6 +7,16 @@ license = "GPL-3.0-or-later"
 [lib]
 name = "strip_render"
 
+[features]
+# Inter Medium compiled in as the fallback font (about 400 KB); the Windows app turns it off and
+# falls back to a system font file instead.
+default = ["embedded-font"]
+embedded-font = []
+
+[[example]]
+name = "preview"
+required-features = ["embedded-font"]
+
 [dependencies]
 juicetray-ui-model = { path = "../ui-model" }
 anyhow = "1"
