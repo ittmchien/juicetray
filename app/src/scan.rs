@@ -33,7 +33,7 @@ pub fn usb_report(
     if hid.is_empty() && serial.is_empty() {
         lines.push("No USB HID devices or serial ports found".to_owned());
     } else {
-        lines.push("Reports: in/out/feat <report id>:<bytes incl. id byte>".to_owned());
+        lines.push(REPORTS_LEGEND.to_owned());
         let mut groups: BTreeMap<(u16, u16), Group> = BTreeMap::new();
         for collection in hid {
             groups
@@ -56,6 +56,31 @@ pub fn usb_report(
     lines.extend(errors.iter().map(|text| format!("error: {text}")));
     lines.join("\n")
 }
+
+/// One VID:PID's part of `usb_report`, with the report-size legend first: what an Add device
+/// report lists, read from the same enumeration (descriptors only, nothing sent).
+#[cfg(any(windows, test))]
+pub(crate) fn device_lines(
+    vid: u16,
+    pid: u16,
+    hid: &[HidCollection],
+    serial: &[SerialEntry],
+) -> Vec<String> {
+    let collections: Vec<&HidCollection> = hid
+        .iter()
+        .filter(|c| (c.vid, c.pid) == (vid, pid))
+        .collect();
+    let ports: Vec<&SerialEntry> = serial
+        .iter()
+        .filter(|entry| (entry.vid, entry.pid) == (vid, pid))
+        .collect();
+    let mut lines = vec![REPORTS_LEGEND.to_owned()];
+    lines.extend(group_lines(vid, pid, &collections, &ports, &[]));
+    lines
+}
+
+/// How `reports_text` writes report sizes.
+const REPORTS_LEGEND: &str = "Reports: in/out/feat <report id>:<bytes incl. id byte>";
 
 /// Header, identity line and one entry per collection / port of one VID:PID.
 fn group_lines(
@@ -505,6 +530,47 @@ mod tests {
         assert!(report.contains("descriptor (1 B): fe"));
         assert!(report.contains("no reports in descriptor"));
         assert!(report.contains("descriptor (0 B):\n"));
+    }
+
+    #[test]
+    fn device_lines_list_one_id_like_scan() {
+        let mut dfu = hid(
+            0x3554,
+            0xFA09,
+            0x008C,
+            0x0001,
+            Access::Skipped("firmware-update channel"),
+        );
+        dfu.shape.interface = Some(2);
+        let hids = [
+            hid(
+                0x3554,
+                0xFA09,
+                0x0001,
+                0x0006,
+                Access::Skipped("system keyboard"),
+            ),
+            compx_collection(),
+            dfu,
+            hid(0x373B, 0x1204, 0xFF00, 0x0001, Access::Skipped("x")),
+        ];
+        let ports = [port("COM3", 0x373B, 0x1204, None)];
+
+        let lines = device_lines(0x3554, 0xFA09, &hids, &ports).join("\n");
+
+        assert!(lines.starts_with("Reports: in/out/feat"), "{lines}");
+        assert!(lines.contains("3554:FA09  AULA F75"), "{lines}");
+        assert!(lines.contains("manufacturer \"Acme\" · product \"Gadget\""));
+        assert!(lines.contains("0001:0006 keyboard · Usb · not opened (system keyboard)"));
+        assert!(lines.contains("FF02:0002 vendor · Usb · in 08:17 out 08:17"));
+        assert!(lines.contains("descriptor (29 B): 06 02 ff 09"), "{lines}");
+        // The firmware-update channel shows its OS-listed usage only; it is never opened.
+        assert!(lines.contains("HID if 2 008C:0001 · Usb · not opened (firmware-update channel)"));
+        // Other ids and their ports stay out.
+        assert!(
+            !lines.contains("373B:1204") && !lines.contains("COM3"),
+            "{lines}"
+        );
     }
 
     #[test]

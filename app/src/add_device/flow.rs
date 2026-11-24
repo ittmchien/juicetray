@@ -70,6 +70,9 @@ pub struct Interfaces {
     pub product: Option<String>,
     pub shapes: Vec<HidShape>,
     pub serial: bool,
+    /// The device's collections and serial ports as `juicetray scan` prints them (report sizes,
+    /// descriptor hex, manufacturer / product); empty when they were not listed.
+    pub scan_lines: Vec<String>,
 }
 
 /// The result of one try.
@@ -833,11 +836,16 @@ impl Flow {
             None => "Tried: nothing".to_owned(),
         });
         lines.push(format!("Result: {}", self.facts.reason));
+        // The scan listing carries every fact a catalogue row needs; bare shapes are the fallback.
         if let Some(found) = interfaces {
             lines.push("Interfaces:".to_owned());
-            lines.extend(found.shapes.iter().map(shape_line));
-            if found.serial {
-                lines.push("  serial port".to_owned());
+            if found.scan_lines.is_empty() {
+                lines.extend(found.shapes.iter().map(shape_line));
+                if found.serial {
+                    lines.push("  serial port".to_owned());
+                }
+            } else {
+                lines.extend(found.scan_lines.iter().cloned());
             }
         }
         report::redact(&lines.join("\n"), &self.identity)
@@ -854,8 +862,8 @@ fn no_choice_reason((vid, pid): Id) -> &'static str {
 }
 
 /// The families offered for `id`: a catalogue model only as its own family (the worker queries
-/// it that way once allowed) and never when it needs a capture or is a BITMOUSE cable; ATK serial
-/// RongYuan F7 and Driveall only exist for catalogue models, so other ids never get them.
+/// it that way once allowed) and never when it needs a capture or is a BITMOUSE cable; ATK serial,
+/// RongYuan F7, Driveall and Generic only exist for catalogue models, so other ids never get them.
 pub fn choices(id: Id, families: &[(Family, Option<Duration>)]) -> Vec<(Family, Option<Duration>)> {
     let keep = |family: Family| match known(id.0, id.1) {
         Some(device) => {
@@ -865,7 +873,7 @@ pub fn choices(id: Id, families: &[(Family, Option<Duration>)]) -> Vec<(Family, 
         }
         None => !matches!(
             family,
-            Family::AtkSerial | Family::RongYuanF7 | Family::Driveall
+            Family::AtkSerial | Family::RongYuanF7 | Family::Driveall | Family::Generic(_)
         ),
     };
     families
@@ -996,6 +1004,7 @@ mod tests {
             product: Some("Gaming Mouse".to_owned()),
             shapes: vec![compx_shape()],
             serial: false,
+            scan_lines: Vec::new(),
         })
     }
 
@@ -1204,6 +1213,18 @@ mod tests {
         assert!(choices(UNKNOWN, &[(Family::AtkSerial, None)]).is_empty());
         assert!(choices(UNKNOWN, &[(Family::RongYuanF7, None)]).is_empty());
         assert!(choices(UNKNOWN, &[(Family::Driveall, None)]).is_empty());
+        static SPEC: protocol::GenericSpec = protocol::GenericSpec {
+            usage_page: 0xFF60,
+            usage: 0x0061,
+            report: protocol::GenericReport::Output,
+            report_bytes: 64,
+            request: &[0x00, 0x01],
+            reply_prefix: &[0x00, 0x55, 0x10],
+            level_byte: 26,
+            charging: None,
+            scale: 100,
+        };
+        assert!(choices(UNKNOWN, &[(Family::Generic(&SPEC), None)]).is_empty());
         // A catalogue model is tried as its own family only.
         let (row, family) = unverified();
         let other = if family == Family::Compx {
@@ -1509,6 +1530,38 @@ mod tests {
         let title = url.split("&body=").next().unwrap();
         assert!(!url.contains("JANE"), "{url}");
         assert!(title.contains("%3Cpc%3E"), "{title}");
+    }
+
+    #[test]
+    fn details_list_the_scan_lines_redacted() {
+        let now = Instant::now();
+        let mut flow = new_flow();
+        flow.on(Event::Handover(UNKNOWN), now);
+        let scan_lines = vec![
+            "3554:7777  unknown device".to_owned(),
+            "  manufacturer \"Jane's\" · product \"Pad of JANE-PC\"".to_owned(),
+            "  HID if 1 FF02:0002 vendor · Usb · in 08:17 out 08:17".to_owned(),
+            "    descriptor (3 B): 06 02 ff".to_owned(),
+        ];
+        flow.on(
+            Event::Inspected(Inspection::Ready(Interfaces {
+                shapes: vec![compx_shape()],
+                serial: true,
+                scan_lines,
+                ..Interfaces::default()
+            })),
+            now,
+        );
+        let details = flow.view(now).details.unwrap();
+        assert!(
+            details.contains("Interfaces:\n3554:7777  unknown device"),
+            "{details}"
+        );
+        assert!(details.contains("descriptor (3 B): 06 02 ff"), "{details}");
+        assert!(details.contains("product \"Pad of <pc>\""), "{details}");
+        // The scan lines replace the bare shape and serial lines.
+        assert!(!details.contains("  if 1 FF02:0002"), "{details}");
+        assert!(!details.contains("  serial port"), "{details}");
     }
 
     #[test]
