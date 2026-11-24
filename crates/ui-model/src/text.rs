@@ -96,10 +96,7 @@ mod tests {
     #[test]
     fn menu_line_formats() {
         let atom = updated_ago(test_device("FIIL Atom", Level::Percent(84)), 120);
-        assert_eq!(
-            menu_line(&atom, now()),
-            "FIIL Atom — 84% · Bluetooth · 2 min ago"
-        );
+        assert_eq!(menu_line(&atom, now()), "FIIL Atom — 84% · BT · 2 min ago");
 
         let pods = updated_ago(
             test_device(
@@ -114,18 +111,18 @@ mod tests {
         );
         assert_eq!(
             menu_line(&pods, now()),
-            "AirPods — L 71% · case 54% · Bluetooth · just now"
+            "AirPods — L 71% · case 54% · BT · just now"
         );
 
         let silent = test_device("X", Level::NoData(NO_BATTERY_TEXT.into()));
-        assert_eq!(menu_line(&silent, now()), "X — no battery info · Bluetooth");
+        assert_eq!(menu_line(&silent, now()), "X — no battery info · BT");
 
         let mut away = updated_ago(test_device("Mouse", Level::Percent(40)), 3 * 3600);
         away.connected = false;
         away.path = Path::Dongle;
         assert_eq!(
             menu_line(&away, now()),
-            "Mouse — 40% · dongle · not connected"
+            "Mouse — 40% · 2.4G · not connected"
         );
     }
 
@@ -137,7 +134,7 @@ mod tests {
         mouse.note = Some("asleep or off".to_owned());
         assert_eq!(
             menu_line(&mouse, now()),
-            "Mouse — 40% · dongle · 3 min ago · asleep or off"
+            "Mouse — 40% · 2.4G · 3 min ago · asleep or off"
         );
     }
 

@@ -57,9 +57,10 @@ pub enum Path {
 impl fmt::Display for Path {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Path::Bluetooth => "Bluetooth",
-            Path::Dongle => "dongle",
-            Path::Cable => "cable",
+            // Short owner-facing labels: 2.4 GHz receiver, USB cable, Bluetooth.
+            Path::Bluetooth => "BT",
+            Path::Dongle => "2.4G",
+            Path::Cable => "USB",
         })
     }
 }
