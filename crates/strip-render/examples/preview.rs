@@ -84,7 +84,7 @@ fn main() {
         // Gauge levels, 0 % (empty outline) up to 100 %.
         vec![
             segment(Mouse, None, Some(0), Low),
-            segment(Mouse, None, Some(25), Normal),
+            segment(Mouse, None, Some(25), Medium),
             segment(Mouse, None, Some(50), Normal),
             segment(Mouse, None, Some(75), Normal),
             segment(Mouse, None, Some(100), Normal),

@@ -3,7 +3,11 @@ use std::str::FromStr;
 use std::time::SystemTime;
 
 use strip_render::Theme;
-use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+#[cfg(not(windows))]
+use tray_icon::menu::CheckMenuItem;
+#[cfg(windows)]
+use tray_icon::menu::{Icon, IconMenuItem};
+use tray_icon::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use ui_model::{
     DeviceKind, DeviceView, EMPTY_MENU_TEXT, IconChoice, IconColor, group_label, menu_line,
 };
@@ -18,6 +22,8 @@ const CHOICE_OFF_LABEL: &str = "Off";
 const MINUTES_PER_HOUR: u32 = 60;
 const CHECK_BATTERY_TEXT: &str = "Check battery now";
 const CUSTOM_REFRESH_ID: &str = "auto:custom";
+const CUSTOM_LOW_ID: &str = "low:custom";
+const CUSTOM_OFFLINE_ID: &str = "offline:custom";
 const ICON_AUTO: &str = "auto";
 const SECONDS_PER_MINUTE: u32 = 60;
 
@@ -32,15 +38,44 @@ const BUILT_IN_ICONS: [(&str, Option<DeviceKind>); 7] = [
     ("Bluetooth", Some(DeviceKind::Other)),
 ];
 
-/// Icon colour palette in menu order.
-const PALETTE: [(&str, IconColor); 7] = [
-    ("Red", IconColor::Rgb(0xE5, 0x48, 0x4D)),
-    ("Orange", IconColor::Rgb(0xF7, 0x6B, 0x15)),
-    ("Yellow", IconColor::Rgb(0xFF, 0xC5, 0x3D)),
-    ("Green", IconColor::Rgb(0x30, 0xA4, 0x6C)),
-    ("Blue", IconColor::Rgb(0x3E, 0x8E, 0xED)),
-    ("Purple", IconColor::Rgb(0x8E, 0x4E, 0xC6)),
-    ("Pink", IconColor::Rgb(0xD6, 0x40, 0x9F)),
+/// Icon colour palette in menu order: (name, deeper shade for the light taskbar, lighter shade
+/// for the dark taskbar), each pair readable (contrast >= 3:1) on its own bar.
+const PALETTE: [(&str, IconColor, IconColor); 7] = [
+    (
+        "Red",
+        IconColor::Rgb(0xD6, 0x3A, 0x3F),
+        IconColor::Rgb(0xF2, 0x68, 0x6D),
+    ),
+    (
+        "Orange",
+        IconColor::Rgb(0xD9, 0x5A, 0x06),
+        IconColor::Rgb(0xFF, 0x8A, 0x3D),
+    ),
+    (
+        "Yellow",
+        IconColor::Rgb(0xA8, 0x75, 0x00),
+        IconColor::Rgb(0xFF, 0xCB, 0x47),
+    ),
+    (
+        "Green",
+        IconColor::Rgb(0x2A, 0x8F, 0x5E),
+        IconColor::Rgb(0x4D, 0xBE, 0x8A),
+    ),
+    (
+        "Blue",
+        IconColor::Rgb(0x2B, 0x7F, 0xE0),
+        IconColor::Rgb(0x6A, 0xA8, 0xF5),
+    ),
+    (
+        "Purple",
+        IconColor::Rgb(0x83, 0x40, 0xBE),
+        IconColor::Rgb(0xB0, 0x7F, 0xE0),
+    ),
+    (
+        "Pink",
+        IconColor::Rgb(0xCC, 0x33, 0x92),
+        IconColor::Rgb(0xEA, 0x6F, 0xBD),
+    ),
 ];
 
 /// Device actions carry the device id, which may itself contain `:`.
@@ -50,18 +85,21 @@ pub enum MenuAction {
     SetRefresh(Option<u32>),
     CustomRefresh,
     SetLow(Option<u8>),
+    CustomLow,
     ToggleHidden(String),
     TogglePercent(String),
     ToggleLabel(String),
     SetIcon(String, IconChoice),
     PickSvg(String),
-    /// The colour for one taskbar theme.
-    SetColor(String, Theme, IconColor),
-    CustomColor(String, Theme),
+    /// The (light taskbar, dark taskbar) icon colours.
+    SetColors(String, IconColor, IconColor),
+    /// Ask for a colour: `None` sets both taskbar themes, `Some` only that one.
+    CustomColor(String, Option<Theme>),
     /// One battery query for an unconfirmed receiver; carries only the row id.
     CheckBattery(String),
     /// Minutes before an offline device leaves the strip; `None` = never.
     SetHideOffline(Option<u32>),
+    CustomHideOffline,
     ToggleStartAtLogin,
     Quit,
 }
@@ -130,6 +168,8 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         "login" => return Some(MenuAction::ToggleStartAtLogin),
         "quit" => return Some(MenuAction::Quit),
         CUSTOM_REFRESH_ID => return Some(MenuAction::CustomRefresh),
+        CUSTOM_LOW_ID => return Some(MenuAction::CustomLow),
+        CUSTOM_OFFLINE_ID => return Some(MenuAction::CustomHideOffline),
         _ => {}
     }
     let (action, rest) = id.split_once(':')?;
@@ -142,8 +182,9 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         "pct" => Some(MenuAction::TogglePercent(device)),
         "label" => Some(MenuAction::ToggleLabel(device)),
         "svg" => Some(MenuAction::PickSvg(device)),
-        "ccolor-light" => Some(MenuAction::CustomColor(device, Theme::Light)),
-        "ccolor-dark" => Some(MenuAction::CustomColor(device, Theme::Dark)),
+        "ccolor" => Some(MenuAction::CustomColor(device, None)),
+        "ccolor-light" => Some(MenuAction::CustomColor(device, Some(Theme::Light))),
+        "ccolor-dark" => Some(MenuAction::CustomColor(device, Some(Theme::Dark))),
         "check" => Some(MenuAction::CheckBattery(device)),
         "icon" => {
             let (value, device) = rest.split_once(':')?;
@@ -154,17 +195,14 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
             };
             Some(MenuAction::SetIcon(device.to_owned(), icon))
         }
-        "color-light" | "color-dark" => {
-            let theme = if action == "color-light" {
-                Theme::Light
-            } else {
-                Theme::Dark
-            };
-            let (value, device) = rest.split_once(':')?;
-            Some(MenuAction::SetColor(
+        // `color:<light>:<dark>:<device id>`, each colour `auto`, `original` or `RRGGBB`.
+        "color" => {
+            let (light, rest) = rest.split_once(':')?;
+            let (dark, device) = rest.split_once(':')?;
+            Some(MenuAction::SetColors(
                 device.to_owned(),
-                theme,
-                parse_color(value)?,
+                parse_color(light)?,
+                parse_color(dark)?,
             ))
         }
         _ => None,
@@ -213,21 +251,23 @@ pub fn menu_entries(
         MenuEntry::submenu("Auto-refresh", refresh_entries(config.refresh_seconds)),
         MenuEntry::submenu(
             "Low-battery alert",
-            choice_entries(
+            choice_entries_with_custom(
                 "low",
                 &LOW_CHOICES,
                 config.low_battery_percent,
                 CHOICE_OFF_LABEL,
+                CUSTOM_LOW_ID,
                 |percent| format!("{percent}%"),
             ),
         ),
         MenuEntry::submenu(
             "Hide offline after",
-            choice_entries(
+            choice_entries_with_custom(
                 "offline",
                 &HIDE_OFFLINE_CHOICES,
                 config.hide_offline_minutes,
                 "Never",
+                CUSTOM_OFFLINE_ID,
                 format_minutes,
             ),
         ),
@@ -238,8 +278,8 @@ pub fn menu_entries(
     entries
 }
 
-/// Device lines under a disabled group header, a separator between groups; `devices` arrive
-/// already grouped by kind, so a header marks each change of kind.
+/// Device lines indented under a disabled group header, a separator between groups; `devices`
+/// arrive already grouped by kind, so a header marks each change of kind.
 fn device_entries(devices: &[DeviceView], config: &Config, now: SystemTime) -> Vec<MenuEntry> {
     let mut entries = Vec::new();
     let mut group = None;
@@ -251,7 +291,16 @@ fn device_entries(devices: &[DeviceView], config: &Config, now: SystemTime) -> V
             entries.push(MenuEntry::label(group_label(device.kind)));
             group = Some(device.kind);
         }
-        entries.push(device_entry(device, config, now));
+        // An offline line stays clickable and shows a ring in its indent: a native menu greys only
+        // disabled lines, which cannot open their settings, and owner-drawn lines turn it light.
+        let indent = if device.is_offline() {
+            OFFLINE_INDENT
+        } else {
+            GROUP_INDENT
+        };
+        let mut entry = device_entry(device, config, now);
+        entry.text.insert_str(0, indent);
+        entries.push(entry);
     }
     entries
 }
@@ -275,20 +324,19 @@ fn device_entry(device: &DeviceView, config: &Config, now: SystemTime) -> MenuEn
         MenuEntry::check(format!("label:{id}"), "Show label", options.show_label),
         MenuEntry::submenu("Icon", icon_entries(id, &options.icon)),
         MenuEntry::submenu(
-            "Light theme",
-            color_entries(id, Theme::Light, options.color_light, is_svg),
-        ),
-        MenuEntry::submenu(
-            "Dark theme",
-            color_entries(id, Theme::Dark, options.color_dark, is_svg),
+            "Icon colour",
+            color_entries(id, (options.color_light, options.color_dark), is_svg),
         ),
     ]);
-    // An offline device's line (disconnected, or a stale receiver) is greyed out.
-    MenuEntry {
-        enabled: !device.is_offline(),
-        ..MenuEntry::submenu(menu_line(device, now), children)
-    }
+    MenuEntry::submenu(menu_line(device, now), children)
 }
+
+/// Lead of a device line under its group header (two em spaces: menus keep them, unlike tabs).
+const GROUP_INDENT: &str = "\u{2003}\u{2003}";
+
+/// Lead of an offline device line: an em space, a circled slash and a thin space, about as wide
+/// as `GROUP_INDENT` (shortcut: widths are estimated for Segoe UI, check alignment by eye).
+const OFFLINE_INDENT: &str = "\u{2003}\u{2298}\u{2009}";
 
 /// Built-in icons then `Custom SVG…`, the current choice ticked.
 fn icon_entries(id: &str, current: &IconChoice) -> Vec<MenuEntry> {
@@ -309,73 +357,105 @@ fn icon_entries(id: &str, current: &IconChoice) -> Vec<MenuEntry> {
     entries
 }
 
-/// Id prefixes of one theme colour entries: the plain choices and the `Custom…` item.
-fn color_id_prefixes(theme: Theme) -> (&'static str, &'static str) {
-    match theme {
-        Theme::Light => ("color-light", "ccolor-light"),
-        Theme::Dark => ("color-dark", "ccolor-dark"),
+/// Menu id value of a colour: `auto`, `original` or `RRGGBB`.
+fn color_value(color: IconColor) -> String {
+    match color {
+        IconColor::Auto => "auto".to_owned(),
+        IconColor::Original => "original".to_owned(),
+        IconColor::Rgb(red, green, blue) => hex(red, green, blue),
     }
 }
 
-/// One theme colours: Auto, Original (SVG icons only), the palette, then `Custom…` showing a
-/// non-palette colour.
-fn color_entries(id: &str, theme: Theme, current: IconColor, is_svg: bool) -> Vec<MenuEntry> {
-    let (color_prefix, custom_prefix) = color_id_prefixes(theme);
-    let color_entry = |label: &str, color: IconColor| {
-        let value = match color {
-            IconColor::Auto => "auto".to_owned(),
-            IconColor::Original => "original".to_owned(),
-            IconColor::Rgb(red, green, blue) => hex(red, green, blue),
-        };
+/// `Icon colour` entries for the (light, dark) pair: Auto, Original (SVG icons only), the
+/// palette, then the custom pickers; a custom colour shows its hex and is ticked.
+fn color_entries(id: &str, current: (IconColor, IconColor), is_svg: bool) -> Vec<MenuEntry> {
+    let (light, dark) = current;
+    let pair_entry = |label: &str, pair: (IconColor, IconColor)| {
         MenuEntry::check(
-            format!("{color_prefix}:{value}:{id}"),
+            format!("color:{}:{}:{id}", color_value(pair.0), color_value(pair.1)),
             label,
-            current == color,
+            current == pair,
         )
     };
     let mut entries = vec![
-        color_entry("Auto", IconColor::Auto),
+        pair_entry("Auto", (IconColor::Auto, IconColor::Auto)),
         MenuEntry {
             enabled: is_svg,
-            ..color_entry("Original", IconColor::Original)
+            ..pair_entry("Original", (IconColor::Original, IconColor::Original))
         },
     ];
     entries.extend(
         PALETTE
             .iter()
-            .map(|&(label, color)| color_entry(label, color)),
+            .map(|&(name, light, dark)| pair_entry(name, (light, dark))),
     );
-    let custom = match current {
-        IconColor::Rgb(red, green, blue) if !PALETTE.iter().any(|&(_, c)| c == current) => {
-            Some(hex(red, green, blue))
-        }
-        _ => None,
+    entries.push(MenuEntry::separator());
+    // A palette pair is never two equal colours, so equal colours are one custom pick.
+    let is_pair = PALETTE.iter().any(|&(_, l, d)| (l, d) == current);
+    let custom = |prefix: &str, label: &str, color: IconColor, ticked: bool| {
+        let shown = match color {
+            IconColor::Rgb(red, green, blue) if ticked => {
+                format!("{label} (#{})", hex(red, green, blue))
+            }
+            _ => label.to_owned(),
+        };
+        MenuEntry::check(format!("{prefix}:{id}"), shown, ticked)
     };
-    entries.push(MenuEntry::check(
-        format!("{custom_prefix}:{id}"),
-        custom
-            .as_ref()
-            .map_or_else(|| "Custom…".to_owned(), |hex| format!("Custom… (#{hex})")),
-        custom.is_some(),
-    ));
+    let same_rgb = light == dark && matches!(light, IconColor::Rgb(..));
+    let split = light != dark && !is_pair;
+    let is_rgb = |color| matches!(color, IconColor::Rgb(..));
+    entries.extend([
+        custom("ccolor", "Custom…", light, same_rgb),
+        custom(
+            "ccolor-light",
+            "Custom (light taskbar)…",
+            light,
+            split && is_rgb(light),
+        ),
+        custom(
+            "ccolor-dark",
+            "Custom (dark taskbar)…",
+            dark,
+            split && is_rgb(dark),
+        ),
+    ]);
     entries
 }
 
-/// Quick choices, then `Custom…` showing and ticking an interval that is not one of them.
+/// Auto-refresh quick choices, then `Custom…`.
 fn refresh_entries(current: Option<u32>) -> Vec<MenuEntry> {
-    let mut entries = choice_entries(
+    choice_entries_with_custom(
         "auto",
         &REFRESH_CHOICES,
         current,
         CHOICE_OFF_LABEL,
-        |seconds| format!("{} min", seconds / SECONDS_PER_MINUTE),
-    );
-    let custom = current.filter(|_| !REFRESH_CHOICES.contains(&current));
+        CUSTOM_REFRESH_ID,
+        |seconds| {
+            if REFRESH_CHOICES.contains(&Some(seconds)) {
+                format!("{} min", seconds / SECONDS_PER_MINUTE)
+            } else {
+                format_interval(seconds)
+            }
+        },
+    )
+}
+
+/// Quick choices, then `Custom…` showing and ticking a value that is not one of them.
+fn choice_entries_with_custom<T: Copy + PartialEq + Display>(
+    prefix: &str,
+    choices: &[Option<T>],
+    current: Option<T>,
+    none_label: &str,
+    custom_id: &str,
+    label: impl Fn(T) -> String,
+) -> Vec<MenuEntry> {
+    let mut entries = choice_entries(prefix, choices, current, none_label, &label);
+    let custom = current.filter(|_| !choices.contains(&current));
     entries.push(MenuEntry::check(
-        CUSTOM_REFRESH_ID.to_owned(),
+        custom_id.to_owned(),
         custom.map_or_else(
             || "Custom…".to_owned(),
-            |seconds| format!("Custom… ({})", format_interval(seconds)),
+            |value| format!("Custom… ({})", label(value)),
         ),
         custom.is_some(),
     ));
@@ -452,13 +532,7 @@ fn to_item(entry: &MenuEntry) -> Box<dyn IsMenuItem> {
         return Box::new(submenu);
     }
     match (&entry.id, entry.checked) {
-        (Some(id), Some(checked)) => Box::new(CheckMenuItem::with_id(
-            id.as_str(),
-            &entry.text,
-            entry.enabled,
-            checked,
-            None,
-        )),
+        (Some(id), Some(checked)) => check_item(id, entry, checked),
         (Some(id), None) => Box::new(MenuItem::with_id(
             id.as_str(),
             &entry.text,
@@ -467,6 +541,70 @@ fn to_item(entry: &MenuEntry) -> Box<dyn IsMenuItem> {
         )),
         (None, _) => Box::new(MenuItem::new(&entry.text, entry.enabled, None)),
     }
+}
+
+/// A ticked item shows a thin tick as its bitmap: the native Windows 10 dark-menu check mark is
+/// coarse, and a bitmap keeps the menu native (owner-drawn items turn the dark menu light).
+#[cfg(windows)]
+fn check_item(id: &str, entry: &MenuEntry, checked: bool) -> Box<dyn IsMenuItem> {
+    let ink = match crate::theme::apps_theme() {
+        Theme::Dark => 0xF0,
+        Theme::Light => 0x20,
+    };
+    let icon = checked
+        .then(|| Icon::from_rgba(tick_rgba(TICK_PX, ink), TICK_PX, TICK_PX))
+        .and_then(|icon| {
+            icon.inspect_err(|error| eprintln!("tick icon failed: {error}"))
+                .ok()
+        });
+    Box::new(IconMenuItem::with_id(
+        id,
+        &entry.text,
+        entry.enabled,
+        icon,
+        None,
+    ))
+}
+
+#[cfg(not(windows))]
+fn check_item(id: &str, entry: &MenuEntry, checked: bool) -> Box<dyn IsMenuItem> {
+    Box::new(CheckMenuItem::with_id(
+        id,
+        &entry.text,
+        entry.enabled,
+        checked,
+        None,
+    ))
+}
+
+/// Side of the tick bitmap in pixels.
+#[cfg(windows)]
+const TICK_PX: u32 = 16;
+
+/// RGBA pixels of an anti-aliased thin tick of grey level `ink` in a `size`-pixel square.
+#[cfg(any(windows, test))]
+fn tick_rgba(size: u32, ink: u8) -> Vec<u8> {
+    let unit = size as f32 / 16.0;
+    let [a, b, c] = [(3.5, 8.5), (6.5, 11.5), (12.5, 4.5)].map(|(x, y)| (x * unit, y * unit));
+    let half_width = 0.6 * unit;
+    (0..size * size)
+        .flat_map(|index| {
+            let point = ((index % size) as f32 + 0.5, (index / size) as f32 + 0.5);
+            let distance = segment_distance(point, a, b).min(segment_distance(point, b, c));
+            // Coverage falls off over one pixel at the stroke's edges.
+            let coverage = (half_width + 0.5 - distance).clamp(0.0, 1.0);
+            [ink, ink, ink, (coverage * 255.0).round() as u8]
+        })
+        .collect()
+}
+
+/// Distance from `p` to the segment `a`–`b`.
+#[cfg(any(windows, test))]
+fn segment_distance(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let t = (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+    let (x, y) = (a.0 + t * dx - p.0, a.1 + t * dy - p.1);
+    (x * x + y * y).sqrt()
 }
 
 #[cfg(test)]
@@ -524,11 +662,18 @@ mod tests {
         );
         assert_eq!(action_for("auto:custom"), Some(MenuAction::CustomRefresh));
         assert_eq!(action_for("low:20"), Some(MenuAction::SetLow(Some(20))));
+        assert_eq!(action_for("low:custom"), Some(MenuAction::CustomLow));
+        assert_eq!(action_for("low:7"), None);
+        assert_eq!(
+            action_for("offline:custom"),
+            Some(MenuAction::CustomHideOffline)
+        );
         assert_eq!(action_for("login"), Some(MenuAction::ToggleStartAtLogin));
         assert_eq!(action_for("auto:7"), None);
         assert_eq!(action_for("icon:toaster:bt:x"), None);
-        assert_eq!(action_for("color-light:zzz:bt:x"), None);
+        assert_eq!(action_for("color:zzz:auto:bt:x"), None);
         assert_eq!(action_for("color:3E8EED:bt:x"), None);
+        assert_eq!(action_for("color:auto:bt:x"), None);
         assert_eq!(action_for("nope"), None);
     }
 
@@ -553,12 +698,16 @@ mod tests {
                 Some(MenuAction::ToggleLabel(owned.clone()))
             );
             assert_eq!(
+                action_for(&format!("ccolor:{id}")),
+                Some(MenuAction::CustomColor(owned.clone(), None))
+            );
+            assert_eq!(
                 action_for(&format!("ccolor-light:{id}")),
-                Some(MenuAction::CustomColor(owned.clone(), Theme::Light))
+                Some(MenuAction::CustomColor(owned.clone(), Some(Theme::Light)))
             );
             assert_eq!(
                 action_for(&format!("ccolor-dark:{id}")),
-                Some(MenuAction::CustomColor(owned.clone(), Theme::Dark))
+                Some(MenuAction::CustomColor(owned.clone(), Some(Theme::Dark)))
             );
             assert_eq!(
                 action_for(&format!("icon:mouse:{id}")),
@@ -572,18 +721,18 @@ mod tests {
                 Some(MenuAction::SetIcon(owned.clone(), IconChoice::Auto))
             );
             assert_eq!(
-                action_for(&format!("color-light:3E8EED:{id}")),
-                Some(MenuAction::SetColor(
+                action_for(&format!("color:2B7FE0:6AA8F5:{id}")),
+                Some(MenuAction::SetColors(
                     owned.clone(),
-                    Theme::Light,
-                    IconColor::Rgb(0x3E, 0x8E, 0xED)
+                    IconColor::Rgb(0x2B, 0x7F, 0xE0),
+                    IconColor::Rgb(0x6A, 0xA8, 0xF5)
                 ))
             );
             assert_eq!(
-                action_for(&format!("color-dark:original:{id}")),
-                Some(MenuAction::SetColor(
+                action_for(&format!("color:original:original:{id}")),
+                Some(MenuAction::SetColors(
                     owned,
-                    Theme::Dark,
+                    IconColor::Original,
                     IconColor::Original
                 ))
             );
@@ -602,8 +751,8 @@ mod tests {
             ids.extend(entry.id.as_deref());
             stack.extend(&entry.children);
         }
-        // Show on strip, Show percentage, Show label, 8 icon and 10 colour entries per theme.
-        assert_eq!(ids.len(), 31);
+        // Show on strip, Show percentage, Show label, 8 icon and 12 colour entries.
+        assert_eq!(ids.len(), 23);
         for id in ids {
             assert!(action_for(id).is_some(), "{id}");
             assert!(id.ends_with(MAC_ID), "{id}");
@@ -654,6 +803,29 @@ mod tests {
         assert!(check_ids(&allowed).is_empty());
     }
 
+    const BLUE: (IconColor, IconColor) = (
+        IconColor::Rgb(0x2B, 0x7F, 0xE0),
+        IconColor::Rgb(0x6A, 0xA8, 0xF5),
+    );
+
+    /// The `Icon colour` submenu of a device whose colours are `colors`.
+    fn colour_menu(colors: (IconColor, IconColor), icon: IconChoice) -> MenuEntry {
+        let mut device = device("MX Master", Level::Percent(50), true);
+        device.id = HEX_ID.to_owned();
+        let mut config = Config::default();
+        config.update_device(HEX_ID, "MX Master", |options| {
+            options.icon = icon;
+            (options.color_light, options.color_dark) = colors;
+        });
+        let entries = entries(&[device], &config, LoginState::Disabled);
+        child(first_device(&entries), "Icon colour").clone()
+    }
+
+    fn ticked_labels(entry: &MenuEntry) -> Vec<&str> {
+        let ticked = entry.children.iter().filter(|e| e.checked == Some(true));
+        ticked.map(|e| e.text.as_str()).collect()
+    }
+
     #[test]
     fn device_submenu_ticks_current() {
         let mut device = device("MX Master", Level::Percent(50), true);
@@ -664,8 +836,8 @@ mod tests {
                 show_percent: false,
                 show_label: false,
                 icon: IconChoice::Kind(DeviceKind::Mouse),
-                color_light: IconColor::Rgb(0x3E, 0x8E, 0xED),
-                color_dark: IconColor::Rgb(0x30, 0xA4, 0x6C),
+                color_light: BLUE.0,
+                color_dark: BLUE.1,
             };
         });
         let entries = entries(&[device], &config, LoginState::Disabled);
@@ -678,37 +850,124 @@ mod tests {
             [format!("icon:mouse:{HEX_ID}")]
         );
         assert_eq!(child(submenu, "Show label").checked, Some(false));
-        let light = child(submenu, "Light theme");
-        assert_eq!(ticked_ids(light), [format!("color-light:3E8EED:{HEX_ID}")]);
-        assert!(!child(light, "Original").enabled);
-        assert_eq!(child(light, "Custom…").checked, Some(false));
-        let dark = child(submenu, "Dark theme");
-        assert_eq!(ticked_ids(dark), [format!("color-dark:30A46C:{HEX_ID}")]);
+        let colour = child(submenu, "Icon colour");
+        assert_eq!(
+            ticked_ids(colour),
+            [format!("color:2B7FE0:6AA8F5:{HEX_ID}")]
+        );
+        assert_eq!(ticked_labels(colour), ["Blue"]);
+        assert!(!child(colour, "Original").enabled);
     }
 
     #[test]
-    fn custom_colour_and_svg_ticked() {
-        let mut device = device("Atom", Level::Percent(50), true);
-        device.id = MAC_ID.to_owned();
-        let mut config = Config::default();
-        config.update_device(MAC_ID, "Atom", |options| {
-            options.icon = IconChoice::Svg("a.svg".into());
-            options.color_light = IconColor::Rgb(0xFF, 0x88, 0x00);
-        });
-        let entries = entries(&[device], &config, LoginState::Disabled);
-        let submenu = first_device(&entries);
-
+    fn colour_menu_layout() {
+        let colour = colour_menu((IconColor::Auto, IconColor::Auto), IconChoice::Auto);
+        let labels: Vec<&str> = colour.children.iter().map(|e| e.text.as_str()).collect();
         assert_eq!(
-            ticked_ids(child(submenu, "Icon")),
-            [format!("svg:{MAC_ID}")]
+            labels,
+            [
+                "Auto",
+                "Original",
+                "Red",
+                "Orange",
+                "Yellow",
+                "Green",
+                "Blue",
+                "Purple",
+                "Pink",
+                "",
+                "Custom…",
+                "Custom (light taskbar)…",
+                "Custom (dark taskbar)…",
+            ]
         );
-        let light = child(submenu, "Light theme");
-        assert!(child(light, "Original").enabled);
-        assert_eq!(ticked_ids(light), [format!("ccolor-light:{MAC_ID}")]);
-        assert_eq!(child(light, "Custom… (#FF8800)").checked, Some(true));
-        // The dark theme keeps its own choice.
-        let dark = child(submenu, "Dark theme");
-        assert_eq!(ticked_ids(dark), [format!("color-dark:auto:{MAC_ID}")]);
+        assert!(colour.children[9].is_separator());
+        assert_eq!(ticked_labels(&colour), ["Auto"]);
+    }
+
+    #[test]
+    fn colour_menu_ticks_original_for_svg() {
+        let both = (IconColor::Original, IconColor::Original);
+        let colour = colour_menu(both, IconChoice::Svg("a.svg".into()));
+        assert!(child(&colour, "Original").enabled);
+        assert_eq!(ticked_labels(&colour), ["Original"]);
+    }
+
+    #[test]
+    fn colour_menu_ticks_each_palette_pair() {
+        for &(name, light, dark) in &PALETTE {
+            let colour = colour_menu((light, dark), IconChoice::Auto);
+            assert_eq!(ticked_labels(&colour), [name]);
+        }
+    }
+
+    #[test]
+    fn colour_menu_ticks_custom_both() {
+        let orange = IconColor::Rgb(0xFF, 0x88, 0x00);
+        let colour = colour_menu((orange, orange), IconChoice::Auto);
+        assert_eq!(ticked_ids(&colour), [format!("ccolor:{HEX_ID}")]);
+        assert_eq!(ticked_labels(&colour), ["Custom… (#FF8800)"]);
+    }
+
+    #[test]
+    fn colour_menu_ticks_per_theme_customs() {
+        let orange = IconColor::Rgb(0xFF, 0x88, 0x00);
+        let teal = IconColor::Rgb(0x00, 0x88, 0x88);
+        let light_only = colour_menu((orange, IconColor::Auto), IconChoice::Auto);
+        assert_eq!(
+            ticked_labels(&light_only),
+            ["Custom (light taskbar)… (#FF8800)"]
+        );
+        assert_eq!(ticked_ids(&light_only), [format!("ccolor-light:{HEX_ID}")]);
+        let both = colour_menu((orange, teal), IconChoice::Auto);
+        assert_eq!(
+            ticked_labels(&both),
+            [
+                "Custom (light taskbar)… (#FF8800)",
+                "Custom (dark taskbar)… (#008888)"
+            ]
+        );
+        let dark_only = colour_menu((IconColor::Auto, teal), IconChoice::Auto);
+        assert_eq!(ticked_ids(&dark_only), [format!("ccolor-dark:{HEX_ID}")]);
+    }
+
+    /// WCAG 2.x relative luminance of an sRGB colour.
+    fn luminance(color: IconColor) -> f64 {
+        let IconColor::Rgb(red, green, blue) = color else {
+            panic!("palette holds only RGB colours");
+        };
+        let linear = |channel: u8| {
+            let value = f64::from(channel) / 255.0;
+            if value <= 0.03928 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
+    }
+
+    fn contrast(a: IconColor, b: IconColor) -> f64 {
+        let (hi, lo) = (
+            luminance(a).max(luminance(b)),
+            luminance(a).min(luminance(b)),
+        );
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// Each palette shade reads (>= 3:1) on the taskbar it is chosen for.
+    #[test]
+    fn palette_pairs_meet_contrast_on_their_bar() {
+        let light_bar = IconColor::Rgb(0xEE, 0xEE, 0xEE);
+        let dark_bar = IconColor::Rgb(0x1F, 0x1F, 0x1F);
+        for &(name, light, dark) in &PALETTE {
+            assert!(contrast(light, light_bar) >= 3.0, "{name} light");
+            assert!(contrast(dark, dark_bar) >= 3.0, "{name} dark");
+            assert_ne!(
+                light, dark,
+                "{name} must differ so it is never a custom pick"
+            );
+        }
     }
 
     #[test]
@@ -764,29 +1023,33 @@ mod tests {
     }
 
     #[test]
-    fn disconnected_device_entry_is_disabled() {
+    fn disconnected_device_line_is_marked_offline_but_clickable() {
         let devices = [
             device("Here", Level::Percent(60), true),
             device("Away", Level::Percent(40), false),
         ];
         let entries = entries(&devices, &Config::default(), LoginState::Disabled);
-        // entries[0] is the group header.
-        assert!(entries[1].enabled);
-        assert!(!entries[2].enabled);
-        assert!(!entries[2].text.contains("not connected"));
+        // entries[0] is the group header; both lines stay in their kind group.
+        assert!(entries[1].enabled && entries[1].text.starts_with(GROUP_INDENT));
+        let away = &entries[2];
+        assert!(away.enabled && !away.children.is_empty());
+        assert!(away.text.starts_with(OFFLINE_INDENT));
+        assert!(away.text[OFFLINE_INDENT.len()..].starts_with("Away — BT · 40%"));
+        assert!(!away.text.contains("not connected"));
     }
 
     #[test]
-    fn stale_device_entry_is_disabled_and_keeps_its_text() {
+    fn stale_device_line_is_marked_offline_and_keeps_its_text() {
         let mut stale = device("Mouse", Level::Percent(70), true);
         stale.stale = true;
         let fresh = device("Mouse", Level::Percent(70), true);
         let entries_for = |d: DeviceView| entries(&[d], &Config::default(), LoginState::Disabled);
         let (stale_entries, fresh_entries) = (entries_for(stale), entries_for(fresh));
         let (stale_line, fresh_line) = (first_device(&stale_entries), first_device(&fresh_entries));
-        assert!(!stale_line.enabled);
-        assert!(fresh_line.enabled);
-        assert!(stale_line.text.starts_with("Mouse — 70% · BT"));
+        assert!(stale_line.enabled && stale_line.text.starts_with(OFFLINE_INDENT));
+        assert!(fresh_line.enabled && fresh_line.text.starts_with(GROUP_INDENT));
+        let text = stale_line.text.strip_prefix(OFFLINE_INDENT).unwrap();
+        assert!(text.starts_with("Mouse — BT · 70%"));
     }
 
     #[test]
@@ -814,13 +1077,66 @@ mod tests {
         };
         let default = find(Some(15));
         let labels: Vec<&str> = default.children.iter().map(|e| e.text.as_str()).collect();
-        assert_eq!(labels, ["Never", "5 min", "15 min", "30 min", "1 h"]);
+        assert_eq!(
+            labels,
+            ["Never", "5 min", "15 min", "30 min", "1 h", "Custom…"]
+        );
         assert_eq!(ticked_ids(&default), ["offline:15"]);
         assert_eq!(ticked_ids(&find(None)), ["offline:off"]);
         assert_eq!(ticked_ids(&find(Some(60))), ["offline:60"]);
         // Every built id parses back to the choice it ticks.
         for entry in &default.children {
             assert!(action_for(entry.id.as_deref().unwrap()).is_some());
+        }
+    }
+
+    #[test]
+    fn custom_low_and_offline_entries_tick_and_label() {
+        let submenu = |config: &Config, title: &str| {
+            entries(&[], config, LoginState::Disabled)
+                .into_iter()
+                .find(|e| e.text == title)
+                .unwrap()
+        };
+        let config = Config {
+            low_battery_percent: Some(7),
+            hide_offline_minutes: Some(90),
+            ..Config::default()
+        };
+        let low = submenu(&config, "Low-battery alert");
+        assert_eq!(ticked_ids(&low), [CUSTOM_LOW_ID]);
+        assert_eq!(child(&low, "Custom… (7%)").checked, Some(true));
+        let offline = submenu(&config, "Hide offline after");
+        assert_eq!(ticked_ids(&offline), [CUSTOM_OFFLINE_ID]);
+        assert_eq!(child(&offline, "Custom… (90 min)").checked, Some(true));
+        // Whole hours outside the quick choices read as hours.
+        let two_hours = Config {
+            hide_offline_minutes: Some(120),
+            ..Config::default()
+        };
+        let offline = submenu(&two_hours, "Hide offline after");
+        assert_eq!(child(&offline, "Custom… (2 h)").checked, Some(true));
+
+        // A quick choice ticks itself, never Custom…; Off ticks Off.
+        for config in [
+            Config::default(),
+            Config {
+                low_battery_percent: None,
+                hide_offline_minutes: None,
+                ..Config::default()
+            },
+        ] {
+            for title in ["Low-battery alert", "Hide offline after"] {
+                let menu = submenu(&config, title);
+                assert_eq!(child(&menu, "Custom…").checked, Some(false), "{title}");
+                assert_eq!(ticked_ids(&menu).len(), 1, "{title}");
+            }
+        }
+        // Every built id parses back to an action.
+        for title in ["Low-battery alert", "Hide offline after"] {
+            for entry in &submenu(&config, title).children {
+                assert!(action_for(entry.id.as_deref().unwrap()).is_some());
+            }
         }
     }
 
@@ -848,7 +1164,7 @@ mod tests {
                 (
                     e.id.is_none() && !e.enabled,
                     e.is_separator(),
-                    e.text.as_str(),
+                    e.text.trim_start(),
                 )
             })
             .collect();
@@ -856,19 +1172,30 @@ mod tests {
             shape,
             [
                 (true, false, "Headset"),
-                (false, false, "N9 — 50% · BT"),
-                (false, false, "V9 — 50% · BT"),
+                (false, false, "N9 — BT · 50%"),
+                (false, false, "V9 — BT · 50%"),
                 (false, true, ""),
                 (true, false, "Mouse"),
-                (false, false, "X1 — 50% · BT"),
+                (false, false, "X1 — BT · 50%"),
                 (false, true, ""),
                 (true, false, "Controller"),
-                (false, false, "Pad — 50% · BT"),
+                (false, false, "Pad — BT · 50%"),
             ]
         );
         // The existing separator between devices and settings stays.
         assert!(entries[9].is_separator());
         assert_eq!(entries[10].id.as_deref(), Some("refresh"));
+    }
+
+    #[test]
+    fn tick_is_a_thin_stroke() {
+        let rgba = tick_rgba(16, 0xF0);
+        let alpha = |x: u32, y: u32| rgba[((y * 16 + x) * 4 + 3) as usize];
+        assert_eq!(rgba.len(), 16 * 16 * 4);
+        assert!(alpha(6, 11) > 200, "the tick's corner is drawn");
+        assert_eq!(alpha(1, 1), 0, "the corner of the square is empty");
+        assert_eq!(alpha(10, 12), 0, "below the long stroke is empty");
+        assert!(rgba.chunks(4).all(|px| px[0] == 0xF0));
     }
 
     #[test]
@@ -878,6 +1205,7 @@ mod tests {
         assert_eq!(entries[0].text, "Headset");
         assert!(!entries[0].enabled);
         assert!(!entries[1].is_separator());
+        assert!(entries[1].text.starts_with(GROUP_INDENT));
         assert!(entries[2].is_separator());
     }
 
@@ -894,7 +1222,7 @@ mod tests {
             .flat_map(|e| &e.children)
             .filter_map(|e| e.id.as_deref()?.strip_prefix("hide:bt:").map(str::to_owned))
             .collect();
-        // A disconnected device with a reading stays (greyed); one without never lists.
+        // A disconnected device with a reading stays (marked offline); one without never lists.
         assert_eq!(lines, ["Connected no data", "Connected", "Away with level"]);
     }
 }

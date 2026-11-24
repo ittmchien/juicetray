@@ -20,7 +20,7 @@ use ui_model::{
 };
 
 use crate::alerts::{AlertState, notify_low_battery};
-use crate::config::Config;
+use crate::config::{Config, parse_hide_offline_minutes, parse_low_percent};
 use crate::interval::{format_interval, parse_interval};
 use crate::login::{self, LoginState};
 use crate::menu::{self, MenuAction, MenuEntry};
@@ -43,6 +43,11 @@ const BLUETOOTH_PERMISSION_HINT: &str = "Allow Bluetooth in System Settings › 
 
 const REFRESH_PROMPT_TITLE: &str = "Custom auto-refresh";
 const REFRESH_PROMPT: &str = "How often to read the batteries, from 5s to 24h: 45s, 2m30s, 1h30m.";
+const LOW_PROMPT_TITLE: &str = "Custom low-battery alert";
+const LOW_PROMPT: &str = "Alert when a battery drops to this percent, from 1 to 99.";
+const HIDE_OFFLINE_PROMPT_TITLE: &str = "Custom hide offline";
+const HIDE_OFFLINE_PROMPT: &str =
+    "Minutes before an offline device leaves the strip, from 1 to 1440.";
 #[cfg(not(windows))]
 const COLOR_PROMPT: &str = "Type a colour as #RRGGBB, for example #FF8800.";
 #[cfg(not(windows))]
@@ -263,7 +268,7 @@ impl App {
 
     fn on_devices(&mut self, mut devices: Vec<DeviceView>) {
         log::trace(format_args!("devices received {}", devices.len()));
-        // Same-kind devices sit together in the strip and menu, weakest first within a kind.
+        // Same-kind devices sit together in the strip and menu, highest level first and offline last within a kind.
         sort_grouped(&mut devices);
         // Every device is checked so its last reading stays current even while hidden.
         for device in &devices {
@@ -284,6 +289,8 @@ impl App {
             MenuAction::SetRefresh(seconds) => self.set_refresh(seconds),
             MenuAction::CustomRefresh => self.prompt_refresh(),
             MenuAction::PickSvg(id) => self.pick_svg(&id),
+            MenuAction::CustomLow => self.prompt_low(),
+            MenuAction::CustomHideOffline => self.prompt_hide_offline(),
             MenuAction::CustomColor(id, theme) => self.prompt_color(&id, theme),
             MenuAction::CheckBattery(id) => self.tell_worker(Command::CheckReceiver(id)),
             MenuAction::SetLow(percent) => {
@@ -302,9 +309,10 @@ impl App {
                 self.update_device(&id, |options| options.show_label = !options.show_label);
             }
             MenuAction::SetIcon(id, icon) => self.update_device(&id, |options| options.icon = icon),
-            MenuAction::SetColor(id, theme, color) => {
-                self.update_device(&id, |options| set_theme_color(options, theme, color));
-            }
+            MenuAction::SetColors(id, light, dark) => self.update_device(&id, |options| {
+                options.color_light = light;
+                options.color_dark = dark;
+            }),
             MenuAction::SetHideOffline(minutes) => {
                 self.config.hide_offline_minutes = minutes;
                 self.save_config();
@@ -344,9 +352,52 @@ impl App {
         }
     }
 
-    /// Asks for a custom icon colour of one theme, starting from that theme's current colour.
-    fn prompt_color(&mut self, id: &str, theme: Theme) {
-        let current = theme_color(&self.config.display_options(id), theme);
+    /// Asks for a custom low-battery percent, pre-filled with the current one; it drives both the
+    /// alert and the strip's red gauge like the quick choices.
+    fn prompt_low(&mut self) {
+        let current = self
+            .config
+            .low_battery_percent
+            .map(|percent| percent.to_string())
+            .unwrap_or_default();
+        let _span = log::span("dialog low prompt");
+        if let Some(percent) =
+            dialog::prompt_parsed(LOW_PROMPT_TITLE, LOW_PROMPT, &current, parse_low_percent)
+        {
+            self.on_action(MenuAction::SetLow(Some(percent)));
+        }
+    }
+
+    /// Asks for custom minutes before an offline device leaves the strip.
+    fn prompt_hide_offline(&mut self) {
+        let current = self
+            .config
+            .hide_offline_minutes
+            .map(|minutes| minutes.to_string())
+            .unwrap_or_default();
+        let _span = log::span("dialog hide offline prompt");
+        if let Some(minutes) = dialog::prompt_parsed(
+            HIDE_OFFLINE_PROMPT_TITLE,
+            HIDE_OFFLINE_PROMPT,
+            &current,
+            parse_hide_offline_minutes,
+        ) {
+            self.on_action(MenuAction::SetHideOffline(Some(minutes)));
+        }
+    }
+
+    /// Asks for a custom icon colour, starting from the current one; `theme` `None` applies it
+    /// to both taskbar themes.
+    fn prompt_color(&mut self, id: &str, theme: Option<Theme>) {
+        let options = self.config.display_options(id);
+        let current = match theme {
+            Some(Theme::Light) => options.color_light,
+            Some(Theme::Dark) => options.color_dark,
+            None => [options.color_light, options.color_dark]
+                .into_iter()
+                .find(|color| matches!(color, IconColor::Rgb(..)))
+                .unwrap_or(IconColor::Auto),
+        };
         let _span = log::span("dialog color prompt");
         if let Some(color) = ask_color(current, theme) {
             self.update_device(id, |options| set_theme_color(options, theme, color));
@@ -497,7 +548,7 @@ impl App {
     }
 
     /// The devices the strip and tooltip show: listed in the menu, not hidden by the user and
-    /// not offline longer than "Hide offline after"; the menu itself keeps them, greyed.
+    /// not offline longer than "Hide offline after"; the menu keeps them, marked offline.
     fn visible_devices(&self) -> Vec<DeviceView> {
         let now = SystemTime::now();
         let hide_after = self
@@ -677,42 +728,39 @@ fn install_edit_menu() -> Option<Menu> {
     }
 }
 
-fn theme_color(options: &DisplayOptions, theme: Theme) -> IconColor {
-    match theme {
-        Theme::Light => options.color_light,
-        Theme::Dark => options.color_dark,
+/// Sets the colour of one taskbar theme, or of both when `theme` is `None`.
+fn set_theme_color(options: &mut DisplayOptions, theme: Option<Theme>, color: IconColor) {
+    if theme != Some(Theme::Dark) {
+        options.color_light = color;
     }
-}
-
-fn set_theme_color(options: &mut DisplayOptions, theme: Theme, color: IconColor) {
-    match theme {
-        Theme::Light => options.color_light = color,
-        Theme::Dark => options.color_dark = color,
+    if theme != Some(Theme::Light) {
+        options.color_dark = color;
     }
 }
 
 /// The Windows colour dialog, opened on `current`; Auto and Original have no colour of their
 /// own, so it opens on the theme ink.
 #[cfg(windows)]
-fn ask_color(current: IconColor, theme: Theme) -> Option<IconColor> {
+fn ask_color(current: IconColor, theme: Option<Theme>) -> Option<IconColor> {
     let seed = match (current, theme) {
         (IconColor::Rgb(red, green, blue), _) => (red, green, blue),
-        (_, Theme::Light) => (0, 0, 0),
-        (_, Theme::Dark) => (255, 255, 255),
+        (_, Some(Theme::Dark)) => (255, 255, 255),
+        (_, _) => (0, 0, 0),
     };
     dialog::pick_color(seed).map(|(red, green, blue)| IconColor::Rgb(red, green, blue))
 }
 
 /// macOS has no colour dialog here: a `#RRGGBB` prompt pre-filled with the current custom colour.
 #[cfg(not(windows))]
-fn ask_color(current: IconColor, theme: Theme) -> Option<IconColor> {
+fn ask_color(current: IconColor, theme: Option<Theme>) -> Option<IconColor> {
     let shown = match current {
         IconColor::Rgb(red, green, blue) => format!("#{}", crate::config::hex(red, green, blue)),
         IconColor::Auto | IconColor::Original => String::new(),
     };
     let title = match theme {
-        Theme::Light => "Custom icon colour (light theme)",
-        Theme::Dark => "Custom icon colour (dark theme)",
+        None => "Custom icon colour",
+        Some(Theme::Light) => "Custom icon colour (light taskbar)",
+        Some(Theme::Dark) => "Custom icon colour (dark taskbar)",
     };
     dialog::prompt_parsed(title, COLOR_PROMPT, &shown, parse_hex_color)
 }

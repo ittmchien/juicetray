@@ -56,9 +56,21 @@ pub fn watch_changes(proxy: tao::event_loop::EventLoopProxy<crate::app::UserEven
     std::mem::forget(observer);
 }
 
-/// `SystemUsesLightTheme = 0` means dark; a missing value means light.
+/// `SystemUsesLightTheme = 0` means dark (taskbar); a missing value means light.
 #[cfg(windows)]
 pub fn system_theme() -> Theme {
+    personalize_theme(windows::core::w!("SystemUsesLightTheme"))
+}
+
+/// `AppsUseLightTheme = 0` means dark (app windows and their menus); a missing value means light.
+#[cfg(windows)]
+pub fn apps_theme() -> Theme {
+    personalize_theme(windows::core::w!("AppsUseLightTheme"))
+}
+
+/// Reads one `Personalize` light-theme flag: 0 is dark, anything else or missing is light.
+#[cfg(windows)]
+fn personalize_theme(value: windows::core::PCWSTR) -> Theme {
     use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
     use windows::core::w;
 
@@ -69,7 +81,7 @@ pub fn system_theme() -> Theme {
         RegGetValueW(
             HKEY_CURRENT_USER,
             w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
-            w!("SystemUsesLightTheme"),
+            value,
             RRF_RT_REG_DWORD,
             None,
             Some(std::ptr::from_mut(&mut uses_light).cast()),

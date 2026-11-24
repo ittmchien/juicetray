@@ -5,9 +5,14 @@ use crate::display::{DisplayOptions, IconChoice, IconColor};
 /// Red threshold used when the low-battery alert is switched off.
 const DEFAULT_LOW_PERCENT: u8 = 15;
 
+/// Levels below this (and above the low threshold) draw the yellow gauge.
+const MEDIUM_PERCENT: u8 = 50;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SegmentStyle {
     Normal,
+    /// Below `MEDIUM_PERCENT` but above the low-battery threshold.
+    Medium,
     Low,
     Charging,
     Full,
@@ -113,6 +118,8 @@ fn style_for(device: &DeviceView, percent: u8, threshold: u8) -> SegmentStyle {
         SegmentStyle::Charging
     } else if percent <= threshold {
         SegmentStyle::Low
+    } else if percent < MEDIUM_PERCENT {
+        SegmentStyle::Medium
     } else {
         SegmentStyle::Normal
     }
@@ -162,8 +169,19 @@ mod tests {
     #[test]
     fn strip_low_is_red_at_threshold() {
         assert_eq!(style_of(percent("a", 15), Some(15)), SegmentStyle::Low);
-        assert_eq!(style_of(percent("a", 16), Some(15)), SegmentStyle::Normal);
+        assert_eq!(style_of(percent("a", 16), Some(15)), SegmentStyle::Medium);
         assert_eq!(style_of(percent("a", 15), None), SegmentStyle::Low);
+    }
+
+    #[test]
+    fn strip_medium_is_below_half() {
+        assert_eq!(style_of(percent("a", 49), Some(15)), SegmentStyle::Medium);
+        assert_eq!(style_of(percent("a", 50), Some(15)), SegmentStyle::Normal);
+        // The low threshold and charging take priority over medium.
+        assert_eq!(style_of(percent("a", 30), Some(30)), SegmentStyle::Low);
+        let mut charging = percent("a", 30);
+        charging.charging = true;
+        assert_eq!(style_of(charging, Some(15)), SegmentStyle::Charging);
     }
 
     #[test]
@@ -256,7 +274,7 @@ mod tests {
         let segment = one(percent("a", 40), options);
         assert_eq!(segment.text, "");
         assert_eq!(segment.gauge, Some(40));
-        assert_eq!(segment.style, SegmentStyle::Normal);
+        assert_eq!(segment.style, SegmentStyle::Medium);
     }
 
     #[test]

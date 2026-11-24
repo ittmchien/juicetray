@@ -282,18 +282,31 @@ struct Palette {
     accent: Option<Color>,
 }
 
+/// (light bar, dark bar) gauge shades, each at least 3:1 against its own bar (#EEEEEE / #1F1F1F).
+type AccentShades = ((u8, u8, u8), (u8, u8, u8));
+const ACCENT_RED: AccentShades = ((0xD6, 0x3A, 0x3F), (0xF2, 0x68, 0x6D));
+const ACCENT_YELLOW: AccentShades = ((0xA8, 0x75, 0x00), (0xFF, 0xCB, 0x47));
+const ACCENT_GREEN: AccentShades = ((0x2A, 0x8F, 0x5E), (0x4D, 0xBE, 0x8A));
+
 impl Palette {
     fn new(style: SegmentStyle, theme: Theme) -> Self {
         let (r, g, b) = match theme {
             Theme::Light => (0, 0, 0),
             Theme::Dark => (255, 255, 255),
         };
-        let accent = match style {
-            SegmentStyle::Low => Some(Color::from_rgba8(0xE5, 0x48, 0x4D, 255)),
-            SegmentStyle::Charging => Some(Color::from_rgba8(0x3E, 0x8E, 0xED, 255)),
-            SegmentStyle::Full => Some(Color::from_rgba8(0x30, 0xA4, 0x6C, 255)),
+        let shades = match style {
+            SegmentStyle::Low => Some(ACCENT_RED),
+            SegmentStyle::Medium => Some(ACCENT_YELLOW),
+            SegmentStyle::Charging | SegmentStyle::Full => Some(ACCENT_GREEN),
             _ => None,
         };
+        let accent = shades.map(|(light, dark)| {
+            let (r, g, b) = match theme {
+                Theme::Light => light,
+                Theme::Dark => dark,
+            };
+            Color::from_rgba8(r, g, b, 255)
+        });
         Self {
             ink: Color::from_rgba8(r, g, b, 255),
             accent,
@@ -600,9 +613,54 @@ mod tests {
     }
 
     #[test]
-    fn charging_segment_has_blue_pixels() {
+    fn charging_segment_has_green_pixels() {
         let bitmap = strip(&[segment(SegmentStyle::Charging)], 44, Theme::Light);
-        assert!(has_pixel(&bitmap, |r, g, b| b > 200 && r < 100 && g < 170));
+        assert!(has_pixel(&bitmap, |r, g, b| g > 120 && r < 90 && b < 130));
+    }
+
+    #[test]
+    fn medium_segment_has_yellow_pixels_on_both_themes() {
+        let medium = Segment {
+            gauge: Some(40),
+            ..segment(SegmentStyle::Medium)
+        };
+        let light = strip(std::slice::from_ref(&medium), 44, Theme::Light);
+        assert!(has_pixel(&light, |r, g, b| r > 150 && g > 100 && b < 40));
+        let dark = strip(&[medium], 44, Theme::Dark);
+        assert!(has_pixel(&dark, |r, g, b| r > 230 && g > 180 && b < 100));
+    }
+
+    /// WCAG 2.x contrast ratio of two sRGB colours.
+    fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
+        let luminance = |(r, g, b): (u8, u8, u8)| {
+            let linear = |channel: u8| {
+                let value = f64::from(channel) / 255.0;
+                if value <= 0.03928 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+        };
+        let (hi, lo) = (
+            luminance(a).max(luminance(b)),
+            luminance(a).min(luminance(b)),
+        );
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    #[test]
+    fn accent_shades_read_on_their_bar() {
+        let (light_bar, dark_bar) = ((0xEE, 0xEE, 0xEE), (0x1F, 0x1F, 0x1F));
+        for (name, (light, dark)) in [
+            ("red", ACCENT_RED),
+            ("yellow", ACCENT_YELLOW),
+            ("green", ACCENT_GREEN),
+        ] {
+            assert!(contrast(light, light_bar) >= 3.0, "{name} on light bar");
+            assert!(contrast(dark, dark_bar) >= 3.0, "{name} on dark bar");
+        }
     }
 
     #[test]

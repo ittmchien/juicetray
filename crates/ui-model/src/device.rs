@@ -125,11 +125,18 @@ impl DeviceView {
     }
 }
 
-/// Weakest first; devices without a number go last, ties break by name.
-pub fn sort_weakest_first(devices: &mut [DeviceView]) {
+/// Highest level first, then devices without a number, then offline ones; ties break by name.
+pub fn sort_by_level(devices: &mut [DeviceView]) {
     devices.sort_by(|a, b| {
-        let (a_percent, b_percent) = (a.shown_percent(), b.shown_percent());
-        (a_percent.is_none(), a_percent, &a.name).cmp(&(b_percent.is_none(), b_percent, &b.name))
+        let key = |d: &DeviceView| {
+            let percent = d.shown_percent();
+            (
+                d.is_offline(),
+                percent.is_none(),
+                std::cmp::Reverse(percent),
+            )
+        };
+        key(a).cmp(&key(b)).then_with(|| a.name.cmp(&b.name))
     });
 }
 
@@ -159,9 +166,9 @@ pub fn group_label(kind: DeviceKind) -> &'static str {
         .map_or("Other", |(_, label)| label)
 }
 
-/// Grouped by kind in display order, weakest first within a group (the sort is stable).
+/// Grouped by kind in display order, `sort_by_level` order within a group (the sort is stable).
 pub fn sort_grouped(devices: &mut [DeviceView]) {
-    sort_weakest_first(devices);
+    sort_by_level(devices);
     devices.sort_by_key(|d| group_order(d.kind));
 }
 
@@ -269,16 +276,23 @@ mod tests {
     }
 
     #[test]
-    fn sort_weakest_first_none_last() {
+    fn sort_by_level_high_then_low_then_offline() {
+        let mut away = test_device("away", Level::Percent(95));
+        away.connected = false;
+        let mut stale = test_device("stale", Level::Percent(80));
+        stale.stale = true;
         let mut devices = vec![
+            away,
             test_device("none", Level::NoData("no battery info".into())),
             test_device("b", Level::Percent(50)),
+            stale,
             test_device("a", Level::Percent(50)),
             test_device("low", Level::Percent(9)),
+            test_device("high", Level::Percent(90)),
         ];
-        sort_weakest_first(&mut devices);
+        sort_by_level(&mut devices);
         let names: Vec<_> = devices.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(names, ["low", "a", "b", "none"]);
+        assert_eq!(names, ["high", "a", "b", "low", "none", "away", "stale"]);
     }
 
     fn kinded(name: &str, kind: DeviceKind, level: Level) -> DeviceView {
@@ -289,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn sort_grouped_orders_groups_then_weakest() {
+    fn sort_grouped_orders_groups_then_level() {
         let mut devices = vec![
             kinded("pad", DeviceKind::Gamepad, Level::Percent(5)),
             kinded("mouse", DeviceKind::Mouse, Level::Percent(70)),
@@ -304,11 +318,11 @@ mod tests {
         assert_eq!(
             names,
             [
-                "hs-low",
                 "hs-high",
+                "hs-low",
                 "hs-none",
-                "mouse-low",
                 "mouse",
+                "mouse-low",
                 "pad",
                 "other"
             ]

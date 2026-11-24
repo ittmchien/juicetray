@@ -6,17 +6,18 @@ pub const EMPTY_MENU_TEXT: &str = "No devices with battery info";
 
 const NO_BATTERY_TEXT: &str = "no info";
 
-/// A reading older than this is shown with its age even when the last query succeeded.
-const OLD_READING: Duration = Duration::from_secs(5 * 60);
+/// A reading older than this is shown with its age even when the last query succeeded; twice the
+/// longest query floor (headsets, 5 min), so a device read on schedule never shows an age.
+const OLD_READING: Duration = Duration::from_secs(10 * 60);
 
-/// One menu line: `name — level[ ⚡] · path[ · age][ · note]`; the age shows only for an old
-/// reading, and the menu greys a disconnected line out instead of labelling it.
+/// One menu line: `name — path · level[ ⚡][ · age][ · note]`; the age shows only for an old
+/// reading, and the menu marks a disconnected line instead of labelling it.
 pub fn menu_line(d: &DeviceView, now: SystemTime) -> String {
     let mut level = battery_text(&d.level);
     if d.charging && d.shown_percent().is_some() {
         level.push_str(" ⚡");
     }
-    let mut parts = vec![level, d.path.to_string()];
+    let mut parts = vec![d.path.to_string(), level];
     // Only a connected device's reading time is reliable; the OS gives no last-seen time otherwise.
     if d.connected && d.shown_percent().is_some() {
         let age = now.duration_since(d.updated_at).unwrap_or_default();
@@ -105,17 +106,21 @@ mod tests {
     #[test]
     fn menu_line_formats() {
         let atom = updated_ago(test_device("FIIL Atom", Level::Percent(84)), 3600 * 2);
-        assert_eq!(menu_line(&atom, now()), "FIIL Atom — 84% · BT · 2h ago");
+        assert_eq!(menu_line(&atom, now()), "FIIL Atom — BT · 84% · 2h ago");
 
         let fresh = updated_ago(test_device("FIIL Atom", Level::Percent(84)), 120);
-        assert_eq!(menu_line(&fresh, now()), "FIIL Atom — 84% · BT");
+        assert_eq!(menu_line(&fresh, now()), "FIIL Atom — BT · 84%");
+
+        // A headset read on its 5 min floor, a little late, still shows no age.
+        let on_floor = updated_ago(test_device("V9", Level::Percent(90)), 5 * 60 + 20);
+        assert_eq!(menu_line(&on_floor, now()), "V9 — BT · 90%");
 
         let mut charging = updated_ago(test_device("Pad", Level::Percent(52)), 10);
         charging.charging = true;
-        assert_eq!(menu_line(&charging, now()), "Pad — 52% ⚡ · BT");
+        assert_eq!(menu_line(&charging, now()), "Pad — BT · 52% ⚡");
 
         let days = updated_ago(test_device("Old", Level::Percent(9)), 3 * 86400);
-        assert_eq!(menu_line(&days, now()), "Old — 9% · BT · 3d ago");
+        assert_eq!(menu_line(&days, now()), "Old — BT · 9% · 3d ago");
 
         let pods = updated_ago(
             test_device(
@@ -128,15 +133,15 @@ mod tests {
             ),
             10,
         );
-        assert_eq!(menu_line(&pods, now()), "AirPods — L 71% · case 54% · BT");
+        assert_eq!(menu_line(&pods, now()), "AirPods — BT · L 71% · case 54%");
 
         let silent = test_device("X", Level::NoData(NO_BATTERY_TEXT.into()));
-        assert_eq!(menu_line(&silent, now()), "X — no info · BT");
+        assert_eq!(menu_line(&silent, now()), "X — BT · no info");
 
         let mut away = updated_ago(test_device("Mouse", Level::Percent(40)), 3 * 3600);
         away.connected = false;
         away.path = Path::Dongle;
-        assert_eq!(menu_line(&away, now()), "Mouse — 40% · 2.4G");
+        assert_eq!(menu_line(&away, now()), "Mouse — 2.4G · 40%");
     }
 
     #[test]
@@ -147,7 +152,7 @@ mod tests {
         mouse.note = Some("sleep".to_owned());
         assert_eq!(
             menu_line(&mouse, now()),
-            "Mouse — 40% · 2.4G · 3m ago · sleep"
+            "Mouse — 2.4G · 40% · 3m ago · sleep"
         );
     }
 

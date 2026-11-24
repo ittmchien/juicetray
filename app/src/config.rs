@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
+use std::fmt::Display;
 use std::fs;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
@@ -13,11 +16,18 @@ use crate::log;
 /// Auto-refresh quick choices in seconds; any other value in `INTERVAL_SECONDS` is a custom one.
 pub const REFRESH_CHOICES: [Option<u32>; 6] =
     [None, Some(60), Some(120), Some(300), Some(600), Some(1800)];
+/// Low-battery quick choices in percent; any other value in `LOW_PERCENT` is a custom one.
 pub const LOW_CHOICES: [Option<u8>; 6] = [None, Some(5), Some(10), Some(15), Some(20), Some(30)];
-/// "Hide offline after" choices in minutes; `None` is Never (`0` in the file).
+/// "Hide offline after" choices in minutes; `None` is Never (`0` in the file). Any other value
+/// in `HIDE_OFFLINE_MINUTES` is a custom one.
 pub const HIDE_OFFLINE_CHOICES: [Option<u32>; 5] = [None, Some(5), Some(15), Some(30), Some(60)];
 
-const DEFAULT_REFRESH_SECONDS: Option<u32> = Some(120);
+/// Allowed low-battery thresholds in percent.
+pub const LOW_PERCENT: RangeInclusive<u8> = 1..=99;
+/// Allowed "Hide offline after" values in minutes: 1 min to 24 h.
+pub const HIDE_OFFLINE_MINUTES: RangeInclusive<u32> = 1..=1440;
+
+const DEFAULT_REFRESH_SECONDS: Option<u32> = Some(300);
 const DEFAULT_LOW_PERCENT: Option<u8> = Some(15);
 const DEFAULT_HIDE_OFFLINE_MINUTES: Option<u32> = Some(15);
 const SECONDS_PER_MINUTE: i64 = 60;
@@ -71,18 +81,18 @@ impl Config {
         let defaults = Self::default();
         Self {
             refresh_seconds: refresh_seconds(&table),
-            low_battery_percent: choice(
+            low_battery_percent: ranged(
                 &table,
                 "low_battery_percent",
-                &LOW_CHOICES,
+                &LOW_PERCENT,
                 defaults.low_battery_percent,
             ),
             hidden: string_list(&table, "hidden").unwrap_or(defaults.hidden),
             hidden_ids: string_list(&table, "hidden_ids").unwrap_or(defaults.hidden_ids),
-            hide_offline_minutes: choice(
+            hide_offline_minutes: ranged(
                 &table,
                 "hide_offline_minutes",
-                &HIDE_OFFLINE_CHOICES,
+                &HIDE_OFFLINE_MINUTES,
                 legacy_hide_offline(&table),
             ),
             devices: devices(&table),
@@ -301,21 +311,52 @@ fn legacy_hide_offline(table: &Table) -> Option<u32> {
     }
 }
 
-/// An integer key matching one of `choices` (`0` = Off); anything else gives `default`.
-fn choice<T: Copy + Into<i64>>(
+/// An integer key inside `range` (`0` = Off); anything else gives `default`.
+fn ranged<T: TryFrom<i64> + PartialOrd>(
     table: &Table,
     key: &str,
-    choices: &[Option<T>],
+    range: &RangeInclusive<T>,
     default: Option<T>,
 ) -> Option<T> {
     let Some(number) = table.get(key).and_then(Value::as_integer) else {
         return default;
     };
-    choices
-        .iter()
-        .copied()
-        .find(|c| c.map_or(0, Into::into) == number)
-        .unwrap_or(default)
+    if number == 0 {
+        return None;
+    }
+    T::try_from(number)
+        .ok()
+        .filter(|value| range.contains(value))
+        .or(default)
+}
+
+/// A whole number inside `range`, or a message to show the owner.
+fn parse_in_range<T: FromStr + PartialOrd + Display>(
+    input: &str,
+    range: &RangeInclusive<T>,
+) -> Result<T, String> {
+    input
+        .trim()
+        .parse()
+        .ok()
+        .filter(|value| range.contains(value))
+        .ok_or_else(|| {
+            format!(
+                "Type a whole number from {} to {}.",
+                range.start(),
+                range.end()
+            )
+        })
+}
+
+/// A typed low-battery threshold: 1-99, with or without a trailing `%`.
+pub fn parse_low_percent(input: &str) -> Result<u8, String> {
+    parse_in_range(input.trim().trim_end_matches('%'), &LOW_PERCENT)
+}
+
+/// Typed minutes before an offline device leaves the strip: 1-1440.
+pub fn parse_hide_offline_minutes(input: &str) -> Result<u32, String> {
+    parse_in_range(input, &HIDE_OFFLINE_MINUTES)
 }
 
 /// An array of strings; `None` when the key is missing or holds anything else.
@@ -448,8 +489,12 @@ mod tests {
         assert_eq!(minutes(""), Some(15));
         assert_eq!(minutes("hide_offline_minutes = 0"), None);
         assert_eq!(minutes("hide_offline_minutes = 60"), Some(60));
-        // Not one of the choices, or not a number: default, other fields survive.
-        assert_eq!(minutes("hide_offline_minutes = 7"), Some(15));
+        // A custom value in range is kept; outside it, or not a number: default.
+        assert_eq!(minutes("hide_offline_minutes = 7"), Some(7));
+        assert_eq!(minutes("hide_offline_minutes = 1"), Some(1));
+        assert_eq!(minutes("hide_offline_minutes = 1440"), Some(1440));
+        assert_eq!(minutes("hide_offline_minutes = 1441"), Some(15));
+        assert_eq!(minutes("hide_offline_minutes = -5"), Some(15));
         assert_eq!(minutes("hide_offline_minutes = \"5\""), Some(15));
         let bad = Config::parse("hide_offline_minutes = \"x\"\nlow_battery_percent = 20\n");
         assert_eq!(bad.low_battery_percent, Some(20));
@@ -462,6 +507,10 @@ mod tests {
         );
         assert_eq!(
             minutes("show_disconnected = true\nhide_offline_minutes = 7"),
+            Some(7)
+        );
+        assert_eq!(
+            minutes("show_disconnected = true\nhide_offline_minutes = 1441"),
             None
         );
 
@@ -478,6 +527,51 @@ mod tests {
         );
         assert!(!written.contains_key("show_disconnected"));
         assert_eq!(Config::parse(&never.to_toml()), never);
+    }
+
+    #[test]
+    fn custom_low_and_offline_values_roundtrip() {
+        let config = Config {
+            low_battery_percent: Some(7),
+            hide_offline_minutes: Some(90),
+            ..Config::default()
+        };
+        let written: Table = config.to_toml().parse().unwrap();
+        assert_eq!(
+            written
+                .get("low_battery_percent")
+                .and_then(Value::as_integer),
+            Some(7)
+        );
+        assert_eq!(Config::parse(&config.to_toml()), config);
+    }
+
+    #[test]
+    fn low_battery_range_and_fallback() {
+        let low = |text: &str| Config::parse(text).low_battery_percent;
+        assert_eq!(low("low_battery_percent = 1"), Some(1));
+        assert_eq!(low("low_battery_percent = 99"), Some(99));
+        assert_eq!(low("low_battery_percent = 0"), None);
+        assert_eq!(low("low_battery_percent = 100"), DEFAULT_LOW_PERCENT);
+        assert_eq!(low("low_battery_percent = -1"), DEFAULT_LOW_PERCENT);
+        assert_eq!(low("low_battery_percent = 300"), DEFAULT_LOW_PERCENT);
+        assert_eq!(low("low_battery_percent = \"20\""), DEFAULT_LOW_PERCENT);
+    }
+
+    #[test]
+    fn typed_low_and_offline_values() {
+        assert_eq!(parse_low_percent("7"), Ok(7));
+        assert_eq!(parse_low_percent(" 25% "), Ok(25));
+        assert_eq!(parse_low_percent("99"), Ok(99));
+        for bad in ["", "0", "100", "-5", "abc", "1.5", "256", "%"] {
+            assert!(parse_low_percent(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(parse_hide_offline_minutes("1"), Ok(1));
+        assert_eq!(parse_hide_offline_minutes(" 90 "), Ok(90));
+        assert_eq!(parse_hide_offline_minutes("1440"), Ok(1440));
+        for bad in ["", "0", "1441", "-1", "2h", "1.5", "99999999999999999999"] {
+            assert!(parse_hide_offline_minutes(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
@@ -555,17 +649,17 @@ mod tests {
         let config = Config::parse(
             "refresh_minutes = 99999\nlow_battery_percent = 20\nshow_disconnected = true\n",
         );
-        assert_eq!(config.refresh_seconds, Some(120));
+        assert_eq!(config.refresh_seconds, DEFAULT_REFRESH_SECONDS);
         assert_eq!(config.low_battery_percent, Some(20));
         // The old toggle still maps: true = never hide.
         assert_eq!(config.hide_offline_minutes, None);
         assert_eq!(
             Config::parse("refresh_minutes = -1").refresh_seconds,
-            Some(120)
+            DEFAULT_REFRESH_SECONDS
         );
         assert_eq!(
             Config::parse("refresh_minutes = \"5\"").refresh_seconds,
-            Some(120)
+            DEFAULT_REFRESH_SECONDS
         );
         // Custom minute values are valid now.
         assert_eq!(
@@ -596,11 +690,11 @@ mod tests {
     fn refresh_seconds_3_defaults() {
         assert_eq!(
             Config::parse("refresh_seconds = 3").refresh_seconds,
-            Some(120)
+            DEFAULT_REFRESH_SECONDS
         );
         assert_eq!(
             Config::parse("refresh_seconds = 86401").refresh_seconds,
-            Some(120)
+            DEFAULT_REFRESH_SECONDS
         );
         assert_eq!(
             Config::parse("refresh_seconds = 5").refresh_seconds,

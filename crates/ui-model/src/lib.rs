@@ -8,8 +8,8 @@ mod text;
 
 pub use caption::captions;
 pub use device::{
-    DeviceKind, DeviceView, Level, Path, UnknownDeviceKind, group_label, group_order, sort_grouped,
-    sort_weakest_first,
+    DeviceKind, DeviceView, Level, Path, UnknownDeviceKind, group_label, group_order,
+    sort_by_level, sort_grouped,
 };
 pub use display::{DisplayOptions, IconChoice, IconColor};
 pub use strip::{Segment, SegmentStyle, build_strip};
