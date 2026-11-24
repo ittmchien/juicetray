@@ -11,4 +11,6 @@ opt-level = "s"
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-strip = true
+# Function names in juicetray.pdb let the hang watchdog name the stuck frames; any strip
+# setting makes the MSVC linker skip the PDB.
+debug = "line-tables-only"

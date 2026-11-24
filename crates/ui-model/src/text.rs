@@ -6,8 +6,8 @@ pub const EMPTY_MENU_TEXT: &str = "No devices with battery info";
 
 const NO_BATTERY_TEXT: &str = "no level";
 
-/// One menu line: `name — battery · path · age` when connected, `… · not connected` otherwise,
-/// then the device's note when it has one.
+/// One menu line: `name — battery · path · age` (no age when disconnected), then the device's
+/// note when it has one; the menu greys a disconnected line out instead of labelling it.
 pub fn menu_line(d: &DeviceView, now: SystemTime) -> String {
     let mut parts = vec![battery_text(&d.level), d.path.to_string()];
     // Only a connected device's reading time is reliable; the OS gives no last-seen time otherwise.
@@ -15,9 +15,6 @@ pub fn menu_line(d: &DeviceView, now: SystemTime) -> String {
         parts.push(age_text(
             now.duration_since(d.updated_at).unwrap_or_default(),
         ));
-    }
-    if !d.connected {
-        parts.push("not connected".to_owned());
     }
     parts.extend(d.note.clone());
     format!("{} — {}", d.name, parts.join(" · "))
@@ -120,10 +117,7 @@ mod tests {
         let mut away = updated_ago(test_device("Mouse", Level::Percent(40)), 3 * 3600);
         away.connected = false;
         away.path = Path::Dongle;
-        assert_eq!(
-            menu_line(&away, now()),
-            "Mouse — 40% · 2.4G · not connected"
-        );
+        assert_eq!(menu_line(&away, now()), "Mouse — 40% · 2.4G");
     }
 
     #[test]

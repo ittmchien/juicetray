@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 use std::process::ExitCode;
+#[cfg(windows)]
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::SystemTime;
 
-use strip_render::{Bitmap, TextStyle, Theme};
+#[cfg(target_os = "macos")]
+use strip_render::TextStyle;
+use strip_render::{Bitmap, Theme};
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopProxy};
 use tray_icon::menu::{Menu, MenuEvent};
@@ -21,8 +25,10 @@ use crate::menu::{self, MenuAction, MenuEntry};
 use crate::refresh::{self, Command};
 use crate::svg_cache::SvgCache;
 #[cfg(windows)]
-use crate::taskbar::{self, TaskbarStrip};
-use crate::{dialog, instance, log, theme, ui_font};
+use crate::taskbar::{self, StripContent, TaskbarHandle};
+#[cfg(target_os = "macos")]
+use crate::ui_font;
+use crate::{dialog, instance, log, theme};
 
 /// The tray icon reads at 22 pt; twice that gives sharp pixels on Retina bars.
 #[cfg(target_os = "macos")]
@@ -147,12 +153,9 @@ struct App {
     /// Kept alive while it is the app's (hidden) main menu.
     #[cfg(target_os = "macos")]
     _edit_menu: Option<Menu>,
-    /// `None` when the strip window class or keeper timer could not be set up.
+    /// `None` when the taskbar thread, its window classes or keeper timer could not be set up.
     #[cfg(windows)]
-    taskbar: Option<TaskbarStrip>,
-    /// The status-bar font per (taskbar DPI, strip height) it was read for.
-    #[cfg(windows)]
-    taskbar_text: HashMap<(u32, u32), TextStyle>,
+    taskbar: Option<TaskbarHandle>,
     /// Strip, theme and tooltip last handed to the taskbar strip.
     #[cfg(windows)]
     shown_taskbar: Option<(Vec<Segment>, Theme, String)>,
@@ -167,6 +170,9 @@ impl App {
         #[cfg(windows)]
         let builder = builder.with_icon(Icon::from_resource(1, None)?);
         let tray = builder.build()?;
+        // The UI heartbeat timer is this thread's own, so the watchdog runs even without a strip.
+        #[cfg(windows)]
+        crate::watchdog::start();
         #[cfg(windows)]
         let taskbar = new_taskbar_strip(proxy.clone());
         let worker = refresh::spawn_worker(proxy, config.refresh_seconds)?;
@@ -189,8 +195,6 @@ impl App {
             #[cfg(windows)]
             taskbar,
             #[cfg(windows)]
-            taskbar_text: HashMap::new(),
-            #[cfg(windows)]
             shown_taskbar: None,
         };
         app.apply();
@@ -199,6 +203,9 @@ impl App {
 
     /// Handles one event and says whether the loop keeps running.
     fn handle(&mut self, event: UserEvent) -> ControlFlow {
+        // Every handled event proves the UI thread is pumping.
+        #[cfg(windows)]
+        crate::watchdog::beat(crate::watchdog::Watched::Ui);
         let _span = log::span(format!("handle {}", event.name()));
         match event {
             UserEvent::Devices(devices) => self.on_devices(devices),
@@ -510,20 +517,19 @@ impl App {
 
 #[cfg(windows)]
 impl App {
-    /// Re-reads the theme (which re-renders the tray icon too), then renders the taskbar strip
-    /// again when it changed and re-docks the window.
+    /// Keeper tick (the taskbar thread has already re-docked its windows): re-reads the theme,
+    /// which re-renders the tray icon too, and sends the strip again when it changed.
     fn keep_taskbar(&mut self) {
         let _span = log::span("keep_taskbar");
         self.apply_strip();
         self.sync_taskbar();
-        self.keep_taskbar_windows();
     }
 
-    /// Hands the strip to every taskbar window, only when strip, theme or tooltip differ from
-    /// what they show; each window renders at its own taskbar's height and DPI.
+    /// Hands the strip to the taskbar thread, only when strip, theme or tooltip differ from
+    /// what it shows; each window renders there at its own taskbar's height and DPI.
     fn sync_taskbar(&mut self) {
         let (Some(taskbar), Some((segments, theme))) =
-            (self.taskbar.as_mut(), self.shown_strip.as_ref())
+            (self.taskbar.as_ref(), self.shown_strip.as_ref())
         else {
             return;
         };
@@ -533,84 +539,61 @@ impl App {
         if unchanged {
             return;
         }
-        let (svgs, texts) = (&self.svgs, &mut self.taskbar_text);
-        taskbar.show(
-            &mut |height, dpi| render_taskbar_strip(segments, *theme, svgs, texts, height, dpi),
-            &self.shown_tooltip,
-        );
+        taskbar.show(StripContent {
+            segments: segments.clone(),
+            theme: *theme,
+            icons: Arc::clone(self.svgs.icons()),
+            tooltip: self.shown_tooltip.clone(),
+        });
         self.shown_taskbar = Some((segments.clone(), *theme, self.shown_tooltip.clone()));
     }
 
-    /// Keeper tick: re-renders windows whose taskbar height or DPI changed and re-docks them all.
-    fn keep_taskbar_windows(&mut self) {
-        let (Some(taskbar), Some((segments, theme))) =
-            (self.taskbar.as_mut(), self.shown_strip.as_ref())
-        else {
-            return;
-        };
-        let (svgs, texts) = (&self.svgs, &mut self.taskbar_text);
-        taskbar.keep(&mut |height, dpi| {
-            render_taskbar_strip(segments, *theme, svgs, texts, height, dpi)
-        });
-    }
-
-    /// Opens the live menu from a strip click, anchored to the tray icon's own window.
+    /// Opens the live menu from a strip click, anchored to the tray icon's own window, which is
+    /// on this thread and so not input-attached to Explorer's taskbar.
     fn show_menu_for_strip(&self) {
         use tray_icon::menu::ContextMenu;
+        use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_NULL};
 
-        // Modal: returns only when the menu closes.
-        let _span = log::span("context menu");
-        // SAFETY: the tray icon's hidden top-level window stays valid as long as `self.tray`.
-        let _ = unsafe {
-            self.current_menu
-                .show_context_menu_for_hwnd(self.tray.window_handle() as isize, None)
-        };
-    }
-
-    fn hide_taskbar(&mut self) {
-        if let Some(taskbar) = self.taskbar.as_mut() {
-            taskbar.hide();
+        let owner = self.tray.window_handle() as isize;
+        {
+            // Modal: returns only when the menu closes; muda makes `owner` foreground first.
+            let _span = log::span("context menu");
+            // SAFETY: the tray icon's hidden top-level window stays valid as long as `self.tray`.
+            let _ = unsafe { self.current_menu.show_context_menu_for_hwnd(owner, None) };
+        }
+        // KB 135788: a message to the owner after TrackPopupMenu lets the next menu close when
+        // the user clicks elsewhere.
+        // SAFETY: posting only queues a message to the tray window, valid as long as `self.tray`.
+        if let Err(error) =
+            unsafe { PostMessageW(Some(HWND(owner as *mut _)), WM_NULL, WPARAM(0), LPARAM(0)) }
+        {
+            eprintln!("posting WM_NULL after the menu failed: {error}");
         }
     }
-}
 
-/// Renders the strip for one taskbar; the OS font is read again only for an unseen (DPI, height).
-#[cfg(windows)]
-fn render_taskbar_strip(
-    segments: &[Segment],
-    theme: Theme,
-    svgs: &SvgCache,
-    texts: &mut HashMap<(u32, u32), TextStyle>,
-    height: u32,
-    dpi: u32,
-) -> Bitmap {
-    let _span = log::span(format!("render taskbar strip {height}px dpi {dpi}"));
-    let text = texts
-        .entry((dpi, height))
-        .or_insert_with(|| ui_font::status_text(dpi, height));
-    strip_render::render_strip(segments, height, theme, svgs.icons(), text)
+    /// Drops the taskbar thread's handle, which waits until every copy is gone and Explorer's
+    /// containers are restored, so nothing stays shrunk once the loop exits.
+    fn hide_taskbar(&mut self) {
+        self.taskbar = None;
+    }
 }
 
 /// Without a strip window the tray icon still shows the weakest number.
 #[cfg(windows)]
-fn new_taskbar_strip(proxy: EventLoopProxy<UserEvent>) -> Option<TaskbarStrip> {
+fn new_taskbar_strip(proxy: EventLoopProxy<UserEvent>) -> Option<TaskbarHandle> {
     use std::sync::Mutex;
 
     // The callback must be `Sync`; the proxy is only `Send`.
     let proxy = Mutex::new(proxy);
-    let created = TaskbarStrip::new(move |signal| {
+    TaskbarHandle::new(move |signal| {
         if let Ok(proxy) = proxy.lock() {
             // A closed event loop means the app is exiting.
             let _ = proxy.send_event(UserEvent::Taskbar(signal));
         }
-    });
-    match created {
-        Ok(strip) => Some(strip),
-        Err(error) => {
-            eprintln!("taskbar strip unavailable: {error:#}");
-            None
-        }
-    }
+    })
+    .inspect_err(|error| eprintln!("taskbar strip unavailable: {error:#}"))
+    .ok()
 }
 
 #[cfg(target_os = "macos")]

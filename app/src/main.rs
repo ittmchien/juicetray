@@ -21,6 +21,9 @@ mod svg_cache;
 mod taskbar;
 mod theme;
 mod ui_font;
+// Windows-only hang dump; the stall bookkeeping is also tested on other hosts.
+#[cfg(any(windows, test))]
+mod watchdog;
 
 use std::process::ExitCode;
 use std::time::SystemTime;

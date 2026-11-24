@@ -13,7 +13,8 @@ use ui_model::DeviceKind;
 /// Largest SVG file the app accepts.
 const MAX_SVG_BYTES: u64 = 1024 * 1024;
 
-/// A parsed SVG that can be drawn at any size.
+/// A parsed SVG that can be drawn at any size; `Clone` lets an app copy a shared icon map.
+#[derive(Clone)]
 pub struct SvgIcon {
     tree: usvg::Tree,
 }

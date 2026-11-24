@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use strip_render::{SvgIcon, load_svg};
 use ui_model::{DisplayOptions, IconChoice};
@@ -8,7 +9,8 @@ use ui_model::{DisplayOptions, IconChoice};
 /// file is read once, not on every redraw.
 #[derive(Default)]
 pub struct SvgCache {
-    loaded: HashMap<String, SvgIcon>,
+    /// Shared with the Windows taskbar thread's content; a change copies it only while shared.
+    loaded: Arc<HashMap<String, SvgIcon>>,
     failed: HashSet<String>,
 }
 
@@ -29,13 +31,13 @@ impl SvgCache {
         }
     }
 
-    pub fn icons(&self) -> &HashMap<String, SvgIcon> {
+    pub fn icons(&self) -> &Arc<HashMap<String, SvgIcon>> {
         &self.loaded
     }
 
     /// Drops what is known about `path`, so the next use reads the file again.
     pub fn forget(&mut self, path: &str) {
-        self.loaded.remove(path);
+        Arc::make_mut(&mut self.loaded).remove(path);
         self.failed.remove(path);
     }
 
@@ -48,7 +50,7 @@ impl SvgCache {
         }
         match load_svg(Path::new(path)) {
             Ok(icon) => {
-                self.loaded.insert(path.to_owned(), icon);
+                Arc::make_mut(&mut self.loaded).insert(path.to_owned(), icon);
                 true
             }
             Err(error) => {

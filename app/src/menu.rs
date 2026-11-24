@@ -234,7 +234,11 @@ fn device_entry(device: &DeviceView, config: &Config, now: SystemTime) -> MenuEn
         MenuEntry::submenu("Icon", icon_entries(id, &options.icon)),
         MenuEntry::submenu("Icon colour", color_entries(id, options.color, is_svg)),
     ]);
-    MenuEntry::submenu(menu_line(device, now), children)
+    // A disconnected device's line is greyed out; stale-but-connected ones stay enabled.
+    MenuEntry {
+        enabled: device.connected,
+        ..MenuEntry::submenu(menu_line(device, now), children)
+    }
 }
 
 /// Built-in icons then `Custom SVG…`, the current choice ticked.
@@ -652,6 +656,22 @@ mod tests {
         let approval = find(LoginState::RequiresApproval);
         assert_eq!(approval.text, "Start at login (approve in System Settings)");
         assert!(approval.enabled);
+    }
+
+    #[test]
+    fn disconnected_device_entry_is_disabled() {
+        let devices = [
+            device("Here", Level::Percent(60), true),
+            device("Away", Level::Percent(40), false),
+        ];
+        let config = Config {
+            show_disconnected: true,
+            ..Config::default()
+        };
+        let entries = entries(&devices, &config, LoginState::Disabled);
+        assert!(entries[0].enabled);
+        assert!(!entries[1].enabled);
+        assert!(!entries[1].text.contains("not connected"));
     }
 
     #[test]

@@ -1,12 +1,18 @@
 //! Layered child window docked into Explorer's taskbar, kept alive by a 2 s timer.
-//! Every window procedure only forwards a signal to the event loop; nothing here blocks.
+//! It runs on its own "taskbar" thread: a child of Explorer's taskbar attaches its thread's input
+//! queue to Explorer's, so that thread does no modal UI and the app's menus and dialogs stay on
+//! the main thread, where a stuck menu loop cannot freeze the taskbar.
 
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::ptr;
-use std::sync::OnceLock;
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::{Arc, OnceLock};
+use std::thread::{self, JoinHandle};
 
-use anyhow::{Result, bail};
-use strip_render::Bitmap;
+use anyhow::{Context, Result, bail};
+use strip_render::{Bitmap, SvgIcon, TextStyle, Theme};
+use ui_model::Segment;
 use windows::Win32::Foundation::{
     COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
 };
@@ -23,17 +29,18 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, FindWindowExW, FindWindowW,
-    GetClientRect, GetWindowRect, HWND_TOP, IsWindow, IsWindowVisible, MA_NOACTIVATE,
-    RegisterClassExW, SW_HIDE, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER,
-    SWP_SHOWWINDOW, SendMessageW, SetTimer, SetWindowPos, ShowWindow, ULW_ALPHA,
-    UpdateLayeredWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_LBUTTONUP, WM_MOUSEACTIVATE,
-    WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WNDPROC, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP,
+    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowExW,
+    FindWindowW, GetClientRect, GetMessageW, GetWindowRect, HWND_TOP, IsWindow, IsWindowVisible,
+    MA_NOACTIVATE, MSG, PostMessageW, RegisterClassExW, SW_HIDE, SWP_NOACTIVATE,
+    SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW, SetTimer,
+    SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA, UpdateLayeredWindow, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_APP, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW,
+    WNDPROC, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
-use crate::log;
+use crate::watchdog::{self, Watched};
+use crate::{log, ui_font};
 
 use super::layout::{
     Placement, Rect, natural_container, place_secondary_strip, place_strip, shrink_to_clear,
@@ -48,6 +55,8 @@ const KEEPER_INTERVAL_MS: u32 = 2000;
 const TOOLTIP_TOOL_ID: usize = 1;
 /// Wide enough that a tooltip's own line breaks decide the wrapping.
 const TOOLTIP_MAX_WIDTH_PX: isize = 600;
+/// Posted to the keeper window after a command is queued, so the taskbar thread wakes for it.
+const WAKE_MESSAGE: u32 = WM_APP + 1;
 
 /// What a window procedure tells the event loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +71,7 @@ pub enum Signal {
 static NOTIFY: OnceLock<Box<dyn Fn(Signal) + Send + Sync>> = OnceLock::new();
 
 fn notify(signal: Signal) {
-    // Written from the window procedure, so a missing line means the UI thread is not pumping.
+    // Written from the taskbar thread, so a missing line means that thread is not pumping.
     log::line(&format!("wndproc signal {signal:?}"));
     if let Some(callback) = NOTIFY.get() {
         callback(signal);
@@ -114,10 +123,173 @@ struct Dock {
 }
 
 /// Renders the strip for one taskbar's (height px, DPI).
-pub type RenderStrip<'a> = dyn FnMut(u32, u32) -> Bitmap + 'a;
+type RenderStrip<'a> = dyn FnMut(u32, u32) -> Bitmap + 'a;
 
-pub struct TaskbarStrip {
+/// What the strip shows; the taskbar thread renders it per taskbar (height, DPI).
+pub struct StripContent {
+    pub segments: Vec<Segment>,
+    pub theme: Theme,
+    /// Parsed custom SVG icons by path, shared with the app's cache.
+    pub icons: Arc<HashMap<String, SvgIcon>>,
+    pub tooltip: String,
+}
+
+enum Command {
+    Show(StripContent),
+    Stop,
+}
+
+/// The main thread's side of the strip running on the "taskbar" thread. Dropping it stops the
+/// thread once every copy is removed and Explorer's task-button containers are given back.
+pub struct TaskbarHandle {
+    commands: Sender<Command>,
+    /// The taskbar thread's keeper window, which `WAKE_MESSAGE` is posted to.
+    keeper: HWND,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl TaskbarHandle {
+    /// Starts the taskbar thread and waits until its windows exist; `callback` receives every
+    /// signal on that thread.
+    pub fn new(callback: impl Fn(Signal) + Send + Sync + 'static) -> Result<Self> {
+        let (commands, received) = mpsc::channel();
+        let (ready, started) = mpsc::sync_channel(1);
+        let thread = thread::Builder::new()
+            .name("taskbar".into())
+            .spawn(move || run_taskbar_thread(callback, &received, &ready))
+            .context("spawning the taskbar thread")?;
+        // HWND is not `Send`, so the keeper comes back as its address.
+        let started = started
+            .recv()
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("the taskbar thread stopped while starting")));
+        match started {
+            Ok(keeper) => Ok(Self {
+                commands,
+                keeper: HWND(keeper as *mut c_void),
+                thread: Some(thread),
+            }),
+            Err(error) => {
+                let _ = thread.join();
+                Err(error)
+            }
+        }
+    }
+
+    /// Shows `content` on every taskbar.
+    pub fn show(&self, content: StripContent) {
+        self.send(Command::Show(content));
+    }
+
+    /// Queues `command` and wakes the taskbar thread.
+    fn send(&self, command: Command) {
+        if self.commands.send(command).is_err() {
+            eprintln!("the taskbar thread has stopped");
+            return;
+        }
+        // SAFETY: posting only queues a message; a destroyed keeper just fails the call.
+        if let Err(error) =
+            unsafe { PostMessageW(Some(self.keeper), WAKE_MESSAGE, WPARAM(0), LPARAM(0)) }
+        {
+            eprintln!("waking the taskbar thread failed: {error}");
+        }
+    }
+}
+
+impl Drop for TaskbarHandle {
+    /// Waits for the thread, so the containers are restored before the process exits.
+    fn drop(&mut self) {
+        self.send(Command::Stop);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// The taskbar thread: owns every strip window and pumps their messages. The keeper's timer and
+/// wake messages are handled here rather than in its window procedure, which has no state.
+fn run_taskbar_thread(
+    callback: impl Fn(Signal) + Send + Sync + 'static,
+    commands: &Receiver<Command>,
+    ready: &SyncSender<Result<isize>>,
+) {
+    let mut strip = match TaskbarStrip::new(callback) {
+        Ok(strip) => strip,
+        Err(error) => {
+            let _ = ready.send(Err(error));
+            return;
+        }
+    };
+    let keeper = strip.keeper;
+    if ready.send(Ok(keeper.0 as isize)).is_err() {
+        return;
+    }
+    // The keeper timer beats every 2 s on this thread, so silence means a hang here.
+    watchdog::watch_current(Watched::Taskbar);
+    let mut content: Option<StripContent> = None;
+    // The status-bar font per (taskbar DPI, strip height) it was read for.
+    let mut texts: HashMap<(u32, u32), TextStyle> = HashMap::new();
+    let mut message = MSG::default();
+    // SAFETY: `message` is a local out-pointer; 0 means WM_QUIT and -1 an error, both end the loop.
+    while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {
+        if message.hwnd == keeper {
+            if message.message == WM_TIMER && message.wParam.0 == KEEPER_TIMER_ID {
+                watchdog::beat(Watched::Taskbar);
+                if let Some(content) = &content {
+                    strip.keep(&mut |height, dpi| render(content, &mut texts, height, dpi));
+                }
+                // The app re-reads the theme and sends new content when it changed.
+                notify(Signal::KeeperTick);
+                continue;
+            }
+            if message.message == WAKE_MESSAGE {
+                for command in commands.try_iter() {
+                    match command {
+                        Command::Show(shown) => {
+                            strip.show(
+                                &mut |height, dpi| render(&shown, &mut texts, height, dpi),
+                                &shown.tooltip,
+                            );
+                            content = Some(shown);
+                        }
+                        // Dropping `strip` restores the containers; thread exit destroys the keeper.
+                        Command::Stop => return,
+                    }
+                }
+                continue;
+            }
+        }
+        // SAFETY: `message` was just filled by GetMessageW on this thread.
+        unsafe {
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+}
+
+/// Renders `content` for one taskbar; the OS font is read again only for an unseen (DPI, height).
+fn render(
+    content: &StripContent,
+    texts: &mut HashMap<(u32, u32), TextStyle>,
+    height: u32,
+    dpi: u32,
+) -> Bitmap {
+    let _span = log::span(format!("render taskbar strip {height}px dpi {dpi}"));
+    let text = texts
+        .entry((dpi, height))
+        .or_insert_with(|| ui_font::status_text(dpi, height));
+    strip_render::render_strip(
+        &content.segments,
+        height,
+        content.theme,
+        &content.icons,
+        text,
+    )
+}
+
+struct TaskbarStrip {
     instance: HINSTANCE,
+    /// Hidden window owning the keeper timer and receiving `WAKE_MESSAGE`.
+    keeper: HWND,
     /// One copy per taskbar: the primary and every `Shell_SecondaryTrayWnd`.
     docks: Vec<Dock>,
     /// A strip is being shown (set by `show`, cleared by `hide`); the keeper only acts while it is.
@@ -128,7 +300,7 @@ pub struct TaskbarStrip {
 
 impl TaskbarStrip {
     /// Registers the window classes and starts the keeper timer; `callback` receives every signal.
-    pub fn new(callback: impl Fn(Signal) + Send + Sync + 'static) -> Result<Self> {
+    fn new(callback: impl Fn(Signal) + Send + Sync + 'static) -> Result<Self> {
         let _span = log::span("TaskbarStrip::new");
         if NOTIFY.set(Box::new(callback)).is_err() {
             bail!("the taskbar strip already exists");
@@ -145,8 +317,8 @@ impl TaskbarStrip {
         let instance = HINSTANCE::from(unsafe { GetModuleHandleW(None) }?);
         register_class(STRIP_CLASS, Some(strip_proc), instance)?;
         register_class(KEEPER_CLASS, Some(keeper_proc), instance)?;
-        // The hidden top-level window (not message-only, not the child) lives for the whole
-        // process and owns the keeper timer.
+        // The hidden top-level window (not message-only, not the child) lives as long as the
+        // taskbar thread and owns the keeper timer.
         // SAFETY: the class is registered above; a top-level window gets no parent.
         let keeper = unsafe {
             CreateWindowExW(
@@ -172,6 +344,7 @@ impl TaskbarStrip {
         }
         Ok(Self {
             instance,
+            keeper,
             docks: Vec::new(),
             active: false,
             tooltip: String::new(),
@@ -181,7 +354,7 @@ impl TaskbarStrip {
 
     /// Shows the strip with `tooltip` on every taskbar, calling `render` once per distinct
     /// (height px, DPI) among them, and creates the windows that are missing.
-    pub fn show(&mut self, render: &mut RenderStrip, tooltip: &str) {
+    fn show(&mut self, render: &mut RenderStrip, tooltip: &str) {
         let _span = log::span("taskbar show");
         self.active = true;
         tooltip.clone_into(&mut self.tooltip);
@@ -190,13 +363,13 @@ impl TaskbarStrip {
 
     /// Keeper tick: recreates copies after an Explorer restart or a display change, re-renders
     /// copies whose taskbar height or DPI changed and re-docks them.
-    pub fn keep(&mut self, render: &mut RenderStrip) {
+    fn keep(&mut self, render: &mut RenderStrip) {
         let _span = log::span("keeper tick");
         self.sync(render, false);
     }
 
     /// Removes every strip copy, gives back the reserved space and stops showing anything.
-    pub fn hide(&mut self) {
+    fn hide(&mut self) {
         let _span = log::span("taskbar hide");
         self.active = false;
         self.docks.drain(..).for_each(Dock::destroy);
@@ -641,17 +814,13 @@ unsafe extern "system" fn strip_proc(
     }
 }
 
-/// Keeper timer: tell the event loop to run the keeper tick.
+/// Keeper window: its timer and wake messages are handled in the taskbar thread's loop.
 unsafe extern "system" fn keeper_proc(
     hwnd: HWND,
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if message == WM_TIMER && wparam.0 == KEEPER_TIMER_ID {
-        notify(Signal::KeeperTick);
-        return LRESULT(0);
-    }
     // SAFETY: forwards the unchanged message arguments of this window procedure.
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
