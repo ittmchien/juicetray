@@ -18,4 +18,6 @@ devices = [
   { vid = "3554", pid = "F58F", name = "VXE R1", family = "Compx", kind = "mouse", connection = "cable", verified = false },
   { vid = "3554", pid = "FB12", name = "VXE Mouse 1K Dongle", family = "Compx", kind = "mouse", connection = "receiver", verified = false },
   { vid = "391D", pid = "1A05", name = "VGN Dragonfly 3 Master+", family = "Compx", kind = "mouse", connection = "receiver", verified = false },
+  # vgn-kc2 dongle (VGN HUB); its if2 on page 0x008C is the firmware-update channel, never opened.
+  { vid = "391D", pid = "1A21", name = "VGN Dragonfly 3 Turbo+", family = "VgnKc2", kind = "mouse", connection = "receiver", verified = false },
 ]

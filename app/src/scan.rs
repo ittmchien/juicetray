@@ -2,8 +2,10 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use door::{Access, HidCollection, SerialEntry};
-use protocol::{ReportKind, ReportSize, known};
+use protocol::{ReportKind, ReportSize};
 use ui_model::{DeviceView, EMPTY_MENU_TEXT, menu_line};
+
+use crate::device::{Device, lookup};
 
 /// Plain-text device list for `juicetray scan`; device ids stay out of the output.
 pub fn scan_report(devices: &[DeviceView], now: SystemTime) -> String {
@@ -19,9 +21,14 @@ pub fn scan_report(devices: &[DeviceView], now: SystemTime) -> String {
 /// The HID collections and serial ports sharing one VID:PID.
 type Group<'a> = (Vec<&'a HidCollection>, Vec<&'a SerialEntry>);
 
-/// Plain-text USB section: HID collections and serial ports grouped by VID:PID. Serial numbers
-/// and device instance ids never appear.
-pub fn usb_report(hid: &[HidCollection], serial: &[SerialEntry], errors: &[String]) -> String {
+/// Plain-text USB section: HID collections and serial ports grouped by VID:PID, labelled from
+/// the catalogue, then `custom` devices. Serial numbers and device instance ids never appear.
+pub fn usb_report(
+    hid: &[HidCollection],
+    serial: &[SerialEntry],
+    errors: &[String],
+    custom: &[Device],
+) -> String {
     let mut lines = vec!["USB devices (HID collections and serial ports)".to_owned()];
     if hid.is_empty() && serial.is_empty() {
         lines.push("No USB HID devices or serial ports found".to_owned());
@@ -43,7 +50,7 @@ pub fn usb_report(hid: &[HidCollection], serial: &[SerialEntry], errors: &[Strin
                 .push(entry);
         }
         for (&(vid, pid), (collections, ports)) in &groups {
-            lines.extend(group_lines(vid, pid, collections, ports));
+            lines.extend(group_lines(vid, pid, collections, ports, custom));
         }
     }
     lines.extend(errors.iter().map(|text| format!("error: {text}")));
@@ -56,9 +63,11 @@ fn group_lines(
     pid: u16,
     collections: &[&HidCollection],
     ports: &[&SerialEntry],
+    custom: &[Device],
 ) -> Vec<String> {
-    let label = known(vid, pid).map_or("unknown device".to_owned(), |device| {
-        format!("{} · {}", device.name, device.family.name())
+    let label = lookup(vid, pid, custom).map_or("unknown device".to_owned(), |device| {
+        let origin = if device.custom { " · custom" } else { "" };
+        format!("{} · {}{origin}", device.name, device.family.name())
     });
     let mut lines = vec![format!("{vid:04X}:{pid:04X}  {label}")];
 
@@ -149,7 +158,7 @@ fn hid_lines(collection: &HidCollection) -> Vec<String> {
 }
 
 /// Report sizes of an opened collection, or the reason there are none.
-fn reports_text(reports: &[ReportSize], parse_error: Option<&str>) -> String {
+pub(crate) fn reports_text(reports: &[ReportSize], parse_error: Option<&str>) -> String {
     if let Some(error) = parse_error {
         return format!("report sizes unknown ({error})");
     }
@@ -342,7 +351,7 @@ mod tests {
         let hids = [mouse, vendor, compx_collection()];
         let ports = [port("COM3", 0x373B, 0x1204, None)];
 
-        let report = usb_report(&hids, &ports, &[]);
+        let report = usb_report(&hids, &ports, &[], &[]);
         let lines: Vec<&str> = report.lines().collect();
 
         let header = lines
@@ -386,10 +395,17 @@ mod tests {
             hid(0x046D, 0xC52B, 0xFF00, 0x0001, Access::Skipped("x")),
         ];
 
-        let report = usb_report(&hids, &[], &[]);
+        let report = usb_report(&hids, &[], &[], &[]);
 
         assert!(report.contains("3837:6011  MCHOSE V9 Pro 2 · MCHOSE"));
         assert!(report.contains("046D:C52B  unknown device"));
+
+        // A custom device labels an id outside the catalogue; the catalogue still wins.
+        let mine = crate::device::tests::custom(0x046D, 0xC52B, protocol::Family::Compx);
+        let shadow = crate::device::tests::custom(0x3837, 0x6011, protocol::Family::Compx);
+        let report = usb_report(&hids, &[], &[], &[mine, shadow]);
+        assert!(report.contains("046D:C52B  My mouse · Compx report 8 · custom"));
+        assert!(report.contains("3837:6011  MCHOSE V9 Pro 2 · MCHOSE\n"));
     }
 
     #[test]
@@ -403,7 +419,7 @@ mod tests {
             Some("ABC123"),
         )];
 
-        let report = usb_report(&[collection], &ports, &[]);
+        let report = usb_report(&[collection], &ports, &[], &[]);
 
         assert!(!report.contains("ABC123"), "{report}");
         assert!(report.contains("/dev/cu.usbmodem<serial>"));
@@ -434,7 +450,7 @@ mod tests {
 
     #[test]
     fn usb_report_shows_reports_and_descriptor() {
-        let report = usb_report(&[compx_collection()], &[], &[]);
+        let report = usb_report(&[compx_collection()], &[], &[], &[]);
 
         assert!(report.contains("HID if 1 FF02:0002 vendor · Usb · in 08:17 out 08:17"));
         assert!(report.lines().any(|line| line.trim()
@@ -481,7 +497,7 @@ mod tests {
             },
         );
 
-        let report = usb_report(&[mouse, failed, bad, empty], &[], &[]);
+        let report = usb_report(&[mouse, failed, bad, empty], &[], &[], &[]);
 
         assert!(report.contains("HID if ? 0001:0002 mouse · Usb · not opened (system mouse)"));
         assert!(report.contains("HID if 1 FF00:0001 vendor · Usb · open failed: denied"));
@@ -493,7 +509,12 @@ mod tests {
 
     #[test]
     fn usb_report_empty() {
-        let report = usb_report(&[], &[], &["serial ports could not be listed: boom".into()]);
+        let report = usb_report(
+            &[],
+            &[],
+            &["serial ports could not be listed: boom".into()],
+            &[],
+        );
 
         assert!(report.contains("No USB HID devices or serial ports found"));
         assert!(

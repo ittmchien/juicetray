@@ -1103,7 +1103,8 @@ fn describe_rect(rect: Option<Rect>) -> String {
     )
 }
 
-fn windows_build() -> String {
+/// The real Windows version, `major.minor.build`.
+pub fn windows_build() -> String {
     os_version().map_or_else(
         || "unknown".to_owned(),
         |info| {

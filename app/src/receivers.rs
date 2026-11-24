@@ -1,21 +1,17 @@
 //! Receiver and cable devices (USB HID or serial) for the refresh worker: presence is checked
-//! from the device lists alone, only verified or allowed devices are ever opened, one door per
-//! read, at most one query per such device, never past the query floor.
+//! from the device lists alone; only verified catalogue models, `allow` entries and custom
+//! devices become rows and are ever opened, one door per read, at most one query per device,
+//! never past the query floor. Every other device is never touched.
 //! Every decision before the first I/O is the pure `plan`; `view` turns the outcome into a row.
-//! An owner-asked check (`check_receiver`) is the same plan for one device with its
-//! confirmation gate passed; nothing else is relaxed.
 
-use std::collections::HashMap;
 use std::path::Path as FsPath;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use door::{Door, HidCollection, Inventory, Listing, SerialEntry, Target};
-use protocol::{
-    Decoded, Family, KNOWN, Kind, KnownDevice, Link, ON_CABLE_TEXT, Online, PickError, Reading,
-    known,
-};
+use protocol::{Decoded, Family, KNOWN, Kind, Link, ON_CABLE_TEXT, Online, PickError, Reading};
 use ui_model::{DeviceKind, DeviceView, Level, Path};
 
+use crate::device::{Device, lookup};
 use crate::log;
 use crate::query::{
     ClaimError, TargetError, claim_query, floor_check, open_hid_target, open_serial_target,
@@ -34,10 +30,7 @@ const ASLEEP_TEXT: &str = "sleep";
 enum Outcome {
     NoChannel,
     NeedsCapture,
-    Unconfirmed,
     Waiting,
-    /// An owner-asked check within the floor: nothing was sent; the time left.
-    TooSoon(Duration),
     Busy,
     Ambiguous,
     NotRecorded,
@@ -57,24 +50,20 @@ enum Step {
     Query,
 }
 
-/// Rows for every known device that is plugged in, in `KNOWN` order. `allow` lists the
-/// unconfirmed devices the owner lets the worker query. Presence comes from the device lists
-/// alone; only the openable devices are listed in depth (and opened), so every other one is
-/// never touched. `notes` holds the last failed check per row id.
-pub fn read_receivers(
-    allow: &[(u16, u16)],
-    notes: &CheckNotes,
-    now: SystemTime,
-) -> Vec<DeviceView> {
+/// Rows for every plugged-in device the query gate lets through: verified catalogue models,
+/// `allow` entries and `custom` devices. Presence comes from the device lists alone; only the
+/// openable devices are listed in depth (and opened), so every other one is never touched.
+pub fn read_receivers(allow: &[(u16, u16)], custom: &[Device], now: SystemTime) -> Vec<DeviceView> {
     let ids: Vec<(u16, u16)> = KNOWN
         .iter()
         .map(|device| (device.vid, device.pid))
+        .chain(custom.iter().map(|device| (device.vid, device.pid)))
         .collect();
     let listing = list_devices();
-    let present = listing.present(&ids);
+    let devices = queried(&listing.present(&ids), allow, custom);
     let log_path = query_log::path();
     let log = load_log(log_path.as_deref());
-    let openable = openable(&present, allow);
+    let openable = openable(&devices);
     // Every openable device would only show its stored reading as waiting: no descriptor reads.
     let inventory = if only_waiting(&openable, &log, now) {
         log::trace(format_args!("inventory skipped: all openable devices wait"));
@@ -84,13 +73,11 @@ pub fn read_receivers(
     };
     let mut door = Door::new(READ_BUDGET);
 
-    let outcomes: Vec<(&KnownDevice, Outcome)> = KNOWN
+    let outcomes: Vec<(&Device, Outcome)> = devices
         .iter()
-        .filter(|device| present.contains(&(device.vid, device.pid)))
         .map(|device| {
             let outcome = attempt(
                 device,
-                allow,
                 inventory.as_ref(),
                 (&log, log_path.as_deref()),
                 &mut door,
@@ -104,130 +91,36 @@ pub fn read_receivers(
         .into_iter()
         .map(|(device, outcome)| {
             let (vid, pid) = (device.vid, device.pid);
-            let row = view(
+            view(
                 device,
                 outcome,
                 log.reading(vid, pid),
                 log.last(vid, pid),
                 now,
-            );
-            with_check_note(row, outcome, notes)
+            )
         })
         .collect()
 }
 
-/// The last failed check's reason per row id, kept by the worker for this session.
-pub type CheckNotes = HashMap<String, String>;
-
-/// An owner-asked check's result: the device's new row, and the `VID:PID` to add to `allow`
-/// (only a valid reading of a device not verified in the catalogue).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Checked {
-    pub row: DeviceView,
-    pub confirm: Option<(u16, u16)>,
-    outcome: Outcome,
-}
-
-impl Checked {
-    /// A reading clears the device's note and a failed query sets it (latest wins); a floor
-    /// wait sent nothing, so the earlier note stays.
-    pub fn remember(&self, notes: &mut CheckNotes) {
-        match self.outcome {
-            Outcome::Reading(..) => {
-                notes.remove(&self.row.id);
-            }
-            Outcome::TooSoon(_) | Outcome::Waiting => {}
-            failed => {
-                notes.insert(self.row.id.clone(), reason(failed));
-            }
+/// The query gate: the present devices that are verified in the catalogue, added to `allow`, or
+/// custom, each once (catalogue first, as `lookup` resolves them).
+fn queried(present: &[(u16, u16)], allow: &[(u16, u16)], custom: &[Device]) -> Vec<Device> {
+    let mut devices: Vec<Device> = Vec::new();
+    for &(vid, pid) in present {
+        if devices
+            .iter()
+            .any(|device| (device.vid, device.pid) == (vid, pid))
+        {
+            continue;
+        }
+        let Some(device) = lookup(vid, pid, custom) else {
+            continue;
+        };
+        if device.is_queried(allow) {
+            devices.push(device);
         }
     }
-}
-
-/// A device the gate still holds back shows its last check's reason as the note, so a read
-/// does not hide why the check failed.
-fn with_check_note(mut row: DeviceView, outcome: Outcome, notes: &CheckNotes) -> DeviceView {
-    if outcome == Outcome::Unconfirmed
-        && let Some(note) = notes.get(&row.id)
-    {
-        row.note = Some(note.clone());
-    }
-    row
-}
-
-/// One query for the known device whose row id is `id`, on the owner's click: the same plan,
-/// floor, claim and door as a read, with the confirmation gate passed for this id alone, and
-/// only this device listed in depth. `None` for an id outside `KNOWN` or an unplugged device.
-pub fn check_receiver(id: &str, allow: &[(u16, u16)], now: SystemTime) -> Option<Checked> {
-    let (device, allow) = check_scope(id, allow)?;
-    let listing = list_devices();
-    let present = listing.present(&[(device.vid, device.pid)]);
-    if present.is_empty() {
-        return None;
-    }
-    let inventory = list_in_depth(listing, &openable(&present, &allow));
-    let log_path = query_log::path();
-    let log = load_log(log_path.as_deref());
-    let mut door = Door::new(writes_needed(device));
-    let outcome = attempt(
-        device,
-        &allow,
-        inventory.as_ref(),
-        (&log, log_path.as_deref()),
-        &mut door,
-        now,
-    );
-    record_readings(log_path.as_deref(), &[(device, outcome)]);
-    // The owner clicked, so a floor wait shows the time left instead of the waiting text.
-    let floor = floor_check(&log, device.family, device.vid, device.pid, now);
-    let outcome = match (outcome, floor) {
-        (Outcome::Waiting, Err(ClaimError::Wait(left))) => Outcome::TooSoon(left),
-        (outcome, _) => outcome,
-    };
-    let (vid, pid) = (device.vid, device.pid);
-    Some(checked(
-        device,
-        outcome,
-        log.reading(vid, pid),
-        log.last(vid, pid),
-        now,
-    ))
-}
-
-/// Whether the menu offers "Check battery now" for the row `id`: a known device the gate holds
-/// back only for want of confirmation.
-pub fn can_check(id: &str, allow: &[(u16, u16)]) -> bool {
-    known_receiver(id).is_some_and(|device| gate(device, allow) == Err(Outcome::Unconfirmed))
-}
-
-/// The known device behind the row id `id` and `allow` with that device added, so the gate
-/// opens for it alone; `None` for any other id.
-fn check_scope(id: &str, allow: &[(u16, u16)]) -> Option<(&'static KnownDevice, Vec<(u16, u16)>)> {
-    let device = known_receiver(id)?;
-    let mut allow = allow.to_vec();
-    allow.push((device.vid, device.pid));
-    Some((device, allow))
-}
-
-fn known_receiver(id: &str) -> Option<&'static KnownDevice> {
-    KNOWN.iter().find(|device| row_id(device) == id)
-}
-
-/// The row of a check; only a valid reading confirms, and only a device the catalogue leaves
-/// unverified.
-fn checked(
-    device: &KnownDevice,
-    outcome: Outcome,
-    stored: Option<(Reading, SystemTime)>,
-    last_query: Option<SystemTime>,
-    now: SystemTime,
-) -> Checked {
-    let is_reading = matches!(outcome, Outcome::Reading(..));
-    Checked {
-        row: view(device, outcome, stored, last_query, now),
-        confirm: (is_reading && !device.verified).then_some((device.vid, device.pid)),
-        outcome,
-    }
+    devices
 }
 
 /// One traced listing of the HID and serial devices (slow while one unplugs); presence and the
@@ -241,23 +134,27 @@ fn list_devices() -> Listing {
     listing
 }
 
-/// The present devices the gate lets through; only these are listed in depth and opened.
-fn openable(present: &[(u16, u16)], allow: &[(u16, u16)]) -> Vec<(u16, u16)> {
-    present
+/// The gated devices whose own refusals let them through; only these are listed in depth and
+/// opened.
+fn openable(devices: &[Device]) -> Vec<&Device> {
+    devices
         .iter()
-        .copied()
-        .filter(|&(vid, pid)| known(vid, pid).is_some_and(|d| gate(d, allow).is_ok()))
+        .filter(|device| gate(device).is_ok())
         .collect()
 }
 
 /// The in-depth inventory of `openable` from the same listing. An empty filter would keep every
 /// device, so with nothing openable no inventory is made.
-fn list_in_depth(listing: Listing, openable: &[(u16, u16)]) -> Option<Inventory> {
+fn list_in_depth(listing: Listing, openable: &[&Device]) -> Option<Inventory> {
     if openable.is_empty() {
         return None;
     }
+    let ids: Vec<(u16, u16)> = openable
+        .iter()
+        .map(|device| (device.vid, device.pid))
+        .collect();
     let _span = log::span("door::inventory");
-    Some(listing.into_inventory(openable))
+    Some(listing.into_inventory(&ids))
 }
 
 /// Whether every device in `openable` is inside its query floor with a stored reading, so the
@@ -265,15 +162,14 @@ fn list_in_depth(listing: Listing, openable: &[(u16, u16)]) -> Option<Inventory>
 /// handles it), so it forces the full listing.
 // shortcut: a channel that vanished inside the floor shows the stored reading, not "unsupported",
 // until the floor ends and the next cycle lists in depth.
-fn only_waiting(openable: &[(u16, u16)], log: &QueryLog, now: SystemTime) -> bool {
-    openable.iter().all(|&(vid, pid)| {
-        known(vid, pid).is_some_and(|device| {
-            log.reading(vid, pid).is_some()
-                && matches!(
-                    floor_check(log, device.family, vid, pid, now),
-                    Err(ClaimError::Wait(_))
-                )
-        })
+fn only_waiting(openable: &[&Device], log: &QueryLog, now: SystemTime) -> bool {
+    openable.iter().all(|device| {
+        let (vid, pid) = (device.vid, device.pid);
+        log.reading(vid, pid).is_some()
+            && matches!(
+                floor_check(log, device.family, vid, pid, now),
+                Err(ClaimError::Wait(_))
+            )
     })
 }
 
@@ -284,8 +180,7 @@ fn load_log(log_path: Option<&FsPath>) -> QueryLog {
 
 /// One device's outcome: the pure plan first, then the query only when the plan allows it.
 fn attempt(
-    device: &KnownDevice,
-    allow: &[(u16, u16)],
+    device: &Device,
     inventory: Option<&Inventory>,
     (log, log_path): (&QueryLog, Option<&FsPath>),
     door: &mut Door,
@@ -295,7 +190,7 @@ fn attempt(
         "device {:04X}:{:04X} attempt",
         device.vid, device.pid
     ));
-    let gate_result = gate(device, allow);
+    let gate_result = gate(device);
     let pick = match inventory {
         Some(inv) if gate_result.is_ok() => {
             pick_channel(&inv.hid, &inv.serial, &inv.errors, device)
@@ -320,16 +215,17 @@ fn attempt(
     }
 }
 
-/// Whether the device may be opened at all: it must have a known working command, and be
-/// verified or allowed by the owner.
-fn gate(device: &KnownDevice, allow: &[(u16, u16)]) -> Result<(), Outcome> {
+/// Whether a gated device may be opened at all: it must have a known working command, and a
+/// custom BITMOUSE device must be a receiver, since the frame addresses the receiver and the
+/// door checks the connection of catalogue rows only.
+fn gate(device: &Device) -> Result<(), Outcome> {
     if device.needs_capture {
         return Err(Outcome::NeedsCapture);
     }
-    if device.verified || allow.contains(&(device.vid, device.pid)) {
-        return Ok(());
+    if device.is_custom_bitmouse_cable() {
+        return Err(Outcome::NoChannel);
     }
-    Err(Outcome::Unconfirmed)
+    Ok(())
 }
 
 /// The family's target picked from the listing only (no I/O); mouse and keyboard collections
@@ -338,7 +234,7 @@ fn pick_channel(
     hid: &[HidCollection],
     serial: &[SerialEntry],
     errors: &[String],
-    device: &KnownDevice,
+    device: &Device,
 ) -> Result<(), TargetError> {
     let (vid, pid, family) = (device.vid, device.pid, device.family);
     match family.link() {
@@ -361,9 +257,9 @@ fn target_outcome(error: &TargetError) -> Outcome {
     }
 }
 
-/// Safety order: the gate (capture, confirmation), then no channel, then the floor, then the
-/// pick's own refusal, then the budget. A future stamp (`ClockBack`) goes on to `claim_query`,
-/// which replaces it and refuses, so nothing is sent then either.
+/// Safety order: the gate (capture, custom BITMOUSE cable), then no channel, then the floor,
+/// then the pick's own refusal, then the budget. A future stamp (`ClockBack`) goes on to
+/// `claim_query`, which replaces it and refuses, so nothing is sent then either.
 fn plan(
     gate: Result<(), Outcome>,
     pick: Result<(), Outcome>,
@@ -389,11 +285,11 @@ fn plan(
 }
 
 /// Opens the target, claims the query time (saved before the first write), sends the status
-/// query where the family has one, then the battery query, and records a valid reading. No
+/// query where the device has one, then the battery query, and records a valid reading. No
 /// retries; full errors go to the log only.
 fn query(
     inventory: &Inventory,
-    device: &KnownDevice,
+    device: &Device,
     door: &mut Door,
     log_path: Option<&FsPath>,
 ) -> Outcome {
@@ -443,7 +339,12 @@ fn query(
 
     let sent = {
         let _span = log::span_fmt(format_args!("device {vid:04X}:{pid:04X} send and decode"));
-        door.send(&mut target)
+        // A custom device is outside the catalogue, so the door checks its family on the device.
+        if device.custom {
+            door.send_as(&mut target, family)
+        } else {
+            door.send(&mut target)
+        }
     };
     let exchange = match sent {
         Ok(exchange) => exchange,
@@ -473,7 +374,7 @@ fn query(
 }
 
 /// The valid readings among one cycle's outcomes, with their device ids.
-fn readings_of(outcomes: &[(&KnownDevice, Outcome)]) -> Vec<(u16, u16, Reading, SystemTime)> {
+fn readings_of(outcomes: &[(&Device, Outcome)]) -> Vec<(u16, u16, Reading, SystemTime)> {
     outcomes
         .iter()
         .filter_map(|&(device, outcome)| match outcome {
@@ -485,7 +386,7 @@ fn readings_of(outcomes: &[(&KnownDevice, Outcome)]) -> Vec<(u16, u16, Reading, 
 
 /// Stores all of a cycle's readings in one locked update of the query log; the query stamps were
 /// already saved before each send. Nothing is written when no device gave a reading.
-fn record_readings(log_path: Option<&FsPath>, outcomes: &[(&KnownDevice, Outcome)]) {
+fn record_readings(log_path: Option<&FsPath>, outcomes: &[(&Device, Outcome)]) {
     let readings = readings_of(outcomes);
     let Some(path) = log_path.filter(|_| !readings.is_empty()) else {
         return;
@@ -508,20 +409,20 @@ fn record_readings(log_path: Option<&FsPath>, outcomes: &[(&KnownDevice, Outcome
 
 /// Whether the worker asks the online status before the battery. The ATK serial receiver keeps
 /// answering the battery query with the last level after the headset is off; a cable
-/// connection has no dongle link to ask about.
-fn online_first(device: &KnownDevice) -> bool {
-    device.family == Family::AtkSerial && !device.cable
+/// connection has no dongle link to ask about, and the status query is catalogue-only.
+fn online_first(device: &Device) -> bool {
+    device.family == Family::AtkSerial && !device.cable && !device.custom
 }
 
 /// Writes one try needs: the status query first, then the battery query.
-fn writes_needed(device: &KnownDevice) -> u8 {
+fn writes_needed(device: &Device) -> u8 {
     1 + u8::from(online_first(device))
 }
 
 /// Sends the status query; `Some` ends the try (headset off, or the send failed and is not
 /// retried), `None` goes on to the battery query. A missing or unusable status reply is
 /// logged and falls through, so an unverified decoder never hides a working device.
-fn status_verdict(door: &mut Door, target: &mut Target, device: &KnownDevice) -> Option<Outcome> {
+fn status_verdict(door: &mut Door, target: &mut Target, device: &Device) -> Option<Outcome> {
     let (vid, pid) = (device.vid, device.pid);
     let sent = {
         let _span = log::span_fmt(format_args!("device {vid:04X}:{pid:04X} status"));
@@ -568,12 +469,11 @@ fn outcome_text(outcome: Outcome) -> String {
     }
 }
 
-/// The menu text for an outcome; an unconfirmed device points at its menu action.
+/// The menu text for an outcome.
 fn reason(outcome: Outcome) -> String {
     match outcome {
         Outcome::NoChannel | Outcome::NeedsCapture => "unsupported".to_owned(),
-        Outcome::Unconfirmed => "new".to_owned(),
-        Outcome::Waiting | Outcome::TooSoon(_) => "…".to_owned(),
+        Outcome::Waiting => "…".to_owned(),
         Outcome::Busy => "in use".to_owned(),
         Outcome::Ambiguous => "2 receivers".to_owned(),
         Outcome::NotRecorded | Outcome::BudgetUsed => "error".to_owned(),
@@ -592,11 +492,11 @@ fn on_cable(outcome: Outcome) -> bool {
 }
 
 /// The row id the menu and config use for a receiver or cable device.
-fn row_id(device: &KnownDevice) -> String {
+fn row_id(device: &Device) -> String {
     format!("usb-{:04x}-{:04x}", device.vid, device.pid)
 }
 
-/// The row kind (icon and group) of a catalogue model.
+/// The row kind (icon and group) of a catalogue model or custom device.
 fn kind(kind: Kind) -> DeviceKind {
     match kind {
         Kind::Mouse => DeviceKind::Mouse,
@@ -612,7 +512,7 @@ fn kind(kind: Kind) -> DeviceKind {
 /// decides: a query stamped after the stored reading got no valid reply, so it is dimmed too.
 /// With none stored the reason is the level.
 fn view(
-    device: &KnownDevice,
+    device: &Device,
     outcome: Outcome,
     stored: Option<(Reading, SystemTime)>,
     last_query: Option<SystemTime>,
@@ -629,7 +529,7 @@ fn view(
     };
     let row = DeviceView {
         id: row_id(device),
-        name: device.name.to_owned(),
+        name: device.name.clone(),
         kind: kind(device.kind),
         path: if device.cable {
             Path::Cable
@@ -676,6 +576,7 @@ mod tests {
     use protocol::{HidShape, known};
 
     use super::*;
+    use crate::device::tests::custom;
 
     fn at(secs: u64) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(secs)
@@ -683,11 +584,12 @@ mod tests {
 
     const NOW: u64 = 1_800_000_000;
 
-    fn device(vid: u16, pid: u16) -> &'static KnownDevice {
-        known(vid, pid).unwrap()
+    /// A catalogue row as the worker sees it; leaked so a test can hold `&'static` rows.
+    fn device(vid: u16, pid: u16) -> &'static Device {
+        Box::leak(Box::new(Device::from(known(vid, pid).unwrap())))
     }
 
-    fn mchose() -> &'static KnownDevice {
+    fn mchose() -> &'static Device {
         device(0x3837, 0x6011)
     }
 
@@ -701,9 +603,8 @@ mod tests {
 
     #[test]
     fn only_waiting_needs_a_floor_wait_and_a_stored_reading_for_every_device() {
-        let (mchose, n9) = ((0x3837, 0x6011), (0x373B, 0x1204));
-        let family = device(mchose.0, mchose.1).family;
-        let floor = family.query_floor().as_secs();
+        let (mchose, n9) = (mchose(), device(0x373B, 0x1204));
+        let floor = mchose.family.query_floor().as_secs();
         let mut log = QueryLog::default();
 
         // Nothing openable: nothing to list either way.
@@ -712,10 +613,15 @@ mod tests {
         assert!(!only_waiting(&[mchose], &log, at(NOW)));
 
         // Stamped inside the floor, but no stored reading: no stored level to show, list in depth.
-        log.stamp(mchose.0, mchose.1, at(NOW - 1));
+        log.stamp(mchose.vid, mchose.pid, at(NOW - 1));
         assert!(!only_waiting(&[mchose], &log, at(NOW)));
 
-        log.record_reading(mchose.0, mchose.1, reading(80, false, false), at(NOW - 1));
+        log.record_reading(
+            mchose.vid,
+            mchose.pid,
+            reading(80, false, false),
+            at(NOW - 1),
+        );
         assert!(only_waiting(&[mchose], &log, at(NOW)));
         // The floor is over: a query is due.
         assert!(!only_waiting(&[mchose], &log, at(NOW + floor)));
@@ -723,12 +629,17 @@ mod tests {
         assert!(!only_waiting(&[mchose], &log, at(NOW - 10)));
 
         // One device that is due keeps the whole listing.
-        log.stamp(n9.0, n9.1, at(NOW - 1));
-        log.record_reading(n9.0, n9.1, reading(50, false, false), at(NOW - 1));
+        log.stamp(n9.vid, n9.pid, at(NOW - 1));
+        log.record_reading(n9.vid, n9.pid, reading(50, false, false), at(NOW - 1));
         assert!(only_waiting(&[mchose, n9], &log, at(NOW)));
-        assert!(!only_waiting(&[mchose, (0x3554, 0xFA09)], &log, at(NOW)));
-        // An id outside the catalogue is never skipped.
-        assert!(!only_waiting(&[(0x1234, 0x5678)], &log, at(NOW)));
+        assert!(!only_waiting(
+            &[mchose, device(0x3554, 0xFA09)],
+            &log,
+            at(NOW)
+        ));
+        // A custom device with nothing stored is never skipped.
+        let mine = custom(0x1234, 0x5678, Family::Compx);
+        assert!(!only_waiting(&[mchose, &mine], &log, at(NOW)));
     }
 
     #[test]
@@ -781,10 +692,9 @@ mod tests {
     }
 
     /// Every attempt that ends without a fresh reading or a floor wait.
-    const FAILURES: [Outcome; 9] = [
+    const FAILURES: [Outcome; 8] = [
         Outcome::NoChannel,
         Outcome::NeedsCapture,
-        Outcome::Unconfirmed,
         Outcome::Busy,
         Outcome::Ambiguous,
         Outcome::NotRecorded,
@@ -793,153 +703,85 @@ mod tests {
         Outcome::Invalid(ON_CABLE_TEXT),
     ];
 
+    /// The ids of `devices`, in order.
+    fn ids(devices: &[Device]) -> Vec<(u16, u16)> {
+        devices.iter().map(|d| (d.vid, d.pid)).collect()
+    }
+
     #[test]
-    fn gate_blocks_capture_first_then_unconfirmed() {
+    fn only_verified_allowed_or_custom_devices_become_rows() {
+        let (mchose, vgn, f75) = ((0x3837, 0x6011), (0x391D, 0x1A05), (0x3554, 0xFA09));
+        let mine = custom(0x1234, 0x5678, Family::Compx);
+        let present = [mchose, vgn, f75, (0x1234, 0x5678), (0x046D, 0xC52B), mchose];
+
+        // Nothing added: only the verified model, once.
+        assert_eq!(ids(&queried(&present, &[], &[])), [mchose]);
+        // `allow` lets an unverified catalogue model through; a custom device always passes.
+        assert_eq!(
+            ids(&queried(&present, &[f75], std::slice::from_ref(&mine))),
+            [mchose, f75, (0x1234, 0x5678)]
+        );
+        // An unverified model with no `allow` entry stays out, whatever a custom entry says.
+        let shadow = custom(vgn.0, vgn.1, Family::Compx);
+        assert!(queried(&[vgn], &[], &[shadow]).is_empty());
+        // A custom device that is not plugged in gives no row.
+        assert!(queried(&[], &[], &[mine]).is_empty());
+    }
+
+    #[test]
+    fn gate_blocks_a_device_that_needs_a_capture() {
         let vgn = device(0x391D, 0x1A05);
-        // A device that needs a capture stays closed even when the owner allows it.
-        let needs_capture = KnownDevice {
+        let needs_capture = Device {
             needs_capture: true,
-            ..*vgn
+            ..vgn.clone()
         };
-        let id = (needs_capture.vid, needs_capture.pid);
-        assert_eq!(gate(&needs_capture, &[id]), Err(Outcome::NeedsCapture));
-        assert_eq!(gate(&needs_capture, &[]), Err(Outcome::NeedsCapture));
-        assert_eq!(gate(vgn, &[]), Err(Outcome::Unconfirmed));
-        assert_eq!(gate(vgn, &[(0x3837, 0x6011)]), Err(Outcome::Unconfirmed));
-        assert_eq!(gate(vgn, &[(0x391D, 0x1A05)]), Ok(()));
-        assert_eq!(gate(mchose(), &[]), Ok(()));
-        // X1 SE is verified in the catalogue, so it passes with no allow entry.
-        assert_eq!(gate(device(0x373B, 0x1216), &[]), Ok(()));
-    }
-
-    const VGN: (u16, u16) = (0x391D, 0x1A05);
-
-    #[test]
-    fn check_is_offered_only_for_unconfirmed_not_allowed_devices() {
-        assert!(can_check("usb-391d-1a05", &[]));
-        assert!(can_check("usb-391d-1a05", &[(0x3837, 0x6011)]));
-        assert!(!can_check("usb-391d-1a05", &[VGN]));
-        assert!(!can_check("usb-3837-6011", &[]));
-        assert!(!can_check("usb-373b-1216", &[]));
-        assert!(!can_check("bt:a4-c3-f0-11-22-33", &[]));
-        assert!(!can_check("usb-046d-c52b", &[]));
-        assert!(!can_check("usb-391D-1A05", &[]));
+        assert_eq!(gate(&needs_capture), Err(Outcome::NeedsCapture));
+        assert_eq!(gate(vgn), Ok(()));
+        assert_eq!(gate(mchose()), Ok(()));
+        assert_eq!(
+            plan(gate(&needs_capture), Ok(()), Ok(()), true),
+            Step::Show(Outcome::NeedsCapture)
+        );
     }
 
     #[test]
-    fn forced_check_opens_only_its_own_device() {
-        let all: Vec<(u16, u16)> = KNOWN.iter().map(|d| (d.vid, d.pid)).collect();
-        let (vgn, allow) = check_scope("usb-391d-1a05", &[]).unwrap();
-        assert_eq!((vgn.vid, vgn.pid), VGN);
-        let opened_unconfirmed: Vec<(u16, u16)> = openable(&all, &allow)
-            .into_iter()
-            .filter(|&(vid, pid)| !device(vid, pid).verified)
+    fn custom_bitmouse_is_queried_only_on_a_receiver() {
+        let receiver = custom(0x373B, 0x2000, Family::AtkBitmouse);
+        let cable = Device {
+            cable: true,
+            ..receiver.clone()
+        };
+        assert_eq!(gate(&receiver), Ok(()));
+        assert_eq!(plan(gate(&receiver), Ok(()), Ok(()), true), Step::Query);
+        assert_eq!(gate(&cable), Err(Outcome::NoChannel));
+        assert_eq!(
+            plan(gate(&cable), Ok(()), Ok(()), true),
+            Step::Show(Outcome::NoChannel)
+        );
+        let both = [receiver.clone(), cable.clone()];
+        let opened: Vec<(u16, u16, bool)> = openable(&both)
+            .iter()
+            .map(|d| (d.vid, d.pid, d.cable))
             .collect();
-        assert_eq!(opened_unconfirmed, [VGN]);
-        assert_eq!(
-            gate(device(0x3554, 0xFA09), &allow),
-            Err(Outcome::Unconfirmed)
-        );
-        assert_eq!(plan(gate(vgn, &allow), Ok(()), Ok(()), true), Step::Query);
+        assert_eq!(opened, [(0x373B, 0x2000, false)]);
 
-        // Nothing else is relaxed: the floor, the pick and a missing capture still refuse.
-        let wait = Err(ClaimError::Wait(Duration::from_secs(4)));
-        assert_eq!(
-            plan(gate(vgn, &allow), Ok(()), wait, true),
-            Step::Show(Outcome::Waiting)
-        );
-        assert_eq!(
-            plan(gate(vgn, &allow), Err(Outcome::Busy), Ok(()), true),
-            Step::Show(Outcome::Busy)
-        );
-        let needs_capture = KnownDevice {
-            needs_capture: true,
-            ..*vgn
+        // Another custom family on a cable, and a catalogue cable row (the door refuses
+        // BITMOUSE there itself), pass the gate.
+        let compx_cable = Device {
+            family: Family::Compx,
+            ..cable.clone()
         };
-        assert_eq!(gate(&needs_capture, &allow), Err(Outcome::NeedsCapture));
-
-        assert!(check_scope("bt:a4-c3-f0-11-22-33", &[]).is_none());
-        assert!(check_scope("usb-046d-c52b", &[]).is_none());
-    }
-
-    #[test]
-    fn only_a_valid_reading_confirms_a_check() {
-        let vgn = device(VGN.0, VGN.1);
-        let good = checked(
-            vgn,
-            Outcome::Reading(reading(80, false, false), at(NOW)),
-            None,
-            None,
-            at(NOW),
-        );
-        assert_eq!(good.confirm, Some(VGN));
-        assert_eq!(good.row.level, Level::Percent(80));
-
-        let failures = [
-            (Outcome::NoReply, "no data"),
-            (Outcome::Busy, "in use"),
-            (Outcome::TooSoon(Duration::from_millis(6_500)), "…"),
-            (Outcome::Invalid("unknown power state"), "error"),
-        ];
-        for (outcome, text) in failures {
-            let row = checked(vgn, outcome, None, None, at(NOW));
-            assert_eq!(row.confirm, None, "{outcome:?}");
-            assert_eq!(row.row.level, Level::NoData(text.into()), "{outcome:?}");
-
-            // A stored reading keeps its percent; its age already tells a missing reply, so only
-            // other reasons become the note.
-            let stored = Some((reading(61, false, false), at(NOW - 300)));
-            let row = checked(vgn, outcome, stored, None, at(NOW));
-            assert_eq!(row.confirm, None, "{outcome:?}");
-            let note = (!matches!(outcome, Outcome::NoReply)).then_some(text);
-            assert_eq!(row.row.note.as_deref(), note, "{outcome:?}");
-        }
-
-        // A verified catalogue device needs no `allow` entry.
-        let mchose_reading = Outcome::Reading(reading(50, false, false), at(NOW));
-        assert_eq!(
-            checked(mchose(), mchose_reading, None, None, at(NOW)).confirm,
-            None
-        );
-    }
-
-    #[test]
-    fn failed_check_reason_survives_later_reads() {
-        let vgn = device(VGN.0, VGN.1);
-        let id = "usb-391d-1a05";
-        let mut notes = CheckNotes::new();
-        let check = |outcome| checked(vgn, outcome, None, None, at(NOW));
-        let later_read = |notes: &CheckNotes| {
-            let row = view(vgn, Outcome::Unconfirmed, None, None, at(NOW));
-            with_check_note(row, Outcome::Unconfirmed, notes)
+        assert_eq!(gate(&compx_cable), Ok(()));
+        let catalogue_cable = Device {
+            custom: false,
+            ..cable
         };
-
-        check(Outcome::NoReply).remember(&mut notes);
-        let row = later_read(&notes);
-        assert_eq!(row.level, Level::NoData("new".into()));
-        assert_eq!(row.note.as_deref(), Some("no data"));
-
-        // The latest failure wins; a floor wait sent nothing and keeps it.
-        check(Outcome::Busy).remember(&mut notes);
-        check(Outcome::TooSoon(Duration::from_secs(5))).remember(&mut notes);
-        assert_eq!(later_read(&notes).note.as_deref(), Some("in use"));
-
-        // A note only rides on a device the gate still holds back.
-        let queried = view(vgn, Outcome::NoReply, None, None, at(NOW));
-        assert_eq!(
-            with_check_note(queried, Outcome::NoReply, &notes).note,
-            None
-        );
-
-        // A valid reading clears it.
-        check(Outcome::Reading(reading(80, false, false), at(NOW))).remember(&mut notes);
-        assert!(!notes.contains_key(id));
-        assert_eq!(later_read(&notes).note, None);
+        assert_eq!(gate(&catalogue_cable), Ok(()));
     }
 
     #[test]
     fn closed_gate_never_reaches_the_door() {
-        for refused in [Outcome::Unconfirmed, Outcome::NeedsCapture] {
+        for refused in [Outcome::NeedsCapture, Outcome::NoChannel] {
             for floor in [Ok(()), Err(ClaimError::ClockBack)] {
                 assert_eq!(plan(Err(refused), Ok(()), floor, true), Step::Show(refused));
             }
@@ -1153,14 +995,18 @@ mod tests {
 
     #[test]
     fn only_atk_serial_dongles_ask_the_status_first() {
-        for device in KNOWN {
+        for device in KNOWN.iter().map(Device::from) {
             let asks = device.family == Family::AtkSerial && !device.cable;
-            assert_eq!(online_first(device), asks);
-            assert_eq!(writes_needed(device), if asks { 2 } else { 1 });
+            assert_eq!(online_first(&device), asks);
+            assert_eq!(writes_needed(&device), if asks { 2 } else { 1 });
         }
-        let wired = known(0x373B, 0x11CA).expect("N9 Pro is in the catalogue");
+        let wired = device(0x373B, 0x11CA);
         assert!(wired.cable && wired.family == Family::AtkSerial);
         assert!(!online_first(wired));
+        // The status query is catalogue-only, so a custom device goes straight to the battery.
+        let mine = custom(0x373B, 0x2001, Family::AtkSerial);
+        assert!(!online_first(&mine));
+        assert_eq!(writes_needed(&mine), 1);
     }
 
     #[test]
@@ -1206,8 +1052,7 @@ mod tests {
     #[test]
     fn reason_texts() {
         let text = reason;
-        assert_eq!(text(Outcome::Unconfirmed), "new");
-        assert_eq!(text(Outcome::TooSoon(Duration::from_secs(4))), "…");
+        assert_eq!(text(Outcome::Waiting), "…");
         assert_eq!(text(Outcome::NoChannel), "unsupported");
         assert_eq!(text(Outcome::NeedsCapture), "unsupported");
         assert_eq!(text(Outcome::Busy), "in use");
@@ -1261,6 +1106,26 @@ mod tests {
             let row = view(device(vid, pid), Outcome::Waiting, None, None, at(NOW));
             assert_eq!((row.id.as_str(), row.kind, row.path), (id, kind, path));
         }
+    }
+
+    #[test]
+    fn custom_device_row() {
+        let mine = Device {
+            kind: Kind::Headset,
+            ..custom(0x1234, 0x5678, Family::Compx)
+        };
+        let fresh = Outcome::Reading(reading(64, false, false), at(NOW));
+        let row = view(&mine, fresh, None, None, at(NOW));
+        assert_eq!(
+            (row.id.as_str(), row.name.as_str(), row.kind, row.path),
+            (
+                "usb-1234-5678",
+                "My mouse",
+                DeviceKind::Headset,
+                Path::Dongle
+            )
+        );
+        assert_eq!(row.level, Level::Percent(64));
     }
 
     #[test]

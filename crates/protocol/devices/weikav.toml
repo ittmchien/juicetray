@@ -1,0 +1,10 @@
+# Device models juicetray knows, one line per VID:PID. Fields: vid, pid (4 hex digits),
+# name, family (protocol family in code), kind (mouse|headset|keyboard|gamepad|other),
+# connection (receiver|cable), verified (read on real hardware), optional needs_capture.
+
+# Weikav keyboards on Sonix 2.4 GHz dongles (driveall.cn web driver): GET_DEVICE_INFO on
+# FF60:0061. 0C45 is Sonix's shared VID, so only listed PIDs are ever queried. The web driver
+# config gives the same PID to the NUT65V2, NUT87, VEGA108 and MOX65 2.4G dongles.
+devices = [
+  { vid = "0C45", pid = "FEF9", name = "Weikav NUT75 / NUT65V2 / NUT87 2.4G dongle", family = "Driveall", kind = "keyboard", connection = "receiver", verified = false },
+]

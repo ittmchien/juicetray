@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
 use hidapi::HidDevice;
-use protocol::{Family, Link};
+use protocol::{Family, HidShape, Link, families_for};
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits};
 
 use crate::enumerate::{Access, HidCollection, Inventory, SerialEntry};
@@ -16,6 +16,17 @@ pub(crate) trait Transport {
     fn write(&mut self, bytes: &[u8]) -> anyhow::Result<()>;
     /// Bytes read before `timeout`; 0 means nothing arrived in time.
     fn read(&mut self, buf: &mut [u8], timeout: Duration) -> anyhow::Result<usize>;
+    /// One SetFeature of `request` (report id first), a `settle` pause, then one GetFeature of
+    /// the same report id into `buf`; returns the length read, id included. Only `write.rs`
+    /// calls it; transports without feature reports refuse.
+    fn feature_exchange(
+        &mut self,
+        _request: &[u8],
+        _settle: Duration,
+        _buf: &mut [u8],
+    ) -> anyhow::Result<usize> {
+        bail!("this transport has no feature reports")
+    }
 }
 
 /// An opened device. `vid`/`pid` always come from the inventory entry it was opened from.
@@ -23,6 +34,12 @@ pub struct Target {
     pub(crate) vid: u16,
     pub(crate) pid: u16,
     pub(crate) link: Link,
+    /// `families_for` over the device's collections and ports at open time.
+    pub(crate) families: Vec<Family>,
+    /// Every collection shape of the device, so `send_as` can re-run `pick_target`.
+    pub(crate) shapes: Vec<HidShape>,
+    /// The opened collection's shape; `None` for a serial port.
+    pub(crate) opened: Option<HidShape>,
     pub(crate) transport: Box<dyn Transport>,
 }
 
@@ -56,10 +73,14 @@ impl Inventory {
         let device = api
             .open_path(&path)
             .with_context(|| format!("could not open {label}"))?;
+        let shapes = self.shapes(entry.vid, entry.pid);
         Ok(Target {
             vid: entry.vid,
             pid: entry.pid,
             link: Link::Hid,
+            families: self.families(entry.vid, entry.pid, &shapes),
+            shapes,
+            opened: Some(entry.shape.clone()),
             transport: Box::new(HidTransport(device)),
         })
     }
@@ -92,12 +113,20 @@ impl Inventory {
         // shift the 64-byte frames.
         port.clear(ClearBuffer::Input)
             .with_context(|| format!("could not clear stale input on {label}"))?;
+        let shapes = self.shapes(entry.vid, entry.pid);
         Ok(Target {
             vid: entry.vid,
             pid: entry.pid,
             link: Link::Serial,
+            families: self.families(entry.vid, entry.pid, &shapes),
+            shapes,
+            opened: None,
             transport: Box::new(SerialTransport(port)),
         })
+    }
+
+    fn families(&self, vid: u16, pid: u16, shapes: &[HidShape]) -> Vec<Family> {
+        families_for(vid, pid, shapes, self.has_serial_port(vid, pid))
     }
 }
 
@@ -116,6 +145,21 @@ impl Transport for HidTransport {
             .unwrap_or(i32::MAX)
             .max(1);
         Ok(self.0.read_timeout(buf, millis)?)
+    }
+
+    /// No retry: a failed SetFeature skips the GetFeature, and a failed GetFeature is an error.
+    fn feature_exchange(
+        &mut self,
+        request: &[u8],
+        settle: Duration,
+        buf: &mut [u8],
+    ) -> anyhow::Result<usize> {
+        let id = *request.first().context("empty feature report")?;
+        self.0.send_feature_report(request)?;
+        std::thread::sleep(settle);
+        let first = buf.first_mut().context("empty feature buffer")?;
+        *first = id;
+        Ok(self.0.get_feature_report(buf)?)
     }
 }
 

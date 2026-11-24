@@ -11,7 +11,7 @@ use std::time::Duration;
 use windows::Win32::Security::Cryptography::{BCRYPT_SHA256_ALG_HANDLE, BCryptHash};
 
 use super::check::UpdateAssets;
-use super::install::{backup_path, digest_matches, expected_digest, staged_path};
+use super::install::{backup_path, digest_matches, expected_digest, running_exe, staged_path};
 use super::windows::get;
 
 /// A release exe is a few MB; anything near this is not Juicetray.
@@ -43,8 +43,8 @@ fn other(reason: impl Into<String>) -> Failure {
 /// `--updated-from <from_version>`; the caller then exits this process. On any error the staged
 /// file is deleted and the exe path holds the old exe again (unless `RestoreFailed`).
 pub fn install(assets: &UpdateAssets, from_version: &str) -> Result<(), Failure> {
-    let exe = std::env::current_exe()
-        .map_err(|error| other(format!("finding the running exe failed: {error}")))?;
+    let exe =
+        running_exe().map_err(|error| other(format!("finding the running exe failed: {error}")))?;
     let staged = staged_path(&exe);
     let result = stage_and_swap(&exe, &staged, assets, from_version);
     if result.is_err() {

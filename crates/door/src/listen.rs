@@ -61,6 +61,9 @@ mod tests {
             vid: 0x3837,
             pid: 0x6011,
             link,
+            families: Vec::new(),
+            shapes: Vec::new(),
+            opened: None,
             transport: Box::new(ReadOnlyFake {
                 reads: reads.into(),
             }),

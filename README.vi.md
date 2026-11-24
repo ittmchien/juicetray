@@ -30,7 +30,7 @@ cài phần mềm của từng hãng.**
 - 🖱️ **Receiver 2.4 GHz và cáp** — đọc thẳng từ receiver; không cần chạy app của hãng.
 - 📶 **Mọi thiết bị Bluetooth** — tai nghe, chuột, bàn phím, tay cầm… miễn Windows đã biết mức pin.
 - 🗂️ **Nhóm và sắp xếp** — chia nhóm theo loại, pin cao đứng trước, thiết bị offline xuống cuối và
-  có dấu ⊘; tự ẩn thiết bị offline sau khoảng thời gian bạn chọn.
+  ghi *disconnected*; tự ẩn thiết bị offline sau khoảng thời gian bạn chọn.
 - 🔔 **Cảnh báo pin yếu** — thông báo khi chạm ngưỡng bạn chọn (5–30 % hoặc tự nhập).
 - 🛠️ **Tuỳ chỉnh từng thiết bị** — hiện/ẩn, phần trăm, nhãn, icon, màu icon cho taskbar sáng và tối.
 - 🪶 **Siêu nhẹ** — khoảng 10 MB RAM, ~0,05 % CPU lúc rảnh, file exe portable 2 MB; tự dừng
@@ -45,7 +45,7 @@ cài phần mềm của từng hãng.**
    [bản phát hành mới nhất](https://github.com/ittmchien/juicetray/releases/latest).
 2. Đặt vào một thư mục ghi được (ví dụ `%LOCALAPPDATA%\Programs\Juicetray`) rồi chạy. App là
    bản portable: không cần cài, không cần thiết lập gì thêm.
-3. Chuột phải vào dải icon hoặc icon khay → **Start at login** để chạy cùng Windows.
+3. Chuột phải vào dải icon hoặc icon khay → **Settings → Start at login** để chạy cùng Windows.
 
 Cài đặt lưu ở `%APPDATA%\ittmchien\juicetray\config\config.toml`, nên thay file exe không mất
 cài đặt. Windows SmartScreen có thể cảnh báo app chưa ký số: bấm **More info → Run anyway**.
@@ -78,10 +78,19 @@ thiết bị.
 ### ➕ Thiết bị khác
 
 Nhiều chuột ATK, VXE và VGN dùng chung giao thức. Khi một model chưa được xác minh, Juicetray
-không bao giờ tự hỏi pin nó. Muốn thử, dùng **Add unsupported device…** trong menu (có ở bản
-phát hành tới): app nhận ra thiết bị khi bạn cắm vào, gửi một lệnh hỏi pin chỉ-đọc, và thêm
-thiết bị khi bạn xác nhận mức pin đúng. Nếu không được, vui lòng
-[mở issue](https://github.com/ittmchien/juicetray/issues) — cửa sổ sẽ điền sẵn thông tin.
+không bao giờ tự hỏi pin nó. Muốn thử, dùng **Add device…** trong menu (Windows),
+hoặc bấm **OK** trên popup "New device found" (hiện khi bạn cắm một hãng được hỗ trợ hoặc
+receiver không dây bất kỳ lúc Juicetray đang chạy, không bao giờ hiện lúc khởi động, và chỉ
+một lần cho mỗi thiết bị dù bạn trả lời gì): app nhận ra thiết bị, gửi một
+lệnh hỏi pin chỉ-đọc khi bạn bấm **Try**, và thêm thiết bị khi bạn xác nhận mức pin đúng. Nếu
+không được, bấm **Send report** để gửi thông tin qua
+[Google Form](https://forms.gle/Qp5CeBGEiPg2UtkX6) (không cần tài khoản), hoặc **Report on
+GitHub** để [mở issue](https://github.com/ittmchien/juicetray/issues) với thông tin điền sẵn; cả
+hai cách đều không kèm thư mục người dùng, tên máy hay số serial của thiết bị.
+
+📋 **[Danh sách thiết bị](https://docs.google.com/spreadsheets/d/e/2PACX-1vRTKUOHRmpLeXhjxL93T5HwuYsJKnzMHSUhN2AWslNCB938EpQH2YkMeNubTcpvdxpHC2o7Dw4OHfS7/pubhtml)**
+— mọi model Juicetray biết (**Supported**) và các thiết bị người dùng đã yêu cầu kèm trạng thái
+(**Requested**).
 
 `allow` trong file config vẫn dùng được cho thiết bị thêm tay:
 
@@ -99,8 +108,8 @@ allow = ["391D:1A05"]
 ## 🔄 Cập nhật
 
 Juicetray kiểm tra [GitHub Releases](https://github.com/ittmchien/juicetray/releases) mỗi ngày
-một lần (và một phút sau khi mở app). Tắt bằng mục **Check for updates automatically** trong
-menu, hoặc kiểm tay bằng **Check for updates…**. Yêu cầu chỉ gửi số phiên bản trong User-Agent
+tối đa một lần (mở lại app cũng không kiểm thêm). Tắt bằng mục **Check for updates automatically** trong
+**Settings**, hoặc kiểm tay bằng **Check for updates…**. Yêu cầu chỉ gửi số phiên bản trong User-Agent
 (`juicetray/<version>`).
 
 **Update now** tải exe mới, kiểm SHA-256 với `SHA256SUMS.txt` của bản phát hành, thay file rồi
@@ -121,7 +130,7 @@ khởi động lại; lỗi ở bất kỳ bước nào thì exe cũ được gi
 | Lệnh | Tác dụng |
 |---|---|
 | `juicetray scan` | Liệt kê thiết bị Bluetooth, HID và cổng serial; không ghi gì; che số serial. |
-| `juicetray probe <VID:PID>` | Gửi một lệnh hỏi pin chỉ-đọc tới thiết bị được hỗ trợ và in phản hồi thô. Đóng app của hãng trước; từ chối nếu chưa hết khoảng chờ của thiết bị. Không bắt buộc: mục **Check battery now** trong menu xác nhận thiết bị mà không cần lệnh này. |
+| `juicetray probe <VID:PID>` | Gửi một lệnh hỏi pin chỉ-đọc tới thiết bị được hỗ trợ và in phản hồi thô. Đóng app của hãng trước; từ chối nếu chưa hết khoảng chờ của thiết bị. Không bắt buộc: mục **Add device…** trong menu thử thiết bị mà không cần lệnh này. |
 | `juicetray probe --online <VID:PID>` | Gửi lệnh hỏi trạng thái kết nối chỉ-đọc (Compx và ATK N9 Ultra, cùng khoảng chờ) và in `online: yes/no/unsupported`. |
 | `juicetray listen <VID:PID> [seconds]` | Chỉ đọc (1–60 giây, mặc định 10) và in từng report kèm thời điểm tính bằng ms; không gửi gì. |
 
@@ -145,8 +154,8 @@ git clone -b dev https://github.com/ittmchien/juicetray
 Mỗi model là một dòng trong file của hãng đó dưới `crates/protocol/devices/` (ví dụ
 `atk.toml`), gồm `vid` và `pid` (4 chữ số hex), `name`, `family`, `kind` (`mouse`, `headset`,
 `keyboard`, `gamepad` hoặc `other`), `connection` (`receiver` hoặc `cable`) và `verified`.
-`family` là một trong `Compx`, `Report13`, `Mchose`, `AtkSerial` hoặc `AtkBitmouse`; model cần
-giao thức khác thì phải thêm family vào code trước. Bước build kiểm từng dòng (family hoặc kind
+`family` là một trong `Compx`, `Report13`, `Mchose`, `AtkSerial`, `AtkBitmouse`, `VgnKc2`,
+`RongYuanF7` hoặc `Driveall`; model cần giao thức khác thì phải thêm family vào code trước. Bước build kiểm từng dòng (family hoặc kind
 lạ, hex sai, VID:PID trùng) và báo lỗi kèm tên file và vị trí dòng. Mở pull request vào `dev`
 với `verified = false`; model chỉ được đổi thành `verified = true` sau khi kiểm trên thiết bị
 thật (`juicetray probe <VID:PID>` đọc ra cùng mức pin với app của hãng).

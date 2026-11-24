@@ -1,21 +1,26 @@
 //! Pure battery protocol: device families, query frames, reply decoders, the device catalogue
-//! (compiled from `devices/*.toml`), the recovery deny list, per-family query floors, HID
-//! report-descriptor sizes, the collection open rule and target picking. No I/O; everything is
-//! checked from byte frames.
+//! (compiled from `devices/*.toml`), the recovery deny list, family detection, per-family query
+//! floors, HID report-descriptor sizes, the collection open rule and target picking. No I/O;
+//! everything is checked from byte frames.
 
 mod atk_serial;
 mod bitmouse;
 pub mod compx;
 mod devices;
+mod driveall;
+mod families;
 mod hid;
 mod mchose;
 mod recovery;
 mod report;
 mod report13;
+mod rongyuan;
+mod vgn_kc2;
 
 use std::time::{Duration, SystemTime};
 
 pub use devices::{KNOWN, Kind, KnownDevice, known};
+pub use families::{families_for, family_vid};
 pub use hid::{HidShape, PickError, open_permission, pick_target};
 pub use recovery::is_recovery;
 pub use report::{ReportKind, ReportSize, TopCollection, parse_descriptor, reports_of};
@@ -31,6 +36,9 @@ pub enum Family {
     Mchose,
     AtkSerial,
     AtkBitmouse,
+    VgnKc2,
+    RongYuanF7,
+    Driveall,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +77,13 @@ pub enum Decoded {
 impl Family {
     pub fn link(self) -> Link {
         match self {
-            Family::Compx | Family::Report13 | Family::Mchose | Family::AtkBitmouse => Link::Hid,
+            Family::Compx
+            | Family::Report13
+            | Family::Mchose
+            | Family::AtkBitmouse
+            | Family::VgnKc2
+            | Family::RongYuanF7
+            | Family::Driveall => Link::Hid,
             Family::AtkSerial => Link::Serial,
         }
     }
@@ -81,25 +95,48 @@ impl Family {
             Family::Mchose => "MCHOSE",
             Family::AtkSerial => "ATK serial",
             Family::AtkBitmouse => "ATK BITMOUSE",
+            Family::VgnKc2 => "VGN kc2",
+            Family::RongYuanF7 => "RongYuan F7",
+            Family::Driveall => "Driveall",
         }
     }
 
     /// Minimum time between two queries to one device, independent of the UI refresh value.
     pub fn query_floor(self) -> Duration {
         match self {
-            Family::Compx | Family::Report13 | Family::AtkBitmouse => Duration::from_secs(10),
+            // RongYuan dongles answer F7 from their own cache without waking the keyboard.
+            // Driveall's 10 s is unverified: whether GET_DEVICE_INFO wakes the keyboard is unknown.
+            Family::Compx
+            | Family::Report13
+            | Family::AtkBitmouse
+            | Family::VgnKc2
+            | Family::RongYuanF7
+            | Family::Driveall => Duration::from_secs(10),
             Family::Mchose | Family::AtkSerial => Duration::from_secs(300),
         }
     }
 
     /// Total wait for the reply to one query; per-family values taken from the vendor apps.
+    /// For a feature-report family it is the pause between SetFeature and GetFeature.
     pub fn reply_timeout(self) -> Duration {
         match self {
             Family::Compx => Duration::from_millis(3000),
             Family::Report13 => Duration::from_millis(800),
-            Family::AtkBitmouse | Family::Mchose => Duration::from_millis(500),
+            // Driveall: the web driver's per-try timeout (500 ms), sent once instead of 3 retries.
+            Family::AtkBitmouse | Family::Mchose | Family::VgnKc2 | Family::Driveall => {
+                Duration::from_millis(500)
+            }
             Family::AtkSerial => Duration::from_millis(1000),
+            // Vendor tools read ~20 ms after SetFeature and retry 100 ms apart on an unfilled
+            // reply; one read after 100 ms stands in for those retries.
+            Family::RongYuanF7 => Duration::from_millis(100),
         }
+    }
+
+    /// Whether the query is a SetFeature + GetFeature pair instead of an output report
+    /// answered by input reports.
+    pub fn uses_feature_report(self) -> bool {
+        self == Family::RongYuanF7
     }
 }
 
@@ -111,6 +148,9 @@ pub fn battery_query(family: Family) -> &'static [u8] {
         Family::Mchose => &mchose::QUERY,
         Family::AtkSerial => &atk_serial::QUERY,
         Family::AtkBitmouse => &bitmouse::QUERY,
+        Family::VgnKc2 => &vgn_kc2::QUERY,
+        Family::RongYuanF7 => &rongyuan::QUERY,
+        Family::Driveall => &driveall::QUERY,
     }
 }
 
@@ -120,7 +160,12 @@ pub fn online_query(family: Family) -> Option<&'static [u8]> {
     match family {
         Family::Compx => Some(&compx::ONLINE_QUERY),
         Family::AtkSerial => Some(&atk_serial::ONLINE_QUERY),
-        Family::Report13 | Family::Mchose | Family::AtkBitmouse => None,
+        Family::Report13
+        | Family::Mchose
+        | Family::AtkBitmouse
+        | Family::VgnKc2
+        | Family::RongYuanF7
+        | Family::Driveall => None,
     }
 }
 
@@ -129,11 +174,17 @@ pub fn decode_online(family: Family, bytes: &[u8]) -> Decoded {
     match family {
         Family::Compx => compx::decode_online(bytes),
         Family::AtkSerial => atk_serial::decode_online(bytes),
-        Family::Report13 | Family::Mchose | Family::AtkBitmouse => Decoded::NotTheReply,
+        Family::Report13
+        | Family::Mchose
+        | Family::AtkBitmouse
+        | Family::VgnKc2
+        | Family::RongYuanF7
+        | Family::Driveall => Decoded::NotTheReply,
     }
 }
 
-/// Decodes one HID input report as read (report id first) or one serial frame.
+/// Decodes one HID input report as read (report id first; hidapi drops an unused id 0), one
+/// GetFeature reply or one serial frame.
 pub fn decode(family: Family, bytes: &[u8]) -> Decoded {
     match family {
         Family::Compx => compx::decode(bytes),
@@ -141,6 +192,9 @@ pub fn decode(family: Family, bytes: &[u8]) -> Decoded {
         Family::Mchose => mchose::decode(bytes),
         Family::AtkSerial => atk_serial::decode(bytes),
         Family::AtkBitmouse => bitmouse::decode(bytes),
+        Family::VgnKc2 => vgn_kc2::decode(bytes),
+        Family::RongYuanF7 => rongyuan::decode(bytes),
+        Family::Driveall => driveall::decode(bytes),
     }
 }
 
@@ -195,6 +249,9 @@ mod tests {
         assert_eq!(ms(Family::AtkBitmouse), 500);
         assert_eq!(ms(Family::Mchose), 500);
         assert_eq!(ms(Family::AtkSerial), 1000);
+        assert_eq!(ms(Family::VgnKc2), 500);
+        assert_eq!(ms(Family::RongYuanF7), 100);
+        assert_eq!(ms(Family::Driveall), 500);
     }
 
     #[test]
@@ -204,6 +261,9 @@ mod tests {
         assert_eq!(Family::Mchose.query_floor(), Duration::from_secs(300));
         assert_eq!(Family::AtkSerial.query_floor(), Duration::from_secs(300));
         assert_eq!(Family::AtkBitmouse.query_floor(), Duration::from_secs(10));
+        assert_eq!(Family::VgnKc2.query_floor(), Duration::from_secs(10));
+        assert_eq!(Family::RongYuanF7.query_floor(), Duration::from_secs(10));
+        assert_eq!(Family::Driveall.query_floor(), Duration::from_secs(10));
     }
 
     #[test]
@@ -234,5 +294,62 @@ mod tests {
         assert_eq!(Family::Mchose.name(), "MCHOSE");
         assert_eq!(Family::AtkSerial.name(), "ATK serial");
         assert_eq!(Family::AtkBitmouse.name(), "ATK BITMOUSE");
+        assert_eq!(Family::VgnKc2.link(), Link::Hid);
+        assert_eq!(Family::RongYuanF7.link(), Link::Hid);
+        assert_eq!(Family::VgnKc2.name(), "VGN kc2");
+        assert_eq!(Family::RongYuanF7.name(), "RongYuan F7");
+        assert_eq!(Family::Driveall.link(), Link::Hid);
+        assert_eq!(Family::Driveall.name(), "Driveall");
+    }
+
+    /// Every variant; the match makes a new variant fail to compile here until it is listed.
+    fn all_families() -> [Family; 8] {
+        let all = [
+            Family::Compx,
+            Family::Report13,
+            Family::Mchose,
+            Family::AtkSerial,
+            Family::AtkBitmouse,
+            Family::VgnKc2,
+            Family::RongYuanF7,
+            Family::Driveall,
+        ];
+        for family in all {
+            match family {
+                Family::Compx
+                | Family::Report13
+                | Family::Mchose
+                | Family::AtkSerial
+                | Family::AtkBitmouse
+                | Family::VgnKc2
+                | Family::RongYuanF7
+                | Family::Driveall => {}
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn build_script_families_match_the_enum() {
+        let build = include_str!("../build.rs");
+        let start = build.find("const FAMILIES").expect("FAMILIES in build.rs");
+        let list = &build[start..];
+        let list = &list[..list.find("];").expect("end of FAMILIES")];
+        let all = all_families();
+        for family in all {
+            assert!(list.contains(&format!("\"{family:?}\"")), "{family:?}");
+        }
+        assert_eq!(list.matches('"').count(), 2 * all.len(), "{list}");
+    }
+
+    #[test]
+    fn only_rongyuan_uses_feature_reports() {
+        for family in all_families() {
+            assert_eq!(
+                family.uses_feature_report(),
+                family == Family::RongYuanF7,
+                "{family:?}"
+            );
+        }
     }
 }

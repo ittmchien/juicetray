@@ -13,7 +13,7 @@ mod install;
 mod windows;
 
 #[cfg(windows)]
-pub use self::windows::{spawn_check, spawn_cleanup, spawn_offer, spawn_scheduler};
+pub use self::windows::{shell_open, spawn_check, spawn_cleanup, spawn_offer, spawn_scheduler};
 
 /// Where releases are listed; also the fallback download page.
 pub const RELEASES_URL: &str = "https://github.com/ittmchien/juicetray/releases";

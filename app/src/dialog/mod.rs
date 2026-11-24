@@ -47,8 +47,9 @@ pub fn pick_color(initial: (u8, u8, u8)) -> Option<(u8, u8, u8)> {
 }
 
 /// Asks a yes/no question with `ok_label` on the default button and `cancel_label` as the other;
-/// blocks the calling thread until the owner answers, so it runs on its own thread, never the
-/// event loop's. Windows only.
+/// `message` is the bold main instruction, then the content after a blank line (`\n\n`), the
+/// same for every question dialog below. Blocks the calling thread until the owner answers, so it
+/// runs on its own thread, never the event loop's. Windows only.
 #[cfg(windows)]
 pub fn confirm(title: &str, message: &str, ok_label: &str, cancel_label: &str) -> bool {
     platform::confirm(title, message, ok_label, cancel_label)
@@ -56,6 +57,12 @@ pub fn confirm(title: &str, message: &str, ok_label: &str, cancel_label: &str) -
 
 #[cfg(windows)]
 pub use self::windows::Answer;
+/// The in-memory dialog template builder, for windows with their own dialog procedure.
+#[cfg(windows)]
+pub(crate) use self::windows::{
+    BUTTON_CLASS, COMBO_BOX_CLASS, EDIT_CLASS, STATIC_CLASS, TemplateWords, dialog_style,
+    set_app_icon,
+};
 
 /// `confirm` with a middle action: `ok_label` is the default button, `alt_label` the second
 /// choice and `cancel_label` (or Esc) backs out; same threading rule as `confirm`. Windows only.

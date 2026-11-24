@@ -1,11 +1,15 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+// The Add device window runs on Windows; its steps are also tested elsewhere.
+#[cfg(any(windows, test))]
+mod add_device;
 mod alerts;
 mod app;
 mod config;
 // Windows only: the context menu runs on its own thread, so a stuck menu never stops the app.
 #[cfg(windows)]
 mod context_menu;
+mod device;
 mod dialog;
 mod efficiency;
 mod instance;
@@ -16,11 +20,19 @@ mod log;
 mod login;
 mod menu;
 mod pause;
+// Plug-in detection and its popup run on Windows; their rules are also tested elsewhere.
+#[cfg(any(windows, test))]
+mod plug;
+#[cfg(any(windows, test))]
+mod popup;
 mod probe;
 mod query;
 mod query_log;
 mod receivers;
 mod refresh;
+// GitHub reports come from Windows windows; the URL and redaction rules are also tested elsewhere.
+#[cfg(any(windows, test))]
+mod report;
 mod scan;
 mod svg_cache;
 mod taskbar;
@@ -83,7 +95,12 @@ fn run_scan() -> ExitCode {
     let inventory = door::inventory(&[]);
     println!(
         "\n{}",
-        scan::usb_report(&inventory.hid, &inventory.serial, &inventory.errors)
+        scan::usb_report(
+            &inventory.hid,
+            &inventory.serial,
+            &inventory.errors,
+            &config::Config::load().custom()
+        )
     );
     // Layout data for diagnosing the taskbar strip on a machine nobody can inspect.
     #[cfg(windows)]

@@ -1,16 +1,19 @@
-//! Device I/O for HID and serial: read-only enumeration (`present` opens nothing), the
-//! transports, and the one write door.
+//! Device I/O for HID and serial: read-only enumeration (`present` and `present_all` open
+//! nothing), the shape cache, the transports, and the one write door.
 //! Only `write.rs` sends bytes to a device, through targets opened from an `Inventory`;
 //! `listen.rs` only reads.
 
 mod enumerate;
 mod listen;
+mod shapes;
 mod transport;
 mod write;
 
 pub use enumerate::{
-    Access, HidCollection, Inventory, Listing, SerialEntry, inventory, list, present,
+    Access, HidCollection, Inventory, Listing, Presence, SerialEntry, inventory, list, present,
+    present_all,
 };
+pub use shapes::{STABLE_GAP, ShapeCache};
 pub use transport::Target;
 pub use write::{Door, Exchange, MAX_KEPT_UNRELATED};
 

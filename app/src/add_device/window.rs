@@ -1,0 +1,736 @@
+//! The Win32 side of the Add device window: a dialog built in memory, run on its own thread,
+//! that shows the flow's view and feeds it buttons, its timer and its own plug-in events. Device
+//! work goes to the refresh worker; the answer comes back on a channel the timer checks.
+
+use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
+
+use tao::event_loop::EventLoopProxy;
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Controls::EM_SETSEL;
+use windows::Win32::UI::WindowsAndMessaging::{
+    BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL,
+    CBN_SELCHANGE, CBS_DROPDOWNLIST, DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE, DLGTEMPLATE,
+    DialogBoxIndirectParamW, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, EndDialog,
+    GWLP_USERDATA, GetDlgItem, GetDlgItemTextW, GetWindowLongPtrW, GetWindowTextLengthW, IDCANCEL,
+    IDOK, KillTimer, MapDialogRect, PostMessageW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
+    SendDlgItemMessageW, SetDlgItemTextW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_COPY, WM_DESTROY,
+    WM_DEVICECHANGE, WM_INITDIALOG, WM_TIMER, WS_BORDER, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
+    WS_VSCROLL,
+};
+use windows::core::HSTRING;
+
+use super::flow::{Effect, Event, Flow, Input, Inspection, KINDS, TryOutcome, View};
+use crate::app::UserEvent;
+use crate::config::Config;
+use crate::dialog::{
+    self, BUTTON_CLASS, COMBO_BOX_CLASS, EDIT_CLASS, STATIC_CLASS, TemplateWords, dialog_style,
+};
+use crate::plug::{self, Id, Registration};
+use crate::refresh::Command;
+use crate::report::{self, Identity};
+use crate::{log, update};
+
+const TITLE: &str = "Add device";
+
+const MESSAGE_ID: u16 = 100;
+const LIST_ID: u16 = 101;
+const KIND_LABEL_ID: u16 = 102;
+const KIND_ID: u16 = 103;
+const CONNECTION_LABEL_ID: u16 = 104;
+const CONNECTION_ID: u16 = 105;
+const NAME_LABEL_ID: u16 = 106;
+const NAME_ID: u16 = 107;
+const DETAILS_ID: u16 = 108;
+const ALT_ID: u16 = 109;
+const EXTRA_ID: u16 = 110;
+/// The custom-device fields, shown and hidden together.
+const FORM_IDS: [u16; 6] = [
+    KIND_LABEL_ID,
+    KIND_ID,
+    CONNECTION_LABEL_ID,
+    CONNECTION_ID,
+    NAME_LABEL_ID,
+    NAME_ID,
+];
+/// `SS_NOPREFIX`: a device name's `&` shows as itself.
+const NO_PREFIX: i32 = 0x0080;
+
+/// Layout in dialog units `[x, y, width, height]` per the Windows guidelines: 7 DLU margins,
+/// 4 DLU between related controls, 7 DLU above the button row; a combo box's height includes
+/// its list. The list, the custom-device form and the details never show together, so each
+/// starts right under the message.
+const DIALOG_RECT: [i16; 4] = [0, 0, 260, 155];
+const MESSAGE_RECT: [i16; 4] = [7, 7, 246, 48];
+const LIST_RECT: [i16; 4] = [7, 59, 246, 90];
+/// Form rows are 14 high, 4 apart; labels sit 2 DLU down so their text lines up with the field's.
+const KIND_LABEL_RECT: [i16; 4] = [7, 61, 46, 8];
+const KIND_RECT: [i16; 4] = [57, 59, 100, 90];
+const CONNECTION_LABEL_RECT: [i16; 4] = [7, 79, 46, 8];
+const CONNECTION_RECT: [i16; 4] = [57, 77, 196, 60];
+const NAME_LABEL_RECT: [i16; 4] = [7, 97, 46, 8];
+const NAME_RECT: [i16; 4] = [57, 95, 196, 14];
+const DETAILS_RECT: [i16; 4] = [7, 59, 246, 68];
+/// The button row: [Close] at the right margin, the shown buttons right-aligned left of it.
+const BUTTON_Y: i16 = 134;
+const BUTTON_HEIGHT: i16 = 14;
+const BUTTON_GAP: i16 = 4;
+const BUTTON_WIDTH: i16 = 50;
+/// Wider buttons, only for labels 50 DLU cannot hold.
+const PRIMARY_WIDE_WIDTH: i16 = 146;
+const ALT_WIDTH: i16 = 60;
+const EXTRA_WIDTH: i16 = 72;
+/// Longest primary label `BUTTON_WIDTH` holds ("Try in 10 s").
+const SHORT_LABEL: usize = 12;
+const CLOSE_RECT: [i16; 4] = [203, BUTTON_Y, BUTTON_WIDTH, BUTTON_HEIGHT];
+
+/// Posted by `open` to the running window: focus it and take the handed-over id.
+const WM_HANDOVER: u32 = WM_APP + 1;
+const TIMER_ID: usize = 1;
+/// Shortest timer, so a due tick never spins.
+const MIN_TICK: Duration = Duration::from_millis(50);
+
+/// Whether the window is on screen (or starting); popups wait meanwhile.
+static OPEN: AtomicBool = AtomicBool::new(false);
+/// The running window's handle, 0 while none.
+static WINDOW: AtomicIsize = AtomicIsize::new(0);
+/// An id waiting for the window: the preselected one at start, or a popup's [OK] later.
+static HANDOVER: Mutex<Option<Id>> = Mutex::new(None);
+
+/// Whether new-device popups must wait: the window detects devices itself.
+pub fn is_open() -> bool {
+    OPEN.load(Ordering::Relaxed)
+}
+
+/// Opens the window on an `add device` thread (menu: `None`; popup [OK]: the id), which sends
+/// `UserEvent::AddDeviceClosed` when it closes. While it is open, a call focuses it and hands
+/// the id over.
+pub fn open(proxy: EventLoopProxy<UserEvent>, worker: Sender<Command>, id: Option<Id>) {
+    // OPEN is read under the HANDOVER lock the closing thread holds while it clears both, so an
+    // id handed over after that clear starts a new window instead of waiting in the slot.
+    let running = {
+        let mut handover = HANDOVER.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(id) = id {
+            *handover = Some(id);
+        }
+        OPEN.swap(true, Ordering::Relaxed)
+    };
+    if running {
+        let window = WINDOW.load(Ordering::Relaxed);
+        // A window still starting takes the id at WM_INITDIALOG instead.
+        if window != 0 {
+            // SAFETY: posting to a window of another thread only queues the message; a window
+            // that closed meanwhile makes the call fail, which is harmless.
+            let posted = unsafe {
+                PostMessageW(
+                    Some(HWND(window as *mut _)),
+                    WM_HANDOVER,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+            };
+            if let Err(error) = posted {
+                log::trace(format_args!("add device handover not posted: {error}"));
+            }
+        }
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("add device".into())
+        .spawn(move || {
+            run(proxy.clone(), worker.clone());
+            // Cleared together under the lock `open` takes, so it sees both or neither.
+            let late = {
+                let mut handover = HANDOVER.lock().unwrap_or_else(PoisonError::into_inner);
+                OPEN.store(false, Ordering::Relaxed);
+                handover.take()
+            };
+            // An id handed over after WM_DESTROY found no window to take it: open a new one for it.
+            if let Some(id) = late {
+                open(proxy.clone(), worker, Some(id));
+            }
+            // A closed event loop means the app is exiting.
+            let _ = proxy.send_event(UserEvent::AddDeviceClosed);
+        });
+    if let Err(error) = spawned {
+        OPEN.store(false, Ordering::Relaxed);
+        log::line(&format!("add device window unavailable: {error}"));
+    }
+}
+
+/// A worker reply the window waits for.
+enum Pending {
+    Inspect(Receiver<Inspection>),
+    Try(Receiver<TryOutcome>),
+    /// The UI thread's config save after [Add].
+    Save(Receiver<Result<(), String>>),
+}
+
+/// What the dialog procedure works on; it lives on the thread's stack for the modal call.
+struct Session {
+    flow: Flow,
+    worker: Sender<Command>,
+    proxy: EventLoopProxy<UserEvent>,
+    pending: Option<Pending>,
+    registration: Option<Registration>,
+    shown: Option<View>,
+}
+
+/// Runs the modal window until it closes.
+fn run(proxy: EventLoopProxy<UserEvent>, worker: Sender<Command>) {
+    let _span = log::span("add device window");
+    let config = Config::load();
+    let mut session = Session {
+        flow: Flow::new(
+            config.allowed(),
+            config.custom(),
+            report::environment(),
+            Identity::current(),
+        ),
+        worker,
+        proxy,
+        pending: None,
+        registration: None,
+        shown: None,
+    };
+    // SAFETY: a null module name asks for this executable's own handle, which never fails here.
+    let instance = match unsafe { GetModuleHandleW(None) } {
+        Ok(module) => HINSTANCE::from(module),
+        Err(error) => {
+            log::line(&format!("add device window failed: {error}"));
+            return;
+        }
+    };
+    let template = template();
+    // SAFETY: the template is DWORD-aligned and well formed; `session` outlives the modal call,
+    // which is the only time the dialog procedure reads it.
+    let result = unsafe {
+        DialogBoxIndirectParamW(
+            Some(instance),
+            template.as_ptr().cast::<DLGTEMPLATE>(),
+            None,
+            Some(window_proc),
+            LPARAM(&raw mut session as isize),
+        )
+    };
+    if result == -1 {
+        log::line(&format!(
+            "add device window failed: {}",
+            windows::core::Error::from_thread()
+        ));
+    }
+}
+
+impl Session {
+    /// Feeds `event` to the flow, performs its effect and shows the result.
+    fn handle(&mut self, dialog: HWND, event: Event) {
+        let effect = self.flow.on(event, Instant::now());
+        // A reply for a step the flow left is ignored; the worker's send then fails quietly.
+        if !self.flow.awaits_worker() {
+            self.pending = None;
+        }
+        if let Some(effect) = effect {
+            self.perform(dialog, effect);
+        }
+        self.update(dialog);
+    }
+
+    fn perform(&mut self, dialog: HWND, effect: Effect) {
+        match effect {
+            Effect::Inspect(id) => {
+                let (reply, answer) = mpsc::channel();
+                if self.worker.send(Command::Inspect { id, reply }).is_ok() {
+                    self.pending = Some(Pending::Inspect(answer));
+                } else {
+                    self.handle(dialog, Event::Inspected(Inspection::Failed(stopped())));
+                }
+            }
+            Effect::TryAs(id, family) => {
+                let (reply, answer) = mpsc::channel();
+                if self
+                    .worker
+                    .send(Command::TryAs { id, family, reply })
+                    .is_ok()
+                {
+                    self.pending = Some(Pending::Try(answer));
+                } else {
+                    self.handle(dialog, Event::Tried(TryOutcome::Failed(stopped())));
+                }
+            }
+            // The UI thread answers with the save result; a closed event loop means the app is
+            // exiting, so nothing was saved.
+            Effect::Add(request) => {
+                let (reply, answer) = mpsc::channel();
+                if self
+                    .proxy
+                    .send_event(UserEvent::AddDevice(request, reply))
+                    .is_ok()
+                {
+                    self.pending = Some(Pending::Save(answer));
+                } else {
+                    self.handle(dialog, Event::Saved(Err(app_closing())));
+                }
+            }
+            Effect::Copy => {
+                // The details box holds the full text: select it all and copy it.
+                send(dialog, DETAILS_ID, EM_SETSEL, 0, -1);
+                send(dialog, DETAILS_ID, WM_COPY, 0, 0);
+            }
+            Effect::OpenUrl(url) => {
+                if let Err(error) = update::shell_open(&url) {
+                    log::line(&format!("add device: opening the report failed: {error}"));
+                }
+            }
+        }
+    }
+
+    /// Takes the worker's (or the save's) reply when it is in, true then; a dropped sender
+    /// counts as a failure.
+    fn poll(&mut self, dialog: HWND) -> bool {
+        let event = match &self.pending {
+            Some(Pending::Inspect(answer)) => match answer.try_recv() {
+                Ok(inspection) => Event::Inspected(inspection),
+                Err(TryRecvError::Empty) => return false,
+                Err(TryRecvError::Disconnected) => Event::Inspected(Inspection::Failed(stopped())),
+            },
+            // A worker gone mid-try may have died after its write, so the query may have been sent.
+            Some(Pending::Try(answer)) => match answer.try_recv() {
+                Ok(outcome) => Event::Tried(outcome),
+                Err(TryRecvError::Empty) => return false,
+                Err(TryRecvError::Disconnected) => Event::Tried(TryOutcome::Interrupted(stopped())),
+            },
+            Some(Pending::Save(answer)) => match answer.try_recv() {
+                Ok(saved) => Event::Saved(saved),
+                Err(TryRecvError::Empty) => return false,
+                Err(TryRecvError::Disconnected) => Event::Saved(Err(app_closing())),
+            },
+            None => return false,
+        };
+        self.pending = None;
+        self.handle(dialog, event);
+        true
+    }
+
+    /// Shows the flow's view and sets the timer to its next tick.
+    fn update(&mut self, dialog: HWND) {
+        let now = Instant::now();
+        let view = self.flow.view(now);
+        render(dialog, &view, self.shown.as_ref());
+        self.shown = Some(view);
+        match self.flow.next_tick(now) {
+            Some(wait) => {
+                let millis = u32::try_from(wait.max(MIN_TICK).as_millis()).unwrap_or(u32::MAX);
+                // SAFETY: `dialog` is this thread's live window; a repeated id resets the timer.
+                unsafe { SetTimer(Some(dialog), TIMER_ID, millis, None) };
+            }
+            None => {
+                // SAFETY: as above; killing a timer that is not set only fails.
+                let _ = unsafe { KillTimer(Some(dialog), TIMER_ID) };
+            }
+        }
+    }
+
+    /// An interface arrival or removal: Bluetooth arrivals only hint, USB ids drive detection.
+    fn device_change(&mut self, dialog: HWND, wparam: WPARAM, lparam: LPARAM) {
+        let arrived = wparam.0 == DBT_DEVICEARRIVAL as usize;
+        if !arrived && wparam.0 != DBT_DEVICEREMOVECOMPLETE as usize {
+            return;
+        }
+        // SAFETY: for these two events `lParam` is null or a DEV_BROADCAST_HDR valid during the
+        // call.
+        let Some(name) = (unsafe { plug::interface_name(lparam) }) else {
+            return;
+        };
+        let event = if plug::is_bluetooth_interface(&name) {
+            if !arrived {
+                return;
+            }
+            Event::BluetoothArrived
+        } else {
+            let Some(id) = plug::parse_interface_name(&name) else {
+                return;
+            };
+            if arrived {
+                Event::Arrived(id)
+            } else {
+                Event::Removed(id)
+            }
+        };
+        self.handle(dialog, event);
+    }
+
+    /// Focuses the window and starts on a handed-over id, if one waits.
+    fn take_handover(&mut self, dialog: HWND) {
+        let id = HANDOVER
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        match id {
+            Some(id) => self.handle(dialog, Event::Handover(id)),
+            None => self.update(dialog),
+        }
+    }
+}
+
+fn stopped() -> String {
+    "the reader has stopped".to_owned()
+}
+
+fn app_closing() -> String {
+    "Juicetray is closing".to_owned()
+}
+
+thread_local! {
+    /// Set while a message handler holds the `Session`.
+    static IN_HANDLER: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Routes the dialog's messages to its `Session`. A message sent from inside a handler (the
+/// name box's EN_CHANGE while `render` sets its text, say) gets the default answer: taking a
+/// second `&mut Session` then would alias the one the handler holds.
+unsafe extern "system" fn window_proc(
+    dialog: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> isize {
+    if IN_HANDLER.replace(true) {
+        return 0;
+    }
+    // SAFETY: the dialog manager calls this for the Add device dialog on its own thread, and the
+    // flag above keeps `on_message` from running nested.
+    let answer = unsafe { on_message(dialog, message, wparam, lparam) };
+    IN_HANDLER.set(false);
+    answer
+}
+
+/// The dialog procedure proper.
+///
+/// # Safety
+/// Only for the Add device dialog's messages on its thread, never nested.
+unsafe fn on_message(dialog: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> isize {
+    if message == WM_INITDIALOG {
+        // SAFETY: `lparam` is the `Session` pointer handed to DialogBoxIndirectParamW, valid
+        // until it returns; the window keeps it for later messages.
+        let session = unsafe {
+            SetWindowLongPtrW(dialog, GWLP_USERDATA, lparam.0);
+            &mut *(lparam.0 as *mut Session)
+        };
+        WINDOW.store(dialog.0 as isize, Ordering::Relaxed);
+        session.registration = plug::register(dialog);
+        dialog::set_app_icon(dialog);
+        fill_combo(dialog, KIND_ID, &KINDS.map(|(label, _)| label), 0);
+        session.take_handover(dialog);
+        // TRUE lets the dialog manager focus the first tab stop.
+        return 1;
+    }
+    // SAFETY: GWLP_USERDATA is 0 before WM_INITDIALOG and the `Session` pointer after it, valid
+    // inside the modal call; only this thread touches it.
+    let session = unsafe { (GetWindowLongPtrW(dialog, GWLP_USERDATA) as *mut Session).as_mut() };
+    let Some(session) = session else {
+        return 0;
+    };
+    match message {
+        WM_COMMAND => {
+            let id = wparam.0 as u16;
+            let code = (wparam.0 >> 16) as u16;
+            match i32::from(id) {
+                ok if ok == IDOK.0 => session.handle(dialog, Event::Primary(input(dialog))),
+                cancel if cancel == IDCANCEL.0 => {
+                    // SAFETY: `dialog` is the live modal dialog.
+                    if let Err(error) = unsafe { EndDialog(dialog, 0) } {
+                        log::line(&format!("closing the add device window failed: {error}"));
+                    }
+                }
+                _ if id == ALT_ID => session.handle(dialog, Event::Alt),
+                _ if id == EXTRA_ID => session.handle(dialog, Event::Extra),
+                _ if id == LIST_ID && u32::from(code) == CBN_SELCHANGE => {
+                    session.handle(dialog, Event::Select(selection(dialog, LIST_ID)));
+                }
+                _ => return 0,
+            }
+            1
+        }
+        // A reply that came in already rendered the new step; a tick then would render it twice.
+        WM_TIMER if wparam.0 == TIMER_ID => {
+            if !session.poll(dialog) {
+                session.handle(dialog, Event::Tick);
+            }
+            1
+        }
+        WM_DEVICECHANGE => {
+            session.device_change(dialog, wparam, lparam);
+            // The default answer, so a removal query is never refused.
+            0
+        }
+        WM_HANDOVER => {
+            // SAFETY: plain call on this thread's live window; a refusal only leaves it behind.
+            let _ = unsafe { SetForegroundWindow(dialog) };
+            session.take_handover(dialog);
+            1
+        }
+        WM_DESTROY => {
+            // SAFETY: as in `update`.
+            let _ = unsafe { KillTimer(Some(dialog), TIMER_ID) };
+            session.registration = None;
+            WINDOW.store(0, Ordering::Relaxed);
+            0
+        }
+        _ => 0,
+    }
+}
+
+/// Shows `view`, touching only what changed since `shown`, so a picked row or typed name stays.
+fn render(dialog: HWND, view: &View, shown: Option<&View>) {
+    let changed = |part: &dyn Fn(&View) -> bool| shown.is_none_or(part);
+    if changed(&|old| old.text != view.text) {
+        set_text(dialog, MESSAGE_ID, &view.text);
+    }
+    if changed(&|old| old.list != view.list) {
+        fill_combo(dialog, LIST_ID, &view.list, view.picked);
+        show(dialog, LIST_ID, !view.list.is_empty());
+    } else if changed(&|old| old.picked != view.picked) {
+        send(dialog, LIST_ID, CB_SETCURSEL, view.picked, 0);
+    }
+    if changed(&|old| old.form != view.form) {
+        if let Some(form) = &view.form {
+            fill_combo(dialog, CONNECTION_ID, &form.connections, 0);
+            send(dialog, KIND_ID, CB_SETCURSEL, 0, 0);
+            set_text(dialog, NAME_ID, &form.name);
+        }
+        for id in FORM_IDS {
+            show(dialog, id, view.form.is_some());
+        }
+    }
+    if changed(&|old| old.details != view.details) {
+        // An edit control breaks lines on CR LF only.
+        let text = view.details.as_deref().unwrap_or_default();
+        set_text(dialog, DETAILS_ID, &text.replace('\n', "\r\n"));
+        show(dialog, DETAILS_ID, view.details.is_some());
+    }
+    if changed(&|old| old.primary != view.primary || old.alt != view.alt || old.extra != view.extra)
+    {
+        let label = view.primary.as_deref().unwrap_or_default();
+        // Shown buttons line up right to left from [Close], 4 DLU apart, in tab order
+        // [Primary] [Alt] [Extra]; a long primary label (the receiver confirmation) gets a wide one.
+        let primary_width = if label.chars().count() > SHORT_LABEL {
+            PRIMARY_WIDE_WIDTH
+        } else {
+            BUTTON_WIDTH
+        };
+        let row = [
+            (EXTRA_ID, EXTRA_WIDTH, view.extra.is_some()),
+            (ALT_ID, ALT_WIDTH, view.alt.is_some()),
+            (IDOK.0 as u16, primary_width, view.primary.is_some()),
+        ];
+        let mut left = CLOSE_RECT[0];
+        for (id, width, shown) in row {
+            if shown {
+                left -= BUTTON_GAP + width;
+                place(dialog, id, [left, BUTTON_Y, width, BUTTON_HEIGHT]);
+            }
+        }
+        set_text(dialog, IDOK.0 as u16, label);
+        show(dialog, IDOK.0 as u16, view.primary.is_some());
+    }
+    if changed(&|old| old.alt != view.alt) {
+        set_text(dialog, ALT_ID, view.alt.unwrap_or_default());
+        show(dialog, ALT_ID, view.alt.is_some());
+    }
+    // The third button is hidden while the view has none.
+    if changed(&|old| old.extra != view.extra) {
+        set_text(dialog, EXTRA_ID, view.extra.unwrap_or_default());
+        show(dialog, EXTRA_ID, view.extra.is_some());
+    }
+    if changed(&|old| old.close != view.close) {
+        set_text(dialog, IDCANCEL.0 as u16, view.close);
+    }
+}
+
+/// The picked rows, the kind and connection and the typed name.
+fn input(dialog: HWND) -> Input {
+    Input {
+        list: selection(dialog, LIST_ID),
+        kind: selection(dialog, KIND_ID),
+        connection: selection(dialog, CONNECTION_ID),
+        name: text(dialog, NAME_ID),
+    }
+}
+
+/// A combo box's picked row; none counts as the first.
+fn selection(dialog: HWND, id: u16) -> usize {
+    usize::try_from(send(dialog, id, CB_GETCURSEL, 0, 0)).unwrap_or(0)
+}
+
+fn fill_combo(dialog: HWND, id: u16, rows: &[impl AsRef<str>], picked: usize) {
+    send(dialog, id, CB_RESETCONTENT, 0, 0);
+    for row in rows {
+        let row = HSTRING::from(row.as_ref());
+        // The control copies the string during the call.
+        send(dialog, id, CB_ADDSTRING, 0, row.as_ptr() as isize);
+    }
+    send(dialog, id, CB_SETCURSEL, picked, 0);
+}
+
+/// Sends a message to a control of `dialog`; the control's answer.
+fn send(dialog: HWND, id: u16, message: u32, wparam: usize, lparam: isize) -> isize {
+    // SAFETY: `dialog` is this thread's live window; every pointer passed in `lparam` outlives
+    // the synchronous call.
+    unsafe {
+        SendDlgItemMessageW(
+            dialog,
+            i32::from(id),
+            message,
+            WPARAM(wparam),
+            LPARAM(lparam),
+        )
+    }
+    .0
+}
+
+fn set_text(dialog: HWND, id: u16, text: &str) {
+    // SAFETY: `dialog` is the live dialog and `id` one of its controls.
+    if let Err(error) = unsafe { SetDlgItemTextW(dialog, i32::from(id), &HSTRING::from(text)) } {
+        log::trace(format_args!(
+            "add device: control {id} text not set: {error}"
+        ));
+    }
+}
+
+/// Moves control `id` to `[x, y, width, height]` in dialog units.
+fn place(dialog: HWND, id: u16, [x, y, width, height]: [i16; 4]) {
+    let mut rect = RECT {
+        left: x.into(),
+        top: y.into(),
+        right: (x + width).into(),
+        bottom: (y + height).into(),
+    };
+    // SAFETY: `dialog` is the live dialog; a missing control or failed mapping leaves it as is.
+    unsafe {
+        if MapDialogRect(dialog, &mut rect).is_ok()
+            && let Ok(control) = GetDlgItem(Some(dialog), i32::from(id))
+        {
+            let _ = SetWindowPos(
+                control,
+                None,
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
+
+fn show(dialog: HWND, id: u16, visible: bool) {
+    // SAFETY: `dialog` is the live dialog; a missing control is skipped.
+    unsafe {
+        if let Ok(control) = GetDlgItem(Some(dialog), i32::from(id)) {
+            let _ = ShowWindow(control, if visible { SW_SHOW } else { SW_HIDE });
+        }
+    }
+}
+
+/// A control's current text.
+fn text(dialog: HWND, id: u16) -> String {
+    // SAFETY: `dialog` is the live dialog; the buffer holds the text plus its terminator.
+    unsafe {
+        let length = GetDlgItem(Some(dialog), i32::from(id))
+            .map(|control| GetWindowTextLengthW(control))
+            .unwrap_or_default();
+        let mut buffer = vec![0u16; usize::try_from(length).unwrap_or_default() + 1];
+        let copied = GetDlgItemTextW(dialog, i32::from(id), &mut buffer) as usize;
+        String::from_utf16_lossy(&buffer[..copied.min(buffer.len())])
+    }
+}
+
+/// The window's template: message, picker, custom-device fields, details and four buttons; only
+/// the message and the close button start visible.
+fn template() -> Vec<u32> {
+    let hidden = WS_CHILD;
+    let visible = WS_CHILD | WS_VISIBLE;
+    let combo = hidden | WS_TABSTOP | WS_VSCROLL | dialog_style(CBS_DROPDOWNLIST);
+    let label = hidden | dialog_style(NO_PREFIX);
+    let button = |kind: i32| WS_TABSTOP | dialog_style(kind);
+    let items: [(WINDOW_STYLE, [i16; 4], u16, u16, &str); 13] = [
+        (
+            visible | dialog_style(NO_PREFIX),
+            MESSAGE_RECT,
+            MESSAGE_ID,
+            STATIC_CLASS,
+            "",
+        ),
+        (combo, LIST_RECT, LIST_ID, COMBO_BOX_CLASS, ""),
+        (label, KIND_LABEL_RECT, KIND_LABEL_ID, STATIC_CLASS, "Kind"),
+        (combo, KIND_RECT, KIND_ID, COMBO_BOX_CLASS, ""),
+        (
+            label,
+            CONNECTION_LABEL_RECT,
+            CONNECTION_LABEL_ID,
+            STATIC_CLASS,
+            "Connection",
+        ),
+        (combo, CONNECTION_RECT, CONNECTION_ID, COMBO_BOX_CLASS, ""),
+        (label, NAME_LABEL_RECT, NAME_LABEL_ID, STATIC_CLASS, "Name"),
+        (
+            hidden | WS_BORDER | WS_TABSTOP | dialog_style(ES_AUTOHSCROLL),
+            NAME_RECT,
+            NAME_ID,
+            EDIT_CLASS,
+            "",
+        ),
+        (
+            hidden
+                | WS_BORDER
+                | WS_TABSTOP
+                | WS_VSCROLL
+                | dialog_style(ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL),
+            DETAILS_RECT,
+            DETAILS_ID,
+            EDIT_CLASS,
+            "",
+        ),
+        // `render` places the three hidden buttons before showing any.
+        (
+            hidden | button(BS_DEFPUSHBUTTON),
+            CLOSE_RECT,
+            IDOK.0 as u16,
+            BUTTON_CLASS,
+            "",
+        ),
+        (
+            hidden | button(BS_PUSHBUTTON),
+            CLOSE_RECT,
+            ALT_ID,
+            BUTTON_CLASS,
+            "",
+        ),
+        // [Extra] after [Alt] in the tab order.
+        (
+            hidden | button(BS_PUSHBUTTON),
+            CLOSE_RECT,
+            EXTRA_ID,
+            BUTTON_CLASS,
+            "",
+        ),
+        (
+            visible | button(BS_PUSHBUTTON),
+            CLOSE_RECT,
+            IDCANCEL.0 as u16,
+            BUTTON_CLASS,
+            "Cancel",
+        ),
+    ];
+    let mut words = TemplateWords::default();
+    words.header(TITLE, items.len() as u16, DIALOG_RECT);
+    for (style, rect, id, class, text) in items {
+        words.item(style, rect, id, class, text);
+    }
+    words.into_dwords()
+}

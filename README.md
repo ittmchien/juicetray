@@ -31,7 +31,7 @@ without each vendor's software.**
 - 📶 **Every Bluetooth device** — headsets, mice, keyboards, controllers… whatever Windows already
   knows the battery of.
 - 🗂️ **Grouped and sorted** — devices grouped by kind, highest level first, offline ones last and
-  marked ⊘; hide offline devices after a delay you choose.
+  marked *disconnected*; hide offline devices after a delay you choose.
 - 🔔 **Low-battery alert** — a notification at the threshold you pick (5–30 % or custom).
 - 🛠️ **Per-device options** — show or hide, percentage, label, icon, and icon colours for a light
   and a dark taskbar.
@@ -47,7 +47,7 @@ without each vendor's software.**
    [latest release](https://github.com/ittmchien/juicetray/releases/latest).
 2. Put it in a folder you can write to (for example `%LOCALAPPDATA%\Programs\Juicetray`) and run
    it. It is portable: no installer, nothing else to set up.
-3. Right-click the strip or tray icon → **Start at login** to start it with Windows.
+3. Right-click the strip or tray icon → **Settings → Start at login** to start it with Windows.
 
 Settings live in `%APPDATA%\ittmchien\juicetray\config\config.toml`, so replacing the exe keeps
 them. Windows SmartScreen may warn about an unsigned app: **More info → Run anyway**.
@@ -79,11 +79,19 @@ Battery read correctly on the owner's devices; these are read automatically.
 ### ➕ Other devices
 
 Many ATK, VXE and VGN mice use the same protocols. Until a model is verified, Juicetray never
-queries it on its own. To try one, use **Add unsupported device…** in the menu (coming in the
-next release): it detects the device when you plug it in, sends one read-only battery query, and
-adds it once you confirm the level. If it does not work, please
-[open an issue](https://github.com/ittmchien/juicetray/issues) — the window fills in the details
-for you.
+queries it on its own. To try one, use **Add device…** in the menu (Windows), or
+**OK** on the "New device found" popup (shown when you plug in a supported brand or any
+wireless receiver while Juicetray runs, never at start-up, and only once per device whatever
+you answer): it detects the device, sends one read-only battery query when you press **Try**,
+and adds it once you confirm the level. If it does
+not work, press **Send report** to send the details through a
+[Google Form](https://forms.gle/Qp5CeBGEiPg2UtkX6) (no account needed), or **Report on GitHub**
+to [open an issue](https://github.com/ittmchien/juicetray/issues) with them filled in; either way
+your user folder, PC name and device serials are left out.
+
+📋 **[Device list](https://docs.google.com/spreadsheets/d/e/2PACX-1vRTKUOHRmpLeXhjxL93T5HwuYsJKnzMHSUhN2AWslNCB938EpQH2YkMeNubTcpvdxpHC2o7Dw4OHfS7/pubhtml)**
+— every model Juicetray knows (**Supported**) and the devices users asked for, with their status
+(**Requested**).
 
 `allow` in the config file still works for hand-added devices:
 
@@ -101,8 +109,8 @@ allow = ["391D:1A05"]
 ## 🔄 Updates
 
 Juicetray checks [GitHub Releases](https://github.com/ittmchien/juicetray/releases) for a newer
-version once a day (and a minute after start). Turn it off with **Check for updates
-automatically** in the menu, or check by hand with **Check for updates…**. The request sends
+version at most once a day (restarting the app does not check again). Turn it off with **Check for updates
+automatically** under **Settings**, or check by hand with **Check for updates…**. The request sends
 nothing but the version in the User-Agent (`juicetray/<version>`).
 
 **Update now** downloads the new exe, checks its SHA-256 against the release's
@@ -122,7 +130,7 @@ the exe's folder is not writable it opens the download page instead.
 | Command | What it does |
 |---|---|
 | `juicetray scan` | Lists Bluetooth, HID and serial devices; writes nothing; redacts serial numbers. |
-| `juicetray probe <VID:PID>` | Sends one read-only battery query to a supported device and prints the raw reply. Close the vendor app first; refuses within the device's floor. Optional: the menu's **Check battery now** confirms a device without it. |
+| `juicetray probe <VID:PID>` | Sends one read-only battery query to a supported device and prints the raw reply. Close the vendor app first; refuses within the device's floor. Optional: **Add device…** in the menu tries a device without it. |
 | `juicetray probe --online <VID:PID>` | Sends the read-only online-status query instead (Compx and ATK N9 Ultra, same floor) and prints `online: yes/no/unsupported`. |
 | `juicetray listen <VID:PID> [seconds]` | Only reads (1–60 s, default 10) and prints each report with its time in ms; nothing is sent. |
 
@@ -146,8 +154,8 @@ git clone -b dev https://github.com/ittmchien/juicetray
 A model is one line in its brand's file under `crates/protocol/devices/` (for example
 `atk.toml`), with `vid` and `pid` as 4 hex digits, `name`, `family`, `kind` (`mouse`, `headset`,
 `keyboard`, `gamepad` or `other`), `connection` (`receiver` or `cable`) and `verified`. `family`
-is one of `Compx`, `Report13`, `Mchose`, `AtkSerial` or `AtkBitmouse`; a model that needs another
-protocol needs a new family in code first. The build checks every line (unknown family or kind,
+is one of `Compx`, `Report13`, `Mchose`, `AtkSerial`, `AtkBitmouse`, `VgnKc2`, `RongYuanF7` or
+`Driveall`; a model that needs another protocol needs a new family in code first. The build checks every line (unknown family or kind,
 bad hex, duplicate VID:PID) and fails with the file and entry named. Open the pull request against
 `dev` with `verified = false`; a model becomes `verified = true` only after a hardware check
 (`juicetray probe <VID:PID>` read the same level as the vendor app).

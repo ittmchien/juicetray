@@ -16,7 +16,6 @@ use ui_model::{
 use crate::config::{Config, HIDE_OFFLINE_CHOICES, LOW_CHOICES, REFRESH_CHOICES, hex, parse_color};
 use crate::interval::format_interval;
 use crate::login::LoginState;
-use crate::receivers::can_check;
 use crate::update::AUTO_CHECK_AVAILABLE;
 
 const CHECK_UPDATES_ID: &str = "check-updates";
@@ -25,13 +24,18 @@ const OPEN_UPDATE_ID: &str = "update-open";
 const CHOICE_OFF: &str = "off";
 const CHOICE_OFF_LABEL: &str = "Off";
 const MINUTES_PER_HOUR: u32 = 60;
-const CHECK_BATTERY_TEXT: &str = "Check battery now";
 const CUSTOM_REFRESH_ID: &str = "auto:custom";
 const CUSTOM_LOW_ID: &str = "low:custom";
 const CUSTOM_OFFLINE_ID: &str = "offline:custom";
 const REFRESH_ON_BATTERY_ID: &str = "refresh-battery";
+const DETECT_NEW_DEVICES_ID: &str = "detect-new";
+const ADD_DEVICE_ID: &str = "add-device";
+/// Only Windows watches for new devices and has the Add device window, so only it offers them.
+const DETECT_NEW_AVAILABLE: bool = cfg!(windows);
 const ICON_AUTO: &str = "auto";
 const SECONDS_PER_MINUTE: u32 = 60;
+/// The submenu that holds every app option.
+const SETTINGS_LABEL: &str = "Settings";
 /// The icon sits on the taskbar on Windows and in the menu bar on macOS.
 #[cfg(windows)]
 const CUSTOM_LIGHT_LABEL: &str = "Custom (light taskbar)…";
@@ -110,12 +114,14 @@ pub enum MenuAction {
     SetColors(String, IconColor, IconColor),
     /// Ask for a colour: `None` sets both taskbar themes, `Some` only that one.
     CustomColor(String, Option<Theme>),
-    /// One battery query for an unconfirmed receiver; carries only the row id.
-    CheckBattery(String),
     /// Minutes before an offline device leaves the strip; `None` = never.
     SetHideOffline(Option<u32>),
     CustomHideOffline,
     ToggleStartAtLogin,
+    /// New-device popups on or off; plug-in refreshes of queried devices stay.
+    ToggleDetectNewDevices,
+    /// Opens the Add device window, which warns first, then detects the device.
+    AddDevice,
     /// Turning it on is confirmed first; turning it off is not.
     ToggleRefreshOnBattery,
     /// Check GitHub Releases now and say the result (macOS opens the releases page instead).
@@ -189,6 +195,8 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         "refresh" => return Some(MenuAction::Refresh),
         "login" => return Some(MenuAction::ToggleStartAtLogin),
         REFRESH_ON_BATTERY_ID => return Some(MenuAction::ToggleRefreshOnBattery),
+        DETECT_NEW_DEVICES_ID => return Some(MenuAction::ToggleDetectNewDevices),
+        ADD_DEVICE_ID => return Some(MenuAction::AddDevice),
         CHECK_UPDATES_ID => return Some(MenuAction::CheckForUpdates),
         AUTO_UPDATE_ID => return Some(MenuAction::ToggleCheckUpdates),
         OPEN_UPDATE_ID => return Some(MenuAction::OpenUpdate),
@@ -211,7 +219,6 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         "ccolor" => Some(MenuAction::CustomColor(device, None)),
         "ccolor-light" => Some(MenuAction::CustomColor(device, Some(Theme::Light))),
         "ccolor-dark" => Some(MenuAction::CustomColor(device, Some(Theme::Dark))),
-        "check" => Some(MenuAction::CheckBattery(device)),
         "icon" => {
             let (value, device) = rest.split_once(':')?;
             let icon = if value == ICON_AUTO {
@@ -279,10 +286,26 @@ pub fn menu_entries(
         entries.push(MenuEntry::label(EMPTY_MENU_TEXT));
     }
     entries.extend(devices);
+    entries.push(MenuEntry::separator());
+    if DETECT_NEW_AVAILABLE {
+        entries.push(MenuEntry::item(ADD_DEVICE_ID, "Add device…"));
+    }
+    // The main menu keeps the devices and everyday commands; every option lives under Settings.
     entries.extend([
+        MenuEntry::submenu(SETTINGS_LABEL, settings_entries(config, login, has_battery)),
+        MenuEntry::item(CHECK_UPDATES_ID, "Check for updates…"),
         MenuEntry::separator(),
-        MenuEntry::submenu("Auto-refresh", refresh_entries(config.refresh_seconds)),
+        MenuEntry::item("quit", "Quit"),
     ]);
+    entries
+}
+
+/// The Settings submenu: refreshing and alerts, then detection and start-up, then updates.
+fn settings_entries(config: &Config, login: LoginState, has_battery: bool) -> Vec<MenuEntry> {
+    let mut entries = vec![MenuEntry::submenu(
+        "Auto-refresh",
+        refresh_entries(config.refresh_seconds),
+    )];
     if has_battery {
         entries.push(MenuEntry::check(
             REFRESH_ON_BATTERY_ID.to_owned(),
@@ -313,21 +336,27 @@ pub fn menu_entries(
                 format_minutes,
             ),
         ),
-        login_entry(login),
+        MenuEntry::separator(),
     ]);
-    // Only a build that can check on its own offers the switch.
-    if AUTO_CHECK_AVAILABLE {
+    if DETECT_NEW_AVAILABLE {
         entries.push(MenuEntry::check(
-            AUTO_UPDATE_ID.to_owned(),
-            "Check for updates automatically",
-            config.check_updates,
+            DETECT_NEW_DEVICES_ID.to_owned(),
+            "Detect new devices",
+            config.detect_new_devices,
         ));
     }
-    entries.extend([
-        MenuEntry::item(CHECK_UPDATES_ID, "Check for updates…"),
-        MenuEntry::separator(),
-        MenuEntry::item("quit", "Quit"),
-    ]);
+    entries.push(login_entry(login));
+    // Only a build that can check on its own offers the switch.
+    if AUTO_CHECK_AVAILABLE {
+        entries.extend([
+            MenuEntry::separator(),
+            MenuEntry::check(
+                AUTO_UPDATE_ID.to_owned(),
+                "Check for updates automatically",
+                config.check_updates,
+            ),
+        ]);
+    }
     entries
 }
 
@@ -353,15 +382,8 @@ fn device_entries(devices: &[DeviceView], config: &Config, now: SystemTime) -> V
             entries.push(MenuEntry::label(group_label(device.kind)));
             group = Some(device.kind);
         }
-        // An offline line stays clickable and shows a ring in its indent: a native menu greys only
-        // disabled lines, which cannot open their settings, and owner-drawn lines turn it light.
-        let indent = if device.is_offline() {
-            OFFLINE_INDENT
-        } else {
-            GROUP_INDENT
-        };
         let mut entry = device_entry(device, config, now);
-        entry.text.insert_str(0, indent);
+        entry.text.insert_str(0, GROUP_INDENT);
         entries.push(entry);
     }
     entries
@@ -372,11 +394,7 @@ fn device_entry(device: &DeviceView, config: &Config, now: SystemTime) -> MenuEn
     let id = &device.id;
     let options = config.display_options(id);
     let is_svg = matches!(options.icon, IconChoice::Svg(_));
-    // Only a receiver held back for want of confirmation offers the one-query check.
-    let check = can_check(id, &config.allowed())
-        .then(|| MenuEntry::item(&format!("check:{id}"), CHECK_BATTERY_TEXT));
-    let mut children: Vec<MenuEntry> = check.into_iter().collect();
-    children.extend([
+    let children = vec![
         MenuEntry::check(
             format!("hide:{id}"),
             "Show on strip",
@@ -389,11 +407,14 @@ fn device_entry(device: &DeviceView, config: &Config, now: SystemTime) -> MenuEn
             "Icon colour",
             color_entries(id, (options.color_light, options.color_dark), is_svg),
         ),
-    ]);
-    // A native menu cannot colour text, so a low device says it in words.
+    ];
+    // A native menu cannot colour or grey a clickable line, so states are said in words.
     let mut line = menu_line(device, now);
     if needs_charge(device, config.low_battery_percent) {
         line.push_str(NEEDS_CHARGE_TEXT);
+    }
+    if device.is_offline() {
+        line.push_str(DISCONNECTED_TEXT);
     }
     MenuEntry::submenu(line, children)
 }
@@ -401,12 +422,11 @@ fn device_entry(device: &DeviceView, config: &Config, now: SystemTime) -> MenuEn
 /// Tail of a device line at or below the low-battery threshold.
 const NEEDS_CHARGE_TEXT: &str = " · needs charge";
 
+/// Tail of an offline device line, which stays clickable so its settings still open.
+const DISCONNECTED_TEXT: &str = " · disconnected";
+
 /// Lead of a device line under its group header (two em spaces: menus keep them, unlike tabs).
 const GROUP_INDENT: &str = "\u{2003}\u{2003}";
-
-/// Lead of an offline device line: an em space, a circled slash and a thin space, about as wide
-/// as `GROUP_INDENT` (shortcut: widths are estimated for Segoe UI, check alignment by eye).
-const OFFLINE_INDENT: &str = "\u{2003}\u{2298}\u{2009}";
 
 /// Built-in icons then `Custom SVG…`, the current choice ticked.
 fn icon_entries(id: &str, current: &IconChoice) -> Vec<MenuEntry> {
@@ -718,7 +738,24 @@ mod tests {
     fn entries(devices: &[DeviceView], config: &Config, login: LoginState) -> Vec<MenuEntry> {
         let mut all = menu_entries(devices, config, login, false, SystemTime::UNIX_EPOCH);
         all.drain(..2);
-        all
+        // Settings items inline, so lookups find them beside the devices.
+        all.into_iter()
+            .flat_map(|e| {
+                if e.text == SETTINGS_LABEL {
+                    e.children
+                } else {
+                    vec![e]
+                }
+            })
+            .collect()
+    }
+
+    /// The Settings submenu's entries.
+    fn settings_of(all: Vec<MenuEntry>) -> Vec<MenuEntry> {
+        all.into_iter()
+            .find(|e| e.text == SETTINGS_LABEL)
+            .expect("a Settings submenu")
+            .children
     }
 
     #[test]
@@ -748,13 +785,13 @@ mod tests {
             ..Config::default()
         };
         let find = |config: &Config, has_battery| {
-            menu_entries(
+            settings_of(menu_entries(
                 &[],
                 config,
                 LoginState::Disabled,
                 has_battery,
                 SystemTime::UNIX_EPOCH,
-            )
+            ))
             .into_iter()
             .find(|e| e.id.as_deref() == Some(REFRESH_ON_BATTERY_ID))
         };
@@ -771,18 +808,64 @@ mod tests {
 
     #[test]
     fn battery_refresh_item_sits_right_after_auto_refresh() {
-        let entries = menu_entries(
+        let entries = settings_of(menu_entries(
             &[],
             &Config::default(),
             LoginState::Disabled,
             true,
             SystemTime::UNIX_EPOCH,
-        );
+        ));
         let auto = entries
             .iter()
             .position(|e| e.text == "Auto-refresh")
             .unwrap();
         assert_eq!(entries[auto + 1].id.as_deref(), Some(REFRESH_ON_BATTERY_ID));
+    }
+
+    #[test]
+    fn add_device_sits_above_settings_and_detect_precedes_login_on_windows() {
+        let build = |config: &Config| {
+            menu_entries(
+                &[],
+                config,
+                LoginState::Disabled,
+                false,
+                SystemTime::UNIX_EPOCH,
+            )
+        };
+        let all = build(&Config::default());
+        let settings = all.iter().position(|e| e.text == SETTINGS_LABEL).unwrap();
+        // The Add device window sits right above Settings, on Windows only.
+        let add = all
+            .iter()
+            .position(|e| e.id.as_deref() == Some(ADD_DEVICE_ID));
+        assert_eq!(add.is_some(), cfg!(windows));
+        if let Some(add) = add {
+            assert_eq!(add + 1, settings);
+            assert_eq!(all[add].text, "Add device…");
+            assert!(all[add - 1].is_separator());
+        }
+
+        let entries = settings_of(all);
+        let detect = entries
+            .iter()
+            .position(|e| e.id.as_deref() == Some(DETECT_NEW_DEVICES_ID));
+        assert_eq!(detect.is_some(), cfg!(windows));
+        if let Some(detect) = detect {
+            assert_eq!(entries[detect].text, "Detect new devices");
+            assert_eq!(entries[detect].checked, Some(true));
+            assert!(entries[detect - 1].is_separator());
+            assert_eq!(entries[detect + 1].id.as_deref(), Some("login"));
+            let off = Config {
+                detect_new_devices: false,
+                ..Config::default()
+            };
+            let unticked = settings_of(build(&off))
+                .into_iter()
+                .find(|e| e.id.as_deref() == Some(DETECT_NEW_DEVICES_ID))
+                .unwrap();
+            assert_eq!(unticked.checked, Some(false));
+        }
     }
 
     #[test]
@@ -807,7 +890,7 @@ mod tests {
 
         // The automatic-check switch exists only where the build can check on its own.
         let auto = |config: &Config| {
-            build(config)
+            settings_of(build(config))
                 .into_iter()
                 .find(|e| e.id.as_deref() == Some("update-auto"))
         };
@@ -877,6 +960,11 @@ mod tests {
             Some(MenuAction::CustomHideOffline)
         );
         assert_eq!(action_for("login"), Some(MenuAction::ToggleStartAtLogin));
+        assert_eq!(
+            action_for("detect-new"),
+            Some(MenuAction::ToggleDetectNewDevices)
+        );
+        assert_eq!(action_for("add-device"), Some(MenuAction::AddDevice));
         assert_eq!(action_for("auto:7"), None);
         assert_eq!(action_for("icon:toaster:bt:x"), None);
         assert_eq!(action_for("color:zzz:auto:bt:x"), None);
@@ -968,47 +1056,28 @@ mod tests {
     }
 
     #[test]
-    fn check_battery_id_roundtrips() {
-        for id in ["usb-373b-1216", MAC_ID] {
-            assert_eq!(
-                action_for(&format!("check:{id}")),
-                Some(MenuAction::CheckBattery(id.to_owned()))
-            );
-        }
-    }
-
-    #[test]
-    fn check_battery_only_for_unconfirmed_not_allowed_receivers() {
-        let row = |id: &str| DeviceView {
-            id: id.to_owned(),
+    fn device_submenus_have_no_battery_check() {
+        // Unverified devices are added through the Add window, never queried from a row.
+        assert_eq!(action_for("check:usb-391d-1a05"), None);
+        let row = DeviceView {
+            id: "usb-391d-1a05".to_owned(),
             path: Path::Dongle,
-            ..device(id, Level::NoData("x".into()), true)
+            ..device("usb-391d-1a05", Level::NoData("x".into()), true)
         };
-        let check_ids = |config: &Config| -> Vec<String> {
-            let devices = [
-                row("usb-391d-1a05"),
-                row("usb-3837-6011"),
-                device("Headset", Level::Percent(50), true),
-            ];
-            entries(&devices, config, LoginState::Disabled)
-                .iter()
-                .flat_map(|e| &e.children)
-                .filter(|e| e.text == "Check battery now")
-                .filter_map(|e| e.id.clone())
-                .collect()
-        };
-        let ids = check_ids(&Config::default());
-        assert_eq!(ids, ["check:usb-391d-1a05"]);
-        assert_eq!(
-            action_for(&ids[0]),
-            Some(MenuAction::CheckBattery("usb-391d-1a05".into()))
-        );
-
-        let allowed = Config {
-            allow: vec!["391d:1a05".into()],
-            ..Config::default()
-        };
-        assert!(check_ids(&allowed).is_empty());
+        let entries = entries(&[row], &Config::default(), LoginState::Disabled);
+        let mut stack: Vec<&MenuEntry> = entries.iter().collect();
+        while let Some(entry) = stack.pop() {
+            assert_ne!(entry.text, "Check battery now");
+            assert!(
+                !entry
+                    .id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("check:")),
+                "{:?}",
+                entry.id
+            );
+            stack.extend(&entry.children);
+        }
     }
 
     const BLUE: (IconColor, IconColor) = (
@@ -1190,13 +1259,13 @@ mod tests {
         assert_eq!(child(auto, "Custom… (1h30m)").checked, Some(true));
 
         let quick = Config::default();
-        let quick_entries = menu_entries(
+        let quick_entries = settings_of(menu_entries(
             &[],
             &quick,
             LoginState::Disabled,
             false,
             SystemTime::UNIX_EPOCH,
-        );
+        ));
         let auto = quick_entries
             .iter()
             .find(|e| e.text == "Auto-refresh")
@@ -1250,9 +1319,10 @@ mod tests {
         assert!(entries[1].enabled && entries[1].text.starts_with(GROUP_INDENT));
         let away = &entries[2];
         assert!(away.enabled && !away.children.is_empty());
-        assert!(away.text.starts_with(OFFLINE_INDENT));
-        assert!(away.text[OFFLINE_INDENT.len()..].starts_with("Away — BT · 40%"));
-        assert!(!away.text.contains("not connected"));
+        assert!(away.text.starts_with(GROUP_INDENT));
+        assert!(away.text[GROUP_INDENT.len()..].starts_with("Away — BT · 40%"));
+        assert!(away.text.ends_with(DISCONNECTED_TEXT));
+        assert!(!entries[1].text.contains(DISCONNECTED_TEXT));
     }
 
     #[test]
@@ -1263,9 +1333,9 @@ mod tests {
         let entries_for = |d: DeviceView| entries(&[d], &Config::default(), LoginState::Disabled);
         let (stale_entries, fresh_entries) = (entries_for(stale), entries_for(fresh));
         let (stale_line, fresh_line) = (first_device(&stale_entries), first_device(&fresh_entries));
-        assert!(stale_line.enabled && stale_line.text.starts_with(OFFLINE_INDENT));
-        assert!(fresh_line.enabled && fresh_line.text.starts_with(GROUP_INDENT));
-        let text = stale_line.text.strip_prefix(OFFLINE_INDENT).unwrap();
+        assert!(stale_line.enabled && stale_line.text.ends_with(DISCONNECTED_TEXT));
+        assert!(fresh_line.enabled && !fresh_line.text.contains(DISCONNECTED_TEXT));
+        let text = stale_line.text.strip_prefix(GROUP_INDENT).unwrap();
         assert!(text.starts_with("Mouse — BT · 70%"));
     }
 
@@ -1399,9 +1469,15 @@ mod tests {
                 (false, false, "Pad — BT · 50%"),
             ]
         );
-        // The existing separator between devices and settings stays.
+        // A separator ends the devices; Add device (Windows) then the Settings items follow.
         assert!(entries[9].is_separator());
-        assert_eq!(entries[10].text, "Auto-refresh");
+        let next = if cfg!(windows) {
+            assert_eq!(entries[10].id.as_deref(), Some(ADD_DEVICE_ID));
+            11
+        } else {
+            10
+        };
+        assert_eq!(entries[next].text, "Auto-refresh");
     }
 
     #[test]
