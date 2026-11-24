@@ -3,9 +3,7 @@ use std::process::ExitCode;
 #[cfg(windows)]
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
-#[cfg(windows)]
-use std::time::Instant;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(target_os = "macos")]
 use strip_render::TextStyle;
@@ -83,6 +81,9 @@ pub enum UserEvent {
     /// The owner confirmed "Refresh on battery power" in its dialog, which runs off this thread.
     #[cfg(windows)]
     EnableRefreshOnBattery,
+    /// A value prompt answered on its own thread; the owner's menu action runs on this one.
+    #[cfg(windows)]
+    Action(MenuAction),
     /// The update scheduler's tick: time for an automatic check.
     #[cfg(windows)]
     UpdateDue,
@@ -106,7 +107,6 @@ impl UserEvent {
             #[cfg(windows)]
             Self::Taskbar(taskbar::Signal::ThemeChanged) => "Taskbar::ThemeChanged",
             #[cfg(windows)]
-            #[cfg(windows)]
             Self::Taskbar(taskbar::Signal::PowerChanged) => "Taskbar::PowerChanged",
             #[cfg(windows)]
             Self::Taskbar(taskbar::Signal::Click) => "Taskbar::Click",
@@ -114,6 +114,8 @@ impl UserEvent {
             Self::TrayClick => "TrayClick",
             #[cfg(windows)]
             Self::EnableRefreshOnBattery => "EnableRefreshOnBattery",
+            #[cfg(windows)]
+            Self::Action(_) => "Action",
             #[cfg(windows)]
             Self::UpdateDue => "UpdateDue",
             #[cfg(windows)]
@@ -164,7 +166,19 @@ pub fn run() -> ExitCode {
                     *control_flow = app.handle(event);
                 }
             }
+            // An offline device just crossed its "Hide offline after" deadline.
+            Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
+                if let Some(app) = app.as_mut() {
+                    app.apply();
+                }
+            }
             _ => {}
+        }
+        // Sleeps until the next hide deadline instead of forever; each event recomputes it.
+        if *control_flow == ControlFlow::Wait
+            && let Some(deadline) = app.as_ref().and_then(App::next_hide_instant)
+        {
+            *control_flow = ControlFlow::WaitUntil(deadline);
         }
     })
 }
@@ -247,8 +261,18 @@ impl App {
         crate::watchdog::start();
         #[cfg(windows)]
         let taskbar = new_taskbar_strip(proxy.clone());
+        // Power changes reach the app only through the strip's window, so without a strip a
+        // battery start would never see AC return; the source stays unknown and nothing pauses.
+        #[cfg(windows)]
+        let source = if taskbar.is_some() {
+            pause::current_power_source()
+        } else {
+            PowerSource::NoBattery
+        };
+        #[cfg(not(windows))]
+        let source = pause::current_power_source();
         let power = PowerState {
-            source: pause::current_power_source(),
+            source,
             refresh_on_battery: config.refresh_on_battery,
         };
         log::trace(format_args!("power at start {power:?}"));
@@ -335,6 +359,8 @@ impl App {
             // Config writes stay on this thread, so the dialog's thread only reports the answer.
             #[cfg(windows)]
             UserEvent::EnableRefreshOnBattery => self.set_refresh_on_battery(true),
+            #[cfg(windows)]
+            UserEvent::Action(action) => self.on_action(action),
             // Nothing on screen changes, so no `apply`.
             #[cfg(windows)]
             UserEvent::UpdateDue => {
@@ -526,14 +552,63 @@ impl App {
             .refresh_seconds
             .map(format_interval)
             .unwrap_or_default();
-        let _span = log::span("dialog refresh prompt");
-        if let Some(seconds) = dialog::prompt_parsed(
-            REFRESH_PROMPT_TITLE,
-            REFRESH_PROMPT,
-            &current,
-            parse_interval,
-        ) {
-            self.set_refresh(Some(seconds));
+        self.ask_then_act("dialog refresh prompt", move || {
+            dialog::prompt_parsed(
+                REFRESH_PROMPT_TITLE,
+                REFRESH_PROMPT,
+                &current,
+                parse_interval,
+            )
+            .map(|seconds| MenuAction::SetRefresh(Some(seconds)))
+        });
+    }
+
+    /// Runs a value prompt and then its action. Windows keeps the modal dialog off this thread
+    /// (one at a time) and answers with `UserEvent::Action`; macOS needs NSAlert on the main one.
+    #[cfg(windows)]
+    fn ask_then_act(
+        &mut self,
+        label: &'static str,
+        ask: impl FnOnce() -> Option<MenuAction> + Send + 'static,
+    ) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        static OPEN: AtomicBool = AtomicBool::new(false);
+        if OPEN.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new()
+            .name("prompt".into())
+            .spawn(move || {
+                let action = {
+                    let _span = log::span(label);
+                    ask()
+                };
+                if let Some(action) = action {
+                    // A closed event loop means the app is exiting.
+                    let _ = proxy.send_event(UserEvent::Action(action));
+                }
+                OPEN.store(false, Ordering::Relaxed);
+            });
+        if let Err(error) = spawned {
+            OPEN.store(false, Ordering::Relaxed);
+            eprintln!("prompt unavailable: {error}");
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn ask_then_act(
+        &mut self,
+        label: &'static str,
+        ask: impl FnOnce() -> Option<MenuAction> + Send + 'static,
+    ) {
+        let action = {
+            let _span = log::span(label);
+            ask()
+        };
+        if let Some(action) = action {
+            self.on_action(action);
         }
     }
 
@@ -545,12 +620,10 @@ impl App {
             .low_battery_percent
             .map(|percent| percent.to_string())
             .unwrap_or_default();
-        let _span = log::span("dialog low prompt");
-        if let Some(percent) =
+        self.ask_then_act("dialog low prompt", move || {
             dialog::prompt_parsed(LOW_PROMPT_TITLE, LOW_PROMPT, &current, parse_low_percent)
-        {
-            self.on_action(MenuAction::SetLow(Some(percent)));
-        }
+                .map(|percent| MenuAction::SetLow(Some(percent)))
+        });
     }
 
     /// Asks for custom minutes before an offline device leaves the strip.
@@ -560,15 +633,15 @@ impl App {
             .hide_offline_minutes
             .map(|minutes| minutes.to_string())
             .unwrap_or_default();
-        let _span = log::span("dialog hide offline prompt");
-        if let Some(minutes) = dialog::prompt_parsed(
-            HIDE_OFFLINE_PROMPT_TITLE,
-            HIDE_OFFLINE_PROMPT,
-            &current,
-            parse_hide_offline_minutes,
-        ) {
-            self.on_action(MenuAction::SetHideOffline(Some(minutes)));
-        }
+        self.ask_then_act("dialog hide offline prompt", move || {
+            dialog::prompt_parsed(
+                HIDE_OFFLINE_PROMPT_TITLE,
+                HIDE_OFFLINE_PROMPT,
+                &current,
+                parse_hide_offline_minutes,
+            )
+            .map(|minutes| MenuAction::SetHideOffline(Some(minutes)))
+        });
     }
 
     /// Asks for a custom icon colour, starting from the current one; `theme` `None` applies it
@@ -746,19 +819,36 @@ impl App {
         entries
     }
 
+    /// "Hide offline after" as a duration; `None` = never.
+    fn hide_offline_after(&self) -> Option<Duration> {
+        self.config
+            .hide_offline_minutes
+            .map(|minutes| Duration::from_secs(u64::from(minutes) * 60))
+    }
+
     /// The devices the strip and tooltip show: listed in the menu, not hidden by the user and
     /// not offline longer than "Hide offline after"; the menu keeps them, marked offline.
     fn visible_devices(&self) -> Vec<DeviceView> {
         let now = SystemTime::now();
-        let hide_after = self
-            .config
-            .hide_offline_minutes
-            .map(|minutes| Duration::from_secs(u64::from(minutes) * 60));
+        let hide_after = self.hide_offline_after();
         menu::listed_devices(&self.devices)
             .filter(|device| !self.config.is_hidden(&device.id, &device.name))
             .filter(|device| !device.hidden_when_offline(hide_after, now))
             .cloned()
             .collect()
+    }
+
+    /// When the earliest shown device crosses "Hide offline after", so the event loop wakes
+    /// once for it instead of waiting for the next refresh; `None` when no device is pending.
+    fn next_hide_instant(&self) -> Option<Instant> {
+        let now = SystemTime::now();
+        let hide_after = self.hide_offline_after();
+        let wait = menu::listed_devices(&self.devices)
+            .filter(|device| !self.config.is_hidden(&device.id, &device.name))
+            .filter_map(|device| device.hide_deadline(hide_after))
+            .filter_map(|deadline| deadline.duration_since(now).ok())
+            .min()?;
+        Some(Instant::now() + wait)
     }
 
     #[cfg(target_os = "macos")]
@@ -1008,8 +1098,8 @@ fn ask_color(current: IconColor, theme: Option<Theme>) -> Option<IconColor> {
     };
     let title = match theme {
         None => "Custom icon colour",
-        Some(Theme::Light) => "Custom icon colour (light taskbar)",
-        Some(Theme::Dark) => "Custom icon colour (dark taskbar)",
+        Some(Theme::Light) => "Custom icon colour (light menu bar)",
+        Some(Theme::Dark) => "Custom icon colour (dark menu bar)",
     };
     dialog::prompt_parsed(title, COLOR_PROMPT, &shown, parse_hex_color)
 }

@@ -168,7 +168,7 @@ pub fn check_receiver(id: &str, allow: &[(u16, u16)], now: SystemTime) -> Option
     let inventory = list_in_depth(listing, &openable(&present, &allow));
     let log_path = query_log::path();
     let log = load_log(log_path.as_deref());
-    let mut door = Door::new(writes_needed(device.family));
+    let mut door = Door::new(writes_needed(device));
     let outcome = attempt(
         device,
         &allow,
@@ -309,7 +309,7 @@ fn attempt(
             gate_result,
             pick,
             floor,
-            door.writes_left() >= writes_needed(device.family),
+            door.writes_left() >= writes_needed(device),
         ),
         inventory,
     ) {
@@ -434,7 +434,7 @@ fn query(
         Err(ClaimError::Wait(_) | ClaimError::ClockBack) => return Outcome::Waiting,
     }
 
-    if online_first(family)
+    if online_first(device)
         && let Some(outcome) = status_verdict(door, &mut target, device)
     {
         log::trace(format_args!("{} {}", row_id(device), outcome_text(outcome)));
@@ -507,14 +507,15 @@ fn record_readings(log_path: Option<&FsPath>, outcomes: &[(&KnownDevice, Outcome
 }
 
 /// Whether the worker asks the online status before the battery. The ATK serial receiver keeps
-/// answering the battery query with the last level after the headset is off.
-fn online_first(family: Family) -> bool {
-    family == Family::AtkSerial
+/// answering the battery query with the last level after the headset is off; a cable
+/// connection has no dongle link to ask about.
+fn online_first(device: &KnownDevice) -> bool {
+    device.family == Family::AtkSerial && !device.cable
 }
 
 /// Writes one try needs: the status query first, then the battery query.
-fn writes_needed(family: Family) -> u8 {
-    1 + u8::from(online_first(family))
+fn writes_needed(device: &KnownDevice) -> u8 {
+    1 + u8::from(online_first(device))
 }
 
 /// Sends the status query; `Some` ends the try (headset off, or the send failed and is not
@@ -1151,12 +1152,15 @@ mod tests {
     }
 
     #[test]
-    fn only_atk_serial_asks_the_status_first() {
+    fn only_atk_serial_dongles_ask_the_status_first() {
         for device in KNOWN {
-            let atk = device.family == Family::AtkSerial;
-            assert_eq!(online_first(device.family), atk);
-            assert_eq!(writes_needed(device.family), if atk { 2 } else { 1 });
+            let asks = device.family == Family::AtkSerial && !device.cable;
+            assert_eq!(online_first(device), asks);
+            assert_eq!(writes_needed(device), if asks { 2 } else { 1 });
         }
+        let wired = known(0x373B, 0x11CA).expect("N9 Pro is in the catalogue");
+        assert!(wired.cable && wired.family == Family::AtkSerial);
+        assert!(!online_first(wired));
     }
 
     #[test]

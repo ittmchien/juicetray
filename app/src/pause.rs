@@ -1,5 +1,5 @@
 //! When the app may touch devices: a laptop on battery pauses the auto-refresh timer. The rules
-//! are pure; only the start-up probe reads the OS.
+//! are pure; only `current_power_source` reads the OS, at start and on each power change.
 
 #[cfg(any(windows, test))]
 use std::time::{Duration, Instant};

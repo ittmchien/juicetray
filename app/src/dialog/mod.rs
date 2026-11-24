@@ -1,7 +1,7 @@
 //! Native dialogs opened from a menu click: a one-line text prompt, the SVG file picker and, on
 //! Windows, the colour picker, a yes/no confirmation and a one-button notice. All run modally
-//! and return when the owner closes them; the confirmation and the notice run on their own
-//! threads, the others on the main thread.
+//! and return when the owner closes them; on Windows the text prompts, the confirmation and the
+//! notice run on their own threads, the pickers (and everything on macOS) on the main thread.
 
 #[cfg(target_os = "macos")]
 mod macos;

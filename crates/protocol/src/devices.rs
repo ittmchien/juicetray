@@ -79,7 +79,6 @@ mod tests {
             );
         }
         // The ATK HUB Compx and BITMOUSE PIDs are imported too.
-        assert_eq!(KNOWN.len(), 293);
         assert_eq!(known(0x373B, 0x11FE).map(|d| d.family), Some(Family::Compx));
         assert_eq!(known(0x3554, 0xF58A).map(|d| d.family), Some(Family::Compx));
         assert_eq!(

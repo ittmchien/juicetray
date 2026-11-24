@@ -431,7 +431,9 @@ fn paint(color: Color) -> Paint<'static> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::{Path, PathBuf};
+    #[cfg(feature = "embedded-font")]
+    use std::path::Path;
+    use std::path::PathBuf;
 
     use super::*;
 
@@ -450,13 +452,25 @@ mod tests {
         }
     }
 
+    /// The embedded font when built with it, else no text: the icon and gauge tests need none.
+    fn test_style(height: u32) -> TextStyle {
+        #[cfg(feature = "embedded-font")]
+        {
+            TextStyle::fallback(height)
+        }
+        #[cfg(not(feature = "embedded-font"))]
+        {
+            TextStyle::without_font(TextStyle::default_size_px(height))
+        }
+    }
+
     fn strip(segments: &[Segment], height: u32, theme: Theme) -> Bitmap {
         render_strip(
             segments,
             height,
             theme,
             &HashMap::new(),
-            &TextStyle::fallback(height),
+            &test_style(height),
         )
     }
 
@@ -467,7 +481,7 @@ mod tests {
             TEST_HEIGHT,
             theme,
             &svgs,
-            &TextStyle::fallback(TEST_HEIGHT),
+            &test_style(TEST_HEIGHT),
         )
     }
 
@@ -521,6 +535,7 @@ mod tests {
 
     /// Rows (first, last) holding the digit `0` of a segment, found by diffing against the
     /// same segment without a number.
+    #[cfg(feature = "embedded-font")]
     fn number_rows(style: &TextStyle) -> (u32, u32) {
         let with = Segment {
             text: "0".to_owned(),
@@ -552,6 +567,7 @@ mod tests {
         (*rows.first().unwrap(), *rows.last().unwrap())
     }
 
+    #[cfg(feature = "embedded-font")]
     fn embedded_style(size_px: f32) -> TextStyle {
         TextStyle {
             font: FontData::Embedded,
@@ -585,6 +601,11 @@ mod tests {
                 (bitmap.width * bitmap.height * 4) as usize
             );
         }
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-font")]
+    fn square_is_as_requested() {
         let square = render_square(&segment(SegmentStyle::Normal), 32, Theme::Light);
         assert_eq!((square.width, square.height), (32, 32));
     }
@@ -596,6 +617,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "embedded-font")]
     fn percent_off_is_narrower() {
         let off = Segment {
             text: String::new(),
@@ -866,7 +888,7 @@ mod tests {
             TEST_HEIGHT,
             Theme::Light,
             &svgs,
-            &TextStyle::fallback(TEST_HEIGHT),
+            &test_style(TEST_HEIGHT),
         );
         let (left, right) = (EDGE_PADDING * height, (EDGE_PADDING + ICON_SIZE) * height);
         let top = (1.0 - ICON_SIZE) * height / 2.0;
@@ -949,6 +971,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "embedded-font")]
     fn text_style_size_used() {
         let expected = digit_height(&embedded_font(), 26.0);
         let (first, last) = number_rows(&embedded_style(26.0));
@@ -960,6 +983,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "embedded-font")]
     fn text_clamped_to_height() {
         let limit = digit_height(&embedded_font(), MAX_TEXT_SIZE * TEST_HEIGHT as f32);
         let (first, last) = number_rows(&embedded_style(100.0));
@@ -969,6 +993,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "embedded-font")]
     fn style_without_font_draws_the_icon_but_no_text() {
         let captioned = Segment {
             caption: Some("A".to_owned()),
@@ -990,6 +1015,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "embedded-font")]
     fn fallback_when_font_missing() {
         let style = TextStyle::from_font_file(Path::new("no/such/font.ttf"), 26.0, 44);
         assert!(matches!(style.font, FontData::Embedded));
@@ -1002,6 +1028,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "embedded-font")]
     fn font_file_is_mapped() {
         let inter = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/Inter-Medium.ttf");
         let style = TextStyle::from_font_file(Path::new(inter), 26.0, 44);
@@ -1012,6 +1039,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "embedded-font")]
     fn square_number_fits_even_for_100() {
         let full = Segment {
             gauge: Some(100),
@@ -1030,6 +1058,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "embedded-font")]
     fn square_shows_number_when_percent_is_off() {
         let off = Segment {
             text: String::new(),

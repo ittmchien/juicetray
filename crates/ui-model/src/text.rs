@@ -30,37 +30,52 @@ pub fn menu_line(d: &DeviceView, now: SystemTime) -> String {
 }
 
 /// Devices with a number grouped under a kind header (`name 60%` indented two spaces), kinds in
-/// the shared group order and devices in input order; whole lines are dropped from the end to fit `max_utf16`.
+/// the shared group order and devices in input order. Over `max_utf16`, whole lines are dropped
+/// strongest battery first (the latest on a tie), so the weakest devices stay; a header goes
+/// with its last line.
 pub fn tooltip_compact(devices: &[DeviceView], max_utf16: usize) -> String {
-    let mut text = String::new();
-    let mut used = 0;
-    for (kind, header) in KIND_GROUPS {
-        let mut header_pending = true;
-        for d in devices.iter().filter(|d| d.kind == kind) {
-            let Some(percent) = d.shown_percent() else {
-                continue;
-            };
-            let line = format!("  {} {percent}%", d.name);
-            // Header and its first item must fit together, so no header is left without items.
-            let mut add = String::new();
-            if header_pending {
-                add.push_str(header);
-                add.push('\n');
-            }
-            add.push_str(&line);
-            let cost = add.encode_utf16().count() + usize::from(!text.is_empty());
-            if used + cost > max_utf16 {
-                return text;
-            }
+    // (group index, header, line, percent) in display order.
+    let items: Vec<(usize, &str, String, u8)> = KIND_GROUPS
+        .iter()
+        .enumerate()
+        .flat_map(|(group, &(kind, header))| {
+            devices
+                .iter()
+                .filter(move |d| d.kind == kind)
+                .filter_map(move |d| {
+                    let percent = d.shown_percent()?;
+                    Some((group, header, format!("  {} {percent}%", d.name), percent))
+                })
+        })
+        .collect();
+    let mut kept = vec![true; items.len()];
+    loop {
+        let mut text = String::new();
+        let mut last_group = None;
+        for (group, header, line, _) in items.iter().zip(&kept).filter_map(|(i, &k)| k.then_some(i))
+        {
             if !text.is_empty() {
                 text.push('\n');
             }
-            text.push_str(&add);
-            used += cost;
-            header_pending = false;
+            if last_group != Some(*group) {
+                text.push_str(header);
+                text.push('\n');
+                last_group = Some(*group);
+            }
+            text.push_str(line);
         }
+        if text.encode_utf16().count() <= max_utf16 {
+            return text;
+        }
+        // Over budget, so something is still kept.
+        let strongest = (0..items.len())
+            .filter(|&i| kept[i])
+            .max_by_key(|&i| (items[i].3, i));
+        let Some(strongest) = strongest else {
+            return text;
+        };
+        kept[strongest] = false;
     }
-    text
 }
 
 fn battery_text(level: &Level) -> String {
@@ -184,15 +199,31 @@ mod tests {
             kinded("V9", DeviceKind::Headset, 90),
             kinded("X1", DeviceKind::Mouse, 52),
         ];
-        let headset = "Headset\n  N9 40%\n  V9 90%";
-        assert_eq!(tooltip_compact(&devices, headset.len()), headset);
-        // The Mouse header and its item do not fit together: neither is emitted.
-        assert_eq!(tooltip_compact(&devices, headset.len() + 5), headset);
-        // Only the first Headset item fits.
+        // The strongest line (V9 90%) goes first, then X1 52% with its header.
+        let without_strongest = "Headset\n  N9 40%\nMouse\n  X1 52%";
+        assert_eq!(
+            tooltip_compact(&devices, without_strongest.len()),
+            without_strongest
+        );
         assert_eq!(tooltip_compact(&devices, 16), "Headset\n  N9 40%");
         assert_eq!(tooltip_compact(&devices, 5), "");
         let full = tooltip_compact(&devices, 127);
         assert!(full.ends_with("Mouse\n  X1 52%"));
+    }
+
+    #[test]
+    fn tooltip_compact_keeps_the_weakest_even_in_the_last_group() {
+        let devices = [
+            kinded("N9", DeviceKind::Headset, 80),
+            kinded("V9", DeviceKind::Headset, 90),
+            kinded("X1", DeviceKind::Mouse, 70),
+            kinded("Pad", DeviceKind::Gamepad, 5),
+        ];
+        let weakest = "Controller\n  Pad 5%";
+        assert_eq!(tooltip_compact(&devices, weakest.len()), weakest);
+        // Display order survives: Mouse before Controller.
+        let two = "Mouse\n  X1 70%\nController\n  Pad 5%";
+        assert_eq!(tooltip_compact(&devices, two.len()), two);
     }
 
     #[test]

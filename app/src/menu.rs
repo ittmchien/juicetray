@@ -32,6 +32,15 @@ const CUSTOM_OFFLINE_ID: &str = "offline:custom";
 const REFRESH_ON_BATTERY_ID: &str = "refresh-battery";
 const ICON_AUTO: &str = "auto";
 const SECONDS_PER_MINUTE: u32 = 60;
+/// The icon sits on the taskbar on Windows and in the menu bar on macOS.
+#[cfg(windows)]
+const CUSTOM_LIGHT_LABEL: &str = "Custom (light taskbar)…";
+#[cfg(windows)]
+const CUSTOM_DARK_LABEL: &str = "Custom (dark taskbar)…";
+#[cfg(not(windows))]
+const CUSTOM_LIGHT_LABEL: &str = "Custom (light menu bar)…";
+#[cfg(not(windows))]
+const CUSTOM_DARK_LABEL: &str = "Custom (dark menu bar)…";
 
 /// Built-in icon choices in menu order; `None` is Auto (from the device kind).
 const BUILT_IN_ICONS: [(&str, Option<DeviceKind>); 7] = [
@@ -469,13 +478,13 @@ fn color_entries(id: &str, current: (IconColor, IconColor), is_svg: bool) -> Vec
         custom("ccolor", "Custom…", light, same_rgb),
         custom(
             "ccolor-light",
-            "Custom (light taskbar)…",
+            CUSTOM_LIGHT_LABEL,
             light,
             split && is_rgb(light),
         ),
         custom(
             "ccolor-dark",
-            "Custom (dark taskbar)…",
+            CUSTOM_DARK_LABEL,
             dark,
             split && is_rgb(dark),
         ),
@@ -571,29 +580,46 @@ fn login_entry(login: LoginState) -> MenuEntry {
 /// Maps entries to muda; untested because muda menus can only be created on the macOS main thread.
 pub fn build_menu(entries: &[MenuEntry]) -> Menu {
     let menu = Menu::new();
+    let ink = tick_ink();
     for entry in entries {
-        if let Err(error) = menu.append(to_item(entry).as_ref()) {
+        if let Err(error) = menu.append(to_item(entry, ink).as_ref()) {
             eprintln!("menu item failed: {error}");
         }
     }
     menu
 }
 
-fn to_item(entry: &MenuEntry) -> Box<dyn IsMenuItem> {
+/// Grey level of the tick bitmap for the apps theme, read once per menu build; only Windows
+/// draws the tick itself.
+fn tick_ink() -> u8 {
+    #[cfg(windows)]
+    {
+        match crate::theme::apps_theme() {
+            Theme::Dark => 0xF0,
+            Theme::Light => 0x20,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        0
+    }
+}
+
+fn to_item(entry: &MenuEntry, ink: u8) -> Box<dyn IsMenuItem> {
     if entry.is_separator() {
         return Box::new(PredefinedMenuItem::separator());
     }
     if !entry.children.is_empty() {
         let submenu = Submenu::new(&entry.text, entry.enabled);
         for child in &entry.children {
-            if let Err(error) = submenu.append(to_item(child).as_ref()) {
+            if let Err(error) = submenu.append(to_item(child, ink).as_ref()) {
                 eprintln!("menu item failed: {error}");
             }
         }
         return Box::new(submenu);
     }
     match (&entry.id, entry.checked) {
-        (Some(id), Some(checked)) => check_item(id, entry, checked),
+        (Some(id), Some(checked)) => check_item(id, entry, checked, ink),
         (Some(id), None) => Box::new(MenuItem::with_id(
             id.as_str(),
             &entry.text,
@@ -607,11 +633,7 @@ fn to_item(entry: &MenuEntry) -> Box<dyn IsMenuItem> {
 /// A ticked item shows a thin tick as its bitmap: the native Windows 10 dark-menu check mark is
 /// coarse, and a bitmap keeps the menu native (owner-drawn items turn the dark menu light).
 #[cfg(windows)]
-fn check_item(id: &str, entry: &MenuEntry, checked: bool) -> Box<dyn IsMenuItem> {
-    let ink = match crate::theme::apps_theme() {
-        Theme::Dark => 0xF0,
-        Theme::Light => 0x20,
-    };
+fn check_item(id: &str, entry: &MenuEntry, checked: bool, ink: u8) -> Box<dyn IsMenuItem> {
     let icon = checked
         .then(|| Icon::from_rgba(tick_rgba(TICK_PX, ink), TICK_PX, TICK_PX))
         .and_then(|icon| {
@@ -628,7 +650,7 @@ fn check_item(id: &str, entry: &MenuEntry, checked: bool) -> Box<dyn IsMenuItem>
 }
 
 #[cfg(not(windows))]
-fn check_item(id: &str, entry: &MenuEntry, checked: bool) -> Box<dyn IsMenuItem> {
+fn check_item(id: &str, entry: &MenuEntry, checked: bool, _ink: u8) -> Box<dyn IsMenuItem> {
     Box::new(CheckMenuItem::with_id(
         id,
         &entry.text,
@@ -1063,8 +1085,8 @@ mod tests {
                 "Pink",
                 "",
                 "Custom…",
-                "Custom (light taskbar)…",
-                "Custom (dark taskbar)…",
+                CUSTOM_LIGHT_LABEL,
+                CUSTOM_DARK_LABEL,
             ]
         );
         assert!(colour.children[9].is_separator());
@@ -1102,15 +1124,15 @@ mod tests {
         let light_only = colour_menu((orange, IconColor::Auto), IconChoice::Auto);
         assert_eq!(
             ticked_labels(&light_only),
-            ["Custom (light taskbar)… (#FF8800)"]
+            [format!("{CUSTOM_LIGHT_LABEL} (#FF8800)")]
         );
         assert_eq!(ticked_ids(&light_only), [format!("ccolor-light:{HEX_ID}")]);
         let both = colour_menu((orange, teal), IconChoice::Auto);
         assert_eq!(
             ticked_labels(&both),
             [
-                "Custom (light taskbar)… (#FF8800)",
-                "Custom (dark taskbar)… (#008888)"
+                format!("{CUSTOM_LIGHT_LABEL} (#FF8800)"),
+                format!("{CUSTOM_DARK_LABEL} (#008888)")
             ]
         );
         let dark_only = colour_menu((IconColor::Auto, teal), IconChoice::Auto);

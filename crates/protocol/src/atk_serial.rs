@@ -12,8 +12,8 @@ pub(crate) const QUERY: [u8; SERIAL_FRAME_LEN] = padded(&[REQUEST_START, CMD_BAT
 pub(crate) const ONLINE_QUERY: [u8; SERIAL_FRAME_LEN] =
     padded(&[REQUEST_START, CMD_BATTERY, SUB_STATUS]);
 
-/// The getStatus reply: byte `[4]` 1 = headset linked to the dongle (from ATK HUB, not yet
-/// checked on hardware); any other cmd/sub answers some other command.
+/// The getStatus reply: byte `[4]` 1 = headset linked to the dongle, 0 = off (checked both
+/// ways on hardware); any other cmd/sub answers some other command.
 pub(crate) fn decode_online(bytes: &[u8]) -> Decoded {
     let &[_, CMD_BATTERY, SUB_STATUS, _, linked, ..] = bytes else {
         return Decoded::NotTheReply;

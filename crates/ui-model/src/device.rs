@@ -123,6 +123,14 @@ impl DeviceView {
         let age = now.duration_since(self.updated_at).unwrap_or_default();
         !self.connected || age > limit
     }
+
+    /// The first instant `hidden_when_offline` turns true for a stale receiver; `None` for an
+    /// online device, a disconnected one (hidden from the start) or no limit. The extra
+    /// millisecond keeps the strict `age > limit` check true when a timer fires at this instant.
+    pub fn hide_deadline(&self, hide_after: Option<Duration>) -> Option<SystemTime> {
+        let limit = hide_after?;
+        (self.connected && self.stale).then(|| self.updated_at + limit + Duration::from_millis(1))
+    }
 }
 
 /// Highest level first, then devices without a number, then offline ones; ties break by name.
@@ -267,6 +275,33 @@ mod tests {
             ..test_device("a", Level::Percent(50))
         };
         assert!(!online.hidden_when_offline(limit, now));
+    }
+
+    #[test]
+    fn hide_deadline_is_when_hidden_turns_true() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        let limit = Some(Duration::from_secs(15 * 60));
+        let stale = DeviceView {
+            stale: true,
+            updated_at: now,
+            ..test_device("a", Level::Percent(50))
+        };
+        let deadline = stale
+            .hide_deadline(limit)
+            .expect("stale receiver has a deadline");
+        assert!(!stale.hidden_when_offline(limit, deadline - Duration::from_millis(2)));
+        assert!(stale.hidden_when_offline(limit, deadline));
+        assert_eq!(stale.hide_deadline(None), None);
+
+        let disconnected = DeviceView {
+            connected: false,
+            ..test_device("a", Level::Percent(50))
+        };
+        assert_eq!(disconnected.hide_deadline(limit), None);
+        assert_eq!(
+            test_device("a", Level::Percent(50)).hide_deadline(limit),
+            None
+        );
     }
 
     #[test]
