@@ -1,0 +1,5 @@
+Source: https://github.com/google/material-design-icons
+Commit: 10ecc14790612ca8fd164e3f4ffe9c16fc50d5b7
+Path: symbols/web/<name>/materialsymbolsrounded/<name>_24px.svg (weight 400, fill 0)
+Licence: Apache-2.0 (see LICENSE)
+SVGs are unmodified.

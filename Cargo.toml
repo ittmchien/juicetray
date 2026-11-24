@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+# Function names in juicetray.pdb let the hang watchdog name the stuck frames; any strip
+# setting makes the MSVC linker skip the PDB.
+debug = "line-tables-only"

@@ -1,0 +1,21 @@
+# Device models juicetray knows, one line per VID:PID. Fields: vid, pid (4 hex digits),
+# name, family (protocol family in code), kind (mouse|headset|keyboard|gamepad|other),
+# connection (receiver|cable), verified (read on real hardware), optional needs_capture.
+
+# VGN / VXE / Compx models on VIDs 3554 and 391D. 3554 rows come from the ATK HUB catalogue
+# (COMPX, FF04:2); recovery and bootloader ids (3554:F2FF, F400-F410) are never listed.
+devices = [
+  { vid = "3554", pid = "F502", name = "ATK Dragonfly F1 PRO", family = "Compx", kind = "mouse", connection = "cable", verified = false },
+  { vid = "3554", pid = "F503", name = "Mouse 1K Dongle", family = "Compx", kind = "mouse", connection = "receiver", verified = false },
+  { vid = "3554", pid = "F505", name = "Mouse 4K Dongle", family = "Compx", kind = "mouse", connection = "receiver", verified = false },
+  { vid = "3554", pid = "F506", name = "ATK Dragonfly F1 PRO MAX", family = "Compx", kind = "mouse", connection = "cable", verified = false },
+  { vid = "3554", pid = "F50A", name = "ATK Dragonfly F1S", family = "Compx", kind = "mouse", connection = "cable", verified = false },
+  { vid = "3554", pid = "F50B", name = "Mouse 1K Dongle", family = "Compx", kind = "mouse", connection = "receiver", verified = false },
+  { vid = "3554", pid = "F58A", name = "Mouse 1K Dongle", family = "Compx", kind = "mouse", connection = "receiver", verified = false },
+  { vid = "3554", pid = "F58C", name = "VXE R1 PRO", family = "Compx", kind = "mouse", connection = "cable", verified = false },
+  { vid = "3554", pid = "F58D", name = "Mouse 4K Dongle", family = "Compx", kind = "mouse", connection = "receiver", verified = false },
+  { vid = "3554", pid = "F58E", name = "Mouse 1K Dongle", family = "Compx", kind = "mouse", connection = "receiver", verified = false },
+  { vid = "3554", pid = "F58F", name = "VXE R1", family = "Compx", kind = "mouse", connection = "cable", verified = false },
+  { vid = "3554", pid = "FB12", name = "VXE Mouse 1K Dongle", family = "Compx", kind = "mouse", connection = "receiver", verified = false },
+  { vid = "391D", pid = "1A05", name = "VGN Dragonfly 3 Master+", family = "Compx", kind = "mouse", connection = "receiver", verified = false },
+]
