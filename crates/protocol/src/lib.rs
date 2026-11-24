@@ -1,12 +1,13 @@
 //! Pure battery protocol: device families, query frames, reply decoders, the device catalogue
-//! (compiled from `devices/*.toml`), the recovery deny list, per-family query floors, HID
-//! report-descriptor sizes, the collection open rule and target picking. No I/O; everything is
-//! checked from byte frames.
+//! (compiled from `devices/*.toml`), the recovery deny list, family detection, per-family query
+//! floors, HID report-descriptor sizes, the collection open rule and target picking. No I/O;
+//! everything is checked from byte frames.
 
 mod atk_serial;
 mod bitmouse;
 pub mod compx;
 mod devices;
+mod families;
 mod hid;
 mod mchose;
 mod recovery;
@@ -16,6 +17,7 @@ mod report13;
 use std::time::{Duration, SystemTime};
 
 pub use devices::{KNOWN, Kind, KnownDevice, known};
+pub use families::families_for;
 pub use hid::{HidShape, PickError, open_permission, pick_target};
 pub use recovery::is_recovery;
 pub use report::{ReportKind, ReportSize, TopCollection, parse_descriptor, reports_of};

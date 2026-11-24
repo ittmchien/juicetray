@@ -1,7 +1,7 @@
 //! Read-only enumeration of HID collections and USB serial ports. Nothing here sends anything:
 //! a handle is opened only to fetch its report descriptor, and only when the open rule allows.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::CStr;
 
 use hidapi::{DeviceInfo, HidApi};
@@ -61,28 +61,56 @@ pub struct Inventory {
 /// A descriptor read once per path, with its parse result.
 type PathRead = Result<(Vec<u8>, Result<Vec<TopCollection>, String>), String>;
 
-/// One enumeration of the HID and serial device lists; nothing is opened. `present` and
-/// `into_inventory` both read it, so a refresh lists the devices once.
+/// One enumeration of the HID and serial device lists; nothing is opened. `present`,
+/// `present_all` and `into_inventory` all read it, so a refresh lists the devices once.
 pub struct Listing {
     api: Option<HidApi>,
-    /// VID:PID of every HID collection hidapi listed.
-    hid_ids: Vec<(u16, u16)>,
+    /// Every HID collection hidapi listed.
+    hid: Vec<Listed>,
     /// Every USB serial port, unfiltered.
     serial: Vec<SerialEntry>,
     errors: Vec<String>,
+}
+
+/// One listed HID collection: its VID:PID and whether the open rule lets it be opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Listed {
+    vid: u16,
+    pid: u16,
+    openable: bool,
+}
+
+/// One plugged-in VID:PID with its collection and port counts, from the lists alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Presence {
+    pub vid: u16,
+    pub pid: u16,
+    /// HID collections listed (Windows lists one per top-level collection of each interface).
+    pub hid: usize,
+    /// Of those, the vendor collections the open rule allows opening.
+    pub openable: usize,
+    /// USB serial ports.
+    pub serial: usize,
 }
 
 /// Lists the HID collections and USB serial ports once. Never fails as a whole; a source that
 /// cannot be listed is named in `errors`.
 pub fn list() -> Listing {
     let mut errors = Vec::new();
-    let (api, hid_ids) = match HidApi::new() {
+    let (api, hid) = match HidApi::new() {
         Ok(api) => {
-            let ids = api
-                .device_list()
-                .map(|info| (info.vendor_id(), info.product_id()))
+            let infos: Vec<&DeviceInfo> = api.device_list().collect();
+            let (_, verdicts) = open_verdicts(&infos);
+            let hid = infos
+                .iter()
+                .zip(verdicts)
+                .map(|(info, verdict)| Listed {
+                    vid: info.vendor_id(),
+                    pid: info.product_id(),
+                    openable: verdict.is_ok(),
+                })
                 .collect();
-            (Some(api), ids)
+            (Some(api), hid)
         }
         Err(error) => {
             errors.push(format!("HID devices could not be listed: {error}"));
@@ -98,7 +126,7 @@ pub fn list() -> Listing {
     };
     Listing {
         api,
-        hid_ids,
+        hid,
         serial,
         errors,
     }
@@ -115,12 +143,27 @@ impl Listing {
     /// counts as having none of them.
     pub fn present(&self, ids: &[(u16, u16)]) -> Vec<(u16, u16)> {
         let seen: Vec<(u16, u16)> = self
-            .hid_ids
+            .hid
             .iter()
-            .copied()
+            .map(|listed| (listed.vid, listed.pid))
             .chain(self.serial.iter().map(|entry| (entry.vid, entry.pid)))
             .collect();
         listed_ids(ids, &seen)
+    }
+
+    /// Every plugged-in VID:PID with its counts, sorted by VID:PID; nothing is opened. Two
+    /// equal reads a moment apart tell that a device has finished enumerating.
+    pub fn present_all(&self) -> Vec<Presence> {
+        let mut all: BTreeMap<(u16, u16), Presence> = BTreeMap::new();
+        for listed in &self.hid {
+            let presence = presence_of(&mut all, listed.vid, listed.pid);
+            presence.hid += 1;
+            presence.openable += usize::from(listed.openable);
+        }
+        for port in &self.serial {
+            presence_of(&mut all, port.vid, port.pid).serial += 1;
+        }
+        all.into_values().collect()
     }
 
     /// Keeps only the VID:PIDs in `filter` (empty = every device) and opens a handle for each
@@ -154,6 +197,39 @@ pub fn present(ids: &[(u16, u16)]) -> Vec<(u16, u16)> {
     list().present(ids)
 }
 
+/// Every plugged-in VID:PID with its counts, from one fresh listing; nothing is opened.
+pub fn present_all() -> Vec<Presence> {
+    list().present_all()
+}
+
+impl Inventory {
+    /// The shapes of every listed collection of `vid:pid`; a collection that was not opened
+    /// has no reports, so it matches no family.
+    pub fn shapes(&self, vid: u16, pid: u16) -> Vec<HidShape> {
+        self.hid
+            .iter()
+            .filter(|c| (c.vid, c.pid) == (vid, pid))
+            .map(|c| c.shape.clone())
+            .collect()
+    }
+
+    /// Whether `vid:pid` has a USB serial port in this inventory.
+    pub fn has_serial_port(&self, vid: u16, pid: u16) -> bool {
+        self.serial.iter().any(|e| (e.vid, e.pid) == (vid, pid))
+    }
+}
+
+/// The counts of `vid:pid`, added at zero on first sight.
+fn presence_of(all: &mut BTreeMap<(u16, u16), Presence>, vid: u16, pid: u16) -> &mut Presence {
+    all.entry((vid, pid)).or_insert(Presence {
+        vid,
+        pid,
+        hid: 0,
+        openable: 0,
+        serial: 0,
+    })
+}
+
 /// The `ids` that appear in `seen`, once each, in `ids` order.
 fn listed_ids(ids: &[(u16, u16)], seen: &[(u16, u16)]) -> Vec<(u16, u16)> {
     let mut found: Vec<(u16, u16)> = Vec::new();
@@ -174,17 +250,7 @@ fn wanted(filter: &[(u16, u16)], vid: u16, pid: u16) -> bool {
 /// gives report sizes.
 fn hid_collections(api: &HidApi, filter: &[(u16, u16)]) -> Vec<HidCollection> {
     let infos: Vec<&DeviceInfo> = api.device_list().collect();
-    let paths: Vec<String> = infos
-        .iter()
-        .map(|info| info.path().to_string_lossy().into_owned())
-        .collect();
-    // The rule runs over the full list, so a path shared with a mouse/keyboard is seen.
-    let keys: Vec<(&str, u16, u16)> = infos
-        .iter()
-        .zip(&paths)
-        .map(|(info, path)| (path.as_str(), info.usage_page(), info.usage()))
-        .collect();
-    let verdicts = open_permission(&keys);
+    let (paths, verdicts) = open_verdicts(&infos);
 
     let mut reads: HashMap<&str, PathRead> = HashMap::new();
     let mut hid = Vec::new();
@@ -221,6 +287,22 @@ fn hid_collections(api: &HidApi, filter: &[(u16, u16)]) -> Vec<HidCollection> {
     }
     hid.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
     hid
+}
+
+/// Each collection's path and open-rule verdict. The rule runs over the full list, so a path
+/// shared with a mouse/keyboard is seen.
+fn open_verdicts(infos: &[&DeviceInfo]) -> (Vec<String>, Vec<Result<(), &'static str>>) {
+    let paths: Vec<String> = infos
+        .iter()
+        .map(|info| info.path().to_string_lossy().into_owned())
+        .collect();
+    let keys: Vec<(&str, u16, u16)> = infos
+        .iter()
+        .zip(&paths)
+        .map(|(info, path)| (path.as_str(), info.usage_page(), info.usage()))
+        .collect();
+    let verdicts = open_permission(&keys);
+    (paths, verdicts)
 }
 
 fn sort_key(c: &HidCollection) -> (u16, u16, Option<u8>, u16, u16, &str) {
@@ -296,7 +378,7 @@ fn serial_entries(ports: Vec<SerialPortInfo>) -> Vec<SerialEntry> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Listing, SerialEntry, listed_ids, wanted};
+    use super::{Listed, Listing, Presence, SerialEntry, listed_ids, wanted};
 
     fn port(name: &str, vid: u16, pid: u16) -> SerialEntry {
         SerialEntry {
@@ -311,12 +393,79 @@ mod tests {
 
     /// A listing with no hidapi handle: HID ids and serial ports as if enumerated.
     fn listing(hid_ids: &[(u16, u16)], serial: Vec<SerialEntry>) -> Listing {
+        let hid = hid_ids
+            .iter()
+            .map(|&(vid, pid)| collection(vid, pid, false))
+            .collect();
+        listing_of(hid, serial)
+    }
+
+    fn listing_of(hid: Vec<Listed>, serial: Vec<SerialEntry>) -> Listing {
         Listing {
             api: None,
-            hid_ids: hid_ids.to_vec(),
+            hid,
             serial,
             errors: vec!["HID devices could not be listed: x".into()],
         }
+    }
+
+    fn collection(vid: u16, pid: u16, openable: bool) -> Listed {
+        Listed { vid, pid, openable }
+    }
+
+    fn presence(vid: u16, pid: u16, hid: usize, openable: usize, serial: usize) -> Presence {
+        Presence {
+            vid,
+            pid,
+            hid,
+            openable,
+            serial,
+        }
+    }
+
+    #[test]
+    fn present_all_counts_collections_and_ports_per_id() {
+        let listed = listing_of(
+            vec![
+                // X1 SE dongle: a system mouse plus three vendor collections.
+                collection(0x373B, 0x1216, false),
+                collection(0x046D, 0xC52B, false),
+                collection(0x373B, 0x1216, true),
+                collection(0x373B, 0x1216, true),
+                collection(0x373B, 0x1216, true),
+                // N9 Ultra: one vendor collection and its serial port.
+                collection(0x373B, 0x1204, true),
+            ],
+            vec![port("COM3", 0x373B, 0x1204), port("COM5", 0x1A86, 0x7523)],
+        );
+        assert_eq!(
+            listed.present_all(),
+            [
+                presence(0x046D, 0xC52B, 1, 0, 0),
+                presence(0x1A86, 0x7523, 0, 0, 1),
+                presence(0x373B, 0x1204, 1, 1, 1),
+                presence(0x373B, 0x1216, 4, 3, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn present_all_of_an_empty_listing_is_empty() {
+        assert!(listing(&[], Vec::new()).present_all().is_empty());
+    }
+
+    #[test]
+    fn present_all_differs_while_a_device_is_still_enumerating() {
+        let first = listing_of(vec![collection(0x3554, 0xFA09, false)], Vec::new());
+        let second = listing_of(
+            vec![
+                collection(0x3554, 0xFA09, false),
+                collection(0x3554, 0xFA09, true),
+            ],
+            Vec::new(),
+        );
+        assert_ne!(first.present_all(), second.present_all());
+        assert_eq!(second.present_all(), [presence(0x3554, 0xFA09, 2, 1, 0)]);
     }
 
     #[test]
