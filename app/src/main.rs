@@ -39,6 +39,8 @@ mod taskbar;
 mod theme;
 mod ui_font;
 mod update;
+// Vendor apps that pause their brand's devices while open.
+mod vendor_apps;
 // Windows-only hang dump; the stall bookkeeping is also tested on other hosts.
 #[cfg(any(windows, test))]
 mod watchdog;
