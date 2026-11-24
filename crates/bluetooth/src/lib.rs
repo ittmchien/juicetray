@@ -43,6 +43,21 @@ pub fn kind_from_class(major: u32, minor: u32, name: &str) -> DeviceKind {
         (0x05, minor) if matches!(minor & 0x0F, 1 | 2) => DeviceKind::Gamepad,
         (0x05, minor) if minor & 0x30 == 0x20 => DeviceKind::Mouse,
         (0x05, minor) if matches!(minor & 0x30, 0x10 | 0x30) => DeviceKind::Keyboard,
+        // BLE devices (e.g. Xbox controllers) carry no class, so a controller is told by name.
+        _ if [
+            "controller",
+            "gamepad",
+            "joystick",
+            "xbox",
+            "dualsense",
+            "dualshock",
+            "joy-con",
+        ]
+        .iter()
+        .any(|marker| lowercase.contains(marker)) =>
+        {
+            DeviceKind::Gamepad
+        }
         _ => DeviceKind::Other,
     }
 }
@@ -69,6 +84,24 @@ mod tests {
         assert_eq!(kind_from_class(0x05, 0x01, "X"), DeviceKind::Gamepad);
         assert_eq!(kind_from_class(0x05, 0x02, "X"), DeviceKind::Gamepad);
         assert_eq!(kind_from_class(0x01, 0x00, "X"), DeviceKind::Other);
+    }
+
+    #[test]
+    fn classless_controllers_by_name() {
+        assert_eq!(
+            kind_from_class(0, 0, "Xbox Wireless Controller"),
+            DeviceKind::Gamepad
+        );
+        assert_eq!(
+            kind_from_class(0, 0, "DualSense Wireless Controller"),
+            DeviceKind::Gamepad
+        );
+        assert_eq!(kind_from_class(0, 0, "Speaker"), DeviceKind::Other);
+        // A known class wins over the name.
+        assert_eq!(
+            kind_from_class(0x05, 0x20, "Controller Mouse"),
+            DeviceKind::Mouse
+        );
     }
 
     #[test]
