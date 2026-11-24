@@ -9,6 +9,10 @@ pub mod compx;
 mod devices;
 mod driveall;
 mod families;
+mod generic;
+// Shared with build.rs, which checks catalogue rows with it; compiled here for its tests.
+#[cfg(test)]
+mod generic_row;
 mod hid;
 mod mchose;
 mod recovery;
@@ -21,6 +25,7 @@ use std::time::{Duration, SystemTime};
 
 pub use devices::{KNOWN, Kind, KnownDevice, known};
 pub use families::{families_for, family_vid};
+pub use generic::{GenericReport, GenericSpec};
 pub use hid::{HidShape, PickError, open_permission, pick_target};
 pub use recovery::is_recovery;
 pub use report::{ReportKind, ReportSize, TopCollection, parse_descriptor, reports_of};
@@ -39,6 +44,8 @@ pub enum Family {
     VgnKc2,
     RongYuanF7,
     Driveall,
+    /// A catalogue row's own query and reply layout (catalogue ids only, never custom devices).
+    Generic(&'static GenericSpec),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +90,8 @@ impl Family {
             | Family::AtkBitmouse
             | Family::VgnKc2
             | Family::RongYuanF7
-            | Family::Driveall => Link::Hid,
+            | Family::Driveall
+            | Family::Generic(_) => Link::Hid,
             Family::AtkSerial => Link::Serial,
         }
     }
@@ -98,6 +106,7 @@ impl Family {
             Family::VgnKc2 => "VGN kc2",
             Family::RongYuanF7 => "RongYuan F7",
             Family::Driveall => "Driveall",
+            Family::Generic(_) => "Generic",
         }
     }
 
@@ -106,12 +115,14 @@ impl Family {
         match self {
             // RongYuan dongles answer F7 from their own cache without waking the keyboard.
             // Driveall's 10 s is unverified: whether GET_DEVICE_INFO wakes the keyboard is unknown.
+            // Generic rows take the same 10 s; their frames come from user reports.
             Family::Compx
             | Family::Report13
             | Family::AtkBitmouse
             | Family::VgnKc2
             | Family::RongYuanF7
-            | Family::Driveall => Duration::from_secs(10),
+            | Family::Driveall
+            | Family::Generic(_) => Duration::from_secs(10),
             Family::Mchose | Family::AtkSerial => Duration::from_secs(300),
         }
     }
@@ -130,13 +141,22 @@ impl Family {
             // Vendor tools read ~20 ms after SetFeature and retry 100 ms apart on an unfilled
             // reply; one read after 100 ms stands in for those retries.
             Family::RongYuanF7 => Duration::from_millis(100),
+            // Generic: the output wait of VGN kc2 / Driveall, the feature pause of RongYuan F7.
+            Family::Generic(spec) => match spec.report {
+                GenericReport::Output => Duration::from_millis(500),
+                GenericReport::Feature => Duration::from_millis(100),
+            },
         }
     }
 
     /// Whether the query is a SetFeature + GetFeature pair instead of an output report
     /// answered by input reports.
     pub fn uses_feature_report(self) -> bool {
-        self == Family::RongYuanF7
+        match self {
+            Family::RongYuanF7 => true,
+            Family::Generic(spec) => spec.report == GenericReport::Feature,
+            _ => false,
+        }
     }
 }
 
@@ -151,6 +171,7 @@ pub fn battery_query(family: Family) -> &'static [u8] {
         Family::VgnKc2 => &vgn_kc2::QUERY,
         Family::RongYuanF7 => &rongyuan::QUERY,
         Family::Driveall => &driveall::QUERY,
+        Family::Generic(spec) => spec.request,
     }
 }
 
@@ -165,7 +186,8 @@ pub fn online_query(family: Family) -> Option<&'static [u8]> {
         | Family::AtkBitmouse
         | Family::VgnKc2
         | Family::RongYuanF7
-        | Family::Driveall => None,
+        | Family::Driveall
+        | Family::Generic(_) => None,
     }
 }
 
@@ -179,7 +201,8 @@ pub fn decode_online(family: Family, bytes: &[u8]) -> Decoded {
         | Family::AtkBitmouse
         | Family::VgnKc2
         | Family::RongYuanF7
-        | Family::Driveall => Decoded::NotTheReply,
+        | Family::Driveall
+        | Family::Generic(_) => Decoded::NotTheReply,
     }
 }
 
@@ -195,6 +218,7 @@ pub fn decode(family: Family, bytes: &[u8]) -> Decoded {
         Family::VgnKc2 => vgn_kc2::decode(bytes),
         Family::RongYuanF7 => rongyuan::decode(bytes),
         Family::Driveall => driveall::decode(bytes),
+        Family::Generic(spec) => generic::decode(spec, bytes),
     }
 }
 
@@ -252,6 +276,7 @@ mod tests {
         assert_eq!(ms(Family::VgnKc2), 500);
         assert_eq!(ms(Family::RongYuanF7), 100);
         assert_eq!(ms(Family::Driveall), 500);
+        assert_eq!(ms(Family::Generic(&generic::tests::OUTPUT)), 500);
     }
 
     #[test]
@@ -264,6 +289,8 @@ mod tests {
         assert_eq!(Family::VgnKc2.query_floor(), Duration::from_secs(10));
         assert_eq!(Family::RongYuanF7.query_floor(), Duration::from_secs(10));
         assert_eq!(Family::Driveall.query_floor(), Duration::from_secs(10));
+        let generic = Family::Generic(&generic::tests::OUTPUT);
+        assert_eq!(generic.query_floor(), Duration::from_secs(10));
     }
 
     #[test]
@@ -300,10 +327,12 @@ mod tests {
         assert_eq!(Family::RongYuanF7.name(), "RongYuan F7");
         assert_eq!(Family::Driveall.link(), Link::Hid);
         assert_eq!(Family::Driveall.name(), "Driveall");
+        let generic = Family::Generic(&generic::tests::OUTPUT);
+        assert_eq!((generic.link(), generic.name()), (Link::Hid, "Generic"));
     }
 
     /// Every variant; the match makes a new variant fail to compile here until it is listed.
-    fn all_families() -> [Family; 8] {
+    fn all_families() -> [Family; 9] {
         let all = [
             Family::Compx,
             Family::Report13,
@@ -313,6 +342,7 @@ mod tests {
             Family::VgnKc2,
             Family::RongYuanF7,
             Family::Driveall,
+            Family::Generic(&generic::tests::OUTPUT),
         ];
         for family in all {
             match family {
@@ -323,7 +353,8 @@ mod tests {
                 | Family::AtkBitmouse
                 | Family::VgnKc2
                 | Family::RongYuanF7
-                | Family::Driveall => {}
+                | Family::Driveall
+                | Family::Generic(_) => {}
             }
         }
         all
@@ -337,11 +368,17 @@ mod tests {
         let list = &list[..list.find("];").expect("end of FAMILIES")];
         let all = all_families();
         for family in all {
-            assert!(list.contains(&format!("\"{family:?}\"")), "{family:?}");
+            // A Generic family's Debug text carries its spec; the catalogue names the variant.
+            let variant = match family {
+                Family::Generic(_) => "Generic".to_owned(),
+                other => format!("{other:?}"),
+            };
+            assert!(list.contains(&format!("\"{variant}\"")), "{variant}");
         }
         assert_eq!(list.matches('"').count(), 2 * all.len(), "{list}");
     }
 
+    /// The Generic row listed here is an output row; a feature row is checked in `generic`.
     #[test]
     fn only_rongyuan_uses_feature_reports() {
         for family in all_families() {

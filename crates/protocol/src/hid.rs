@@ -1,6 +1,9 @@
 //! HID collection rules: which collections may be opened, and which one a family's query goes to.
 
-use crate::{Family, ReportKind, ReportSize, bitmouse, driveall, rongyuan, vgn_kc2};
+use crate::{
+    Family, GenericReport, GenericSpec, ReportKind, ReportSize, bitmouse, driveall, rongyuan,
+    vgn_kc2,
+};
 
 /// First usage page of the vendor-defined range.
 const VENDOR_PAGE_MIN: u16 = 0xFF00;
@@ -90,6 +93,7 @@ pub fn pick_target(family: Family, shapes: &[HidShape]) -> Result<usize, PickErr
         Family::VgnKc2 => pick_vgn_kc2(shapes),
         Family::RongYuanF7 => pick_rongyuan(shapes),
         Family::Driveall => pick_driveall(shapes),
+        Family::Generic(spec) => pick_generic(spec, shapes),
         Family::AtkSerial => Err(PickError::NoMatch),
     }
 }
@@ -215,6 +219,29 @@ fn pick_driveall(shapes: &[HidShape]) -> Result<usize, PickError> {
         (shape.usage_page, shape.usage) == DRIVEALL_PAGE
             && has_report(shape, ReportKind::Output, 0, driveall::REPORT_LEN)
             && has_report(shape, ReportKind::Input, 0, driveall::REPORT_LEN)
+    }))
+}
+
+/// The row's page:usage on a vendor page with the request's report (id and size as scan prints
+/// them); an output row also needs an input report with the reply's id.
+fn pick_generic(spec: &GenericSpec, shapes: &[HidShape]) -> Result<usize, PickError> {
+    let (Some(&request_id), Some(&reply_id)) = (spec.request.first(), spec.reply_prefix.first())
+    else {
+        return Err(PickError::NoMatch);
+    };
+    let (kind, needs_input) = match spec.report {
+        GenericReport::Output => (ReportKind::Output, true),
+        GenericReport::Feature => (ReportKind::Feature, false),
+    };
+    exactly_one(matching(shapes, |shape| {
+        (shape.usage_page, shape.usage) == (spec.usage_page, spec.usage)
+            && shape.usage_page >= VENDOR_PAGE_MIN
+            && has_report(shape, kind, request_id, usize::from(spec.report_bytes))
+            && (!needs_input
+                || shape
+                    .reports
+                    .iter()
+                    .any(|report| report.kind == ReportKind::Input && report.id == reply_id))
     }))
 }
 
@@ -486,6 +513,18 @@ mod tests {
             interface: Some(3),
             ..shape(0x008C, 0x0001, reports)
         };
+        // A Generic spec aimed at 008C itself (build.rs refuses such a row) still gets nothing.
+        static ON_DFU: GenericSpec = GenericSpec {
+            usage_page: 0x008C,
+            usage: 0x0001,
+            report: GenericReport::Output,
+            report_bytes: 64,
+            request: &[0x00, 0x01],
+            reply_prefix: &[0x00, 0x01],
+            level_byte: 3,
+            charging: None,
+            scale: 100,
+        };
         for family in [
             Family::Compx,
             Family::Report13,
@@ -495,6 +534,8 @@ mod tests {
             Family::VgnKc2,
             Family::RongYuanF7,
             Family::Driveall,
+            Family::Generic(&crate::generic::tests::OUTPUT),
+            Family::Generic(&ON_DFU),
         ] {
             assert_eq!(
                 pick_target(family, std::slice::from_ref(&dfu)),
@@ -608,6 +649,53 @@ mod tests {
                 "{family:?}"
             );
         }
+    }
+
+    #[test]
+    fn pick_generic_needs_the_row_page_and_report() {
+        let output = Family::Generic(&crate::generic::tests::OUTPUT);
+        let if4 = shape(0xFF70, 0x0071, both(0, 64));
+        assert_eq!(pick_target(output, &[if4.clone(), driveall_shape()]), Ok(1));
+        // Wrong size, wrong report id, or no input report for the reply: no target.
+        let small = shape(0xFF60, 0x0061, both(0, 32));
+        let numbered = shape(0xFF60, 0x0061, both(0x01, 65));
+        let no_input = shape(0xFF60, 0x0061, vec![report(ReportKind::Output, 0, 64)]);
+        assert_eq!(
+            pick_target(output, &[if4, small, numbered, no_input]),
+            Err(PickError::NoMatch)
+        );
+        assert_eq!(
+            pick_target(output, &[driveall_shape(), driveall_shape()]),
+            Err(PickError::Ambiguous(vec![0, 1]))
+        );
+        // A feature row needs its feature report; system and non-vendor pages never qualify.
+        const FEATURE: GenericSpec = GenericSpec {
+            usage_page: 0xFFFF,
+            usage: 0x0002,
+            report: GenericReport::Feature,
+            report_bytes: 64,
+            request: &[0x00, 0xF7],
+            reply_prefix: &[0x00],
+            level_byte: 2,
+            charging: None,
+            scale: 100,
+        };
+        const KEYBOARD: GenericSpec = GenericSpec {
+            usage_page: 0x0001,
+            usage: 0x0006,
+            ..FEATURE
+        };
+        let feature = Family::Generic(&FEATURE);
+        assert_eq!(pick_target(feature, &[rongyuan_shape()]), Ok(0));
+        assert_eq!(
+            pick_target(feature, &[driveall_shape()]),
+            Err(PickError::NoMatch)
+        );
+        let keyboard = shape(0x0001, 0x0006, vec![report(ReportKind::Feature, 0, 64)]);
+        assert_eq!(
+            pick_target(Family::Generic(&KEYBOARD), &[keyboard]),
+            Err(PickError::NoMatch)
+        );
     }
 
     #[test]

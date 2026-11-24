@@ -14,6 +14,7 @@ use crate::query::{
     ClaimError, claim_query, floor_check, open_hid_target, open_serial_target, target_why,
 };
 use crate::query_log::{self, QueryLog};
+use crate::scan;
 
 /// The device's families from its interface shapes, read only once two listings `STABLE_GAP`
 /// apart show the same counts; the shapes are cached until the device leaves.
@@ -22,14 +23,16 @@ pub fn inspect((vid, pid): Id, cache: &mut ShapeCache) -> Inspection {
     let listing = door::list();
     let before = listing.present_all();
     let product = listing.product(vid, pid).map(str::to_owned);
-    drop(listing);
     cache.retain_present(&before);
     let Some(counts) = presence(&before, (vid, pid)) else {
         return Inspection::Gone;
     };
-    let shapes = match cache.get(vid, pid) {
-        Some(shapes) => shapes.to_vec(),
+    // Both paths read this device's descriptors once (the open rule applies) for the report's
+    // scan listing; cached shapes still decide the families.
+    let (shapes, inventory) = match cache.get(vid, pid) {
+        Some(shapes) => (shapes.to_vec(), listing.into_inventory(&[(vid, pid)])),
         None => {
+            drop(listing);
             thread::sleep(STABLE_GAP);
             let listing = door::list();
             let after = listing.present_all();
@@ -48,9 +51,10 @@ pub fn inspect((vid, pid): Id, cache: &mut ShapeCache) -> Inspection {
                 return Inspection::Failed(error.clone());
             }
             cache.insert(vid, pid, shapes.clone(), &before, &after);
-            shapes
+            (shapes, inventory)
         }
     };
+    let scan_lines = scan::device_lines(vid, pid, &inventory.hid, &inventory.serial);
     let serial = counts.serial > 0;
     let log = query_log::path()
         .map(|path| QueryLog::load_from(&path))
@@ -71,6 +75,7 @@ pub fn inspect((vid, pid): Id, cache: &mut ShapeCache) -> Inspection {
         product,
         shapes,
         serial,
+        scan_lines,
     })
 }
 

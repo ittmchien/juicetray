@@ -613,7 +613,8 @@ fn custom_table(entry: &CustomEntry) -> Value {
 }
 
 /// A checked custom device, or why the entry is ignored. ATK serial, RongYuan F7 and Driveall are
-/// refused because only catalogue PIDs tell them apart; an empty name shows the id.
+/// refused because only catalogue PIDs tell them apart, Generic because its frame lives in the
+/// catalogue row; an empty name shows the id.
 fn custom_device(entry: &CustomEntry) -> Result<Device, String> {
     let (vid, pid) = parse_vid_pid(&entry.id).map_err(|_| "id is not VID:PID".to_owned())?;
     if is_recovery(vid, pid) {
@@ -629,6 +630,7 @@ fn custom_device(entry: &CustomEntry) -> Result<Device, String> {
         "AtkSerial" => return Err("ATK serial works only for catalogue models".to_owned()),
         "RongYuanF7" => return Err("RongYuan F7 works only for catalogue models".to_owned()),
         "Driveall" => return Err("Driveall works only for catalogue models".to_owned()),
+        "Generic" => return Err("Generic works only for catalogue models".to_owned()),
         other => return Err(format!("unknown family {other:?}")),
     };
     let kind = match entry.kind.as_str() {
@@ -1171,6 +1173,7 @@ allow = [\"373B:1204\"]
             entry("1:2", "AtkSerial", "headset", "receiver"),
             entry("1:2", "RongYuanF7", "keyboard", "receiver"),
             entry("1:2", "Driveall", "keyboard", "receiver"),
+            entry("1:2", "Generic", "keyboard", "receiver"),
             entry("1:2", "Compx", "Mouse", "receiver"),
             entry("1:2", "Compx", "mouse", "dongle"),
             entry("1:2", "", "mouse", "receiver"),

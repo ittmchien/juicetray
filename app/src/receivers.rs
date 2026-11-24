@@ -18,6 +18,7 @@ use crate::query::{
     pick_hid, pick_port,
 };
 use crate::query_log::{self, QueryLog};
+use crate::vendor_apps;
 
 /// Queries one read may send across all devices.
 const READ_BUDGET: u8 = 8;
@@ -39,6 +40,8 @@ enum Outcome {
     /// The receiver answered but its headset is not linked: no battery query was sent.
     Offline,
     Invalid(&'static str),
+    /// The brand's vendor app (shown name) is open: nothing is listed in depth, opened or sent.
+    Paused(&'static str),
     /// A valid reading and the time it was taken.
     Reading(Reading, SystemTime),
 }
@@ -61,9 +64,12 @@ pub fn read_receivers(allow: &[(u16, u16)], custom: &[Device], now: SystemTime) 
         .collect();
     let listing = list_devices();
     let devices = queried(&listing.present(&ids), allow, custom);
+    // One process check per cycle, before any device is touched.
+    let vids: Vec<u16> = devices.iter().map(|device| device.vid).collect();
+    let running = vendor_apps::running(&vids);
     let log_path = query_log::path();
     let log = load_log(log_path.as_deref());
-    let openable = openable(&devices);
+    let openable = openable(&devices, &running);
     // Every openable device would only show its stored reading as waiting: no descriptor reads.
     let inventory = if only_waiting(&openable, &log, now) {
         log::trace(format_args!("inventory skipped: all openable devices wait"));
@@ -78,6 +84,7 @@ pub fn read_receivers(allow: &[(u16, u16)], custom: &[Device], now: SystemTime) 
         .map(|device| {
             let outcome = attempt(
                 device,
+                &running,
                 inventory.as_ref(),
                 (&log, log_path.as_deref()),
                 &mut door,
@@ -134,12 +141,12 @@ fn list_devices() -> Listing {
     listing
 }
 
-/// The gated devices whose own refusals let them through; only these are listed in depth and
-/// opened.
-fn openable(devices: &[Device]) -> Vec<&Device> {
+/// The gated devices whose own refusals and vendor apps let them through; only these are listed
+/// in depth and opened.
+fn openable<'a>(devices: &'a [Device], running: &[&str]) -> Vec<&'a Device> {
     devices
         .iter()
-        .filter(|device| gate(device).is_ok())
+        .filter(|device| open_gate(device, running).is_ok())
         .collect()
 }
 
@@ -181,6 +188,7 @@ fn load_log(log_path: Option<&FsPath>) -> QueryLog {
 /// One device's outcome: the pure plan first, then the query only when the plan allows it.
 fn attempt(
     device: &Device,
+    running: &[&str],
     inventory: Option<&Inventory>,
     (log, log_path): (&QueryLog, Option<&FsPath>),
     door: &mut Door,
@@ -190,7 +198,7 @@ fn attempt(
         "device {:04X}:{:04X} attempt",
         device.vid, device.pid
     ));
-    let gate_result = gate(device);
+    let gate_result = open_gate(device, running);
     let pick = match inventory {
         Some(inv) if gate_result.is_ok() => {
             pick_channel(&inv.hid, &inv.serial, &inv.errors, device)
@@ -228,6 +236,16 @@ fn gate(device: &Device) -> Result<(), Outcome> {
     Ok(())
 }
 
+/// The gate, then the vendor-app pause: a second client hangs the brand's open app (MCHOSE HUB
+/// froze on start beside juicetray), so its devices are left alone until it closes.
+fn open_gate(device: &Device, running: &[&str]) -> Result<(), Outcome> {
+    gate(device)?;
+    match vendor_apps::paused_by(device.vid, running) {
+        Some(app) => Err(Outcome::Paused(app)),
+        None => Ok(()),
+    }
+}
+
 /// The family's target picked from the listing only (no I/O); mouse and keyboard collections
 /// are never candidates because enumeration does not open them.
 fn pick_channel(
@@ -257,7 +275,7 @@ fn target_outcome(error: &TargetError) -> Outcome {
     }
 }
 
-/// Safety order: the gate (capture, custom BITMOUSE cable), then no channel, then the floor,
+/// Safety order: the gate (capture, custom BITMOUSE cable, open vendor app), then no channel, then the floor,
 /// then the pick's own refusal, then the budget. A future stamp (`ClockBack`) goes on to
 /// `claim_query`, which replaces it and refuses, so nothing is sent then either.
 fn plan(
@@ -480,6 +498,8 @@ fn reason(outcome: Outcome) -> String {
         // A device that never answered has nothing to show yet; it is not broken.
         Outcome::NoReply => "no data".to_owned(),
         Outcome::Offline => "offline".to_owned(),
+        // The one wording of a pause, shown as the level or after the kept reading.
+        Outcome::Paused(app) => format!("paused ({app} open)"),
         // The detailed `why` is logged where the reply is decoded; the menu keeps one word.
         Outcome::Invalid(_) if on_cable(outcome) => "charging".to_owned(),
         Outcome::Invalid(_) => "error".to_owned(),
@@ -510,7 +530,8 @@ fn kind(kind: Kind) -> DeviceKind {
 /// A fresh reading is shown as is. Otherwise the stored reading keeps its percent and time,
 /// dimmed with the reason when this attempt failed. Within the floor the previous attempt
 /// decides: a query stamped after the stored reading got no valid reply, so it is dimmed too.
-/// With none stored the reason is the level.
+/// A pause keeps the stored reading undimmed with the pause note. With none stored the reason is
+/// the level.
 fn view(
     device: &Device,
     outcome: Outcome,
@@ -524,6 +545,8 @@ fn view(
             let unanswered = last_query.is_some_and(|last| last > read_at);
             (Some(reading), read_at, unanswered)
         }
+        // Nothing was asked, so nothing failed: the last level stays as it was.
+        (Outcome::Paused(_), Some((reading, read_at))) => (Some(reading), read_at, false),
         (_, Some((reading, read_at))) => (Some(reading), read_at, true),
         (_, None) => (None, now, false),
     };
@@ -549,7 +572,12 @@ fn view(
     };
     // A dimmed reading with its age already says the device did not answer, so that adds no note;
     // a cable shows only the bolt.
-    let note = if failed {
+    // A paused row says why its reading does not move and is never dimmed or marked offline;
+    // the pause outranks a stored asleep flag, which is unknown while paused.
+    let paused = matches!(outcome, Outcome::Paused(_));
+    let note = if paused {
+        Some(reason(outcome))
+    } else if failed {
         match outcome {
             Outcome::Waiting if reading.asleep => Some(ASLEEP_TEXT.to_owned()),
             Outcome::Waiting | Outcome::NoReply | Outcome::Offline => None,
@@ -562,7 +590,7 @@ fn view(
     DeviceView {
         level: Level::Percent(reading.percent),
         charging: reading.charging || on_cable(outcome),
-        stale: failed || reading.asleep,
+        stale: !paused && (failed || reading.asleep),
         note,
         ..row
     }
@@ -759,7 +787,7 @@ mod tests {
             Step::Show(Outcome::NoChannel)
         );
         let both = [receiver.clone(), cable.clone()];
-        let opened: Vec<(u16, u16, bool)> = openable(&both)
+        let opened: Vec<(u16, u16, bool)> = openable(&both, &[])
             .iter()
             .map(|d| (d.vid, d.pid, d.cable))
             .collect();
@@ -865,6 +893,47 @@ mod tests {
                 note: None,
             }
         );
+    }
+
+    #[test]
+    fn open_vendor_app_pauses_its_brand_before_any_io() {
+        let (mchose, n9) = (mchose(), device(0x373B, 0x1204));
+        let devices = [mchose.clone(), n9.clone()];
+        let hub = ["MCHOSE HUB.exe"];
+        let paused = Outcome::Paused("MCHOSE HUB");
+        assert_eq!(open_gate(mchose, &hub), Err(paused));
+        // Another brand's app leaves the device alone; the background helpers never count.
+        assert_eq!(open_gate(n9, &hub), Ok(()));
+        assert_eq!(open_gate(mchose, &["MCHOSE HUB Agent.exe"]), Ok(()));
+        // A paused device is never listed in depth, so it is never opened or sent to.
+        assert_eq!(openable(&devices, &hub), [n9]);
+        assert_eq!(openable(&devices, &[]).len(), 2);
+        assert_eq!(
+            plan(open_gate(mchose, &hub), Ok(()), Ok(()), true),
+            Step::Show(paused)
+        );
+        // The device's own refusal still comes first.
+        let mut needs_capture = mchose.clone();
+        needs_capture.needs_capture = true;
+        assert_eq!(open_gate(&needs_capture, &hub), Err(Outcome::NeedsCapture));
+    }
+
+    #[test]
+    fn paused_row_keeps_the_last_level_undimmed_with_the_pause_note() {
+        let paused = Outcome::Paused("MCHOSE HUB");
+        let stored = (reading(87, false, true), at(NOW - 60));
+        let row = view(mchose(), paused, Some(stored), Some(at(NOW - 60)), at(NOW));
+        assert_eq!(row.level, Level::Percent(87));
+        assert!(row.connected && !row.stale);
+        assert_eq!(row.updated_at, at(NOW - 60));
+        assert_eq!(
+            ui_model::menu_line(&row, at(NOW)),
+            "MCHOSE V9 Pro 2 — 2.4G · 87% · paused (MCHOSE HUB open)"
+        );
+        // Nothing stored yet: the pause is the level.
+        let bare = view(mchose(), paused, None, None, at(NOW));
+        assert_eq!(bare.level, Level::NoData("paused (MCHOSE HUB open)".into()));
+        assert!(bare.connected && !bare.stale && bare.note.is_none());
     }
 
     #[test]
@@ -1058,6 +1127,7 @@ mod tests {
         assert_eq!(text(Outcome::Busy), "in use");
         assert_eq!(text(Outcome::NoReply), "no data");
         assert_eq!(text(Outcome::Offline), "offline");
+        assert_eq!(text(Outcome::Paused("ATK HUB")), "paused (ATK HUB open)");
         assert_eq!(text(Outcome::BudgetUsed), "error");
         assert_eq!(text(Outcome::Invalid("unknown power state")), "error");
         assert_eq!(text(Outcome::Invalid(ON_CABLE_TEXT)), "charging");

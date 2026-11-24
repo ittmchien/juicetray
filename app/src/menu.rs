@@ -293,7 +293,11 @@ pub fn menu_entries(
     // The main menu keeps the devices and everyday commands; every option lives under Settings.
     entries.extend([
         MenuEntry::submenu(SETTINGS_LABEL, settings_entries(config, login, has_battery)),
-        MenuEntry::item(CHECK_UPDATES_ID, "Check for updates…"),
+        // The running version sits on the update line, so the menu shows it without a new row.
+        MenuEntry::item(
+            CHECK_UPDATES_ID,
+            format!("Check for updates… (v{})", env!("CARGO_PKG_VERSION")),
+        ),
         MenuEntry::separator(),
         MenuEntry::item("quit", "Quit"),
     ]);
@@ -886,7 +890,10 @@ mod tests {
         // "Check for updates…" is the last item before the separator and Quit.
         assert_eq!(check, Some(quit - 2));
         assert!(entries[quit - 1].is_separator());
-        assert_eq!(entries[quit - 2].text, "Check for updates…");
+        assert_eq!(
+            entries[quit - 2].text,
+            format!("Check for updates… (v{})", env!("CARGO_PKG_VERSION"))
+        );
 
         // The automatic-check switch exists only where the build can check on its own.
         let auto = |config: &Config| {

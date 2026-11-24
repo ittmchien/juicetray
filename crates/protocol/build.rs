@@ -12,8 +12,11 @@ use serde::Deserialize;
 #[path = "src/recovery.rs"]
 mod recovery;
 
+#[path = "src/generic_row.rs"]
+mod generic_row;
+
 /// The `Family` variants a catalogue line may name; keep in step with `protocol::Family`.
-const FAMILIES: [&str; 8] = [
+const FAMILIES: [&str; 9] = [
     "Compx",
     "Report13",
     "Mchose",
@@ -22,6 +25,7 @@ const FAMILIES: [&str; 8] = [
     "VgnKc2",
     "RongYuanF7",
     "Driveall",
+    "Generic",
 ];
 
 /// Catalogue `kind` values and their `protocol::Kind` variants.
@@ -51,12 +55,41 @@ struct Entry {
     verified: bool,
     #[serde(default)]
     needs_capture: bool,
+    // Generic rows only: the query and reply layout that replace family code.
+    usage_page: Option<String>,
+    usage: Option<String>,
+    report: Option<String>,
+    report_bytes: Option<u8>,
+    request: Option<String>,
+    reply_prefix: Option<String>,
+    level_byte: Option<u8>,
+    charging_byte: Option<u8>,
+    charging_mask: Option<u8>,
+    scale: Option<u8>,
+}
+
+impl Entry {
+    fn generic_fields(&self) -> generic_row::Fields<'_> {
+        generic_row::Fields {
+            usage_page: self.usage_page.as_deref(),
+            usage: self.usage.as_deref(),
+            report: self.report.as_deref(),
+            report_bytes: self.report_bytes,
+            request: self.request.as_deref(),
+            reply_prefix: self.reply_prefix.as_deref(),
+            level_byte: self.level_byte,
+            charging_byte: self.charging_byte,
+            charging_mask: self.charging_mask,
+            scale: self.scale,
+        }
+    }
 }
 
 fn main() {
     let dir = Path::new("devices");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/recovery.rs");
+    println!("cargo:rerun-if-changed=src/generic_row.rs");
     println!("cargo:rerun-if-changed=devices");
 
     let mut errors = Vec::new();
@@ -153,14 +186,18 @@ fn row(entry: &Entry) -> Result<((u16, u16), String), String> {
         "receiver" => false,
         other => return Err(format!("unknown connection {other:?}; receiver or cable")),
     };
+    // A Generic row's family carries its own spec; every other family is a plain variant.
+    let family = match generic_row::check(entry.family == "Generic", &entry.generic_fields())? {
+        Some(spec) => generic_row::literal(&spec),
+        None => format!("Family::{}", entry.family),
+    };
     let mut text = String::new();
     // `{:?}` of a str is a valid Rust string literal (quotes and backslashes escaped).
     let _ = writeln!(
         text,
-        "    KnownDevice {{ vid: {vid:#06X}, pid: {pid:#06X}, name: {:?}, family: Family::{}, \
+        "    KnownDevice {{ vid: {vid:#06X}, pid: {pid:#06X}, name: {:?}, family: {family}, \
          kind: Kind::{kind}, verified: {}, cable: {cable}, needs_capture: {} }},",
         entry.name.trim(),
-        entry.family,
         entry.verified,
         entry.needs_capture
     );
