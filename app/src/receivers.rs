@@ -252,7 +252,7 @@ fn attempt(
     door: &mut Door,
     now: SystemTime,
 ) -> Outcome {
-    let _span = log::span(format!(
+    let _span = log::span_fmt(format_args!(
         "device {:04X}:{:04X} attempt",
         device.vid, device.pid
     ));
@@ -354,7 +354,7 @@ fn query(
 ) -> Outcome {
     let (vid, pid, family) = (device.vid, device.pid, device.family);
     let opened = {
-        let _span = log::span(format!("device {vid:04X}:{pid:04X} open"));
+        let _span = log::span_fmt(format_args!("device {vid:04X}:{pid:04X} open"));
         match family.link() {
             Link::Hid => open_hid_target(inventory, family, vid, pid),
             Link::Serial => open_serial_target(inventory, vid, pid),
@@ -364,11 +364,14 @@ fn query(
         Ok((target, _)) => target,
         Err(error) => {
             eprintln!("receiver {vid:04X}:{pid:04X}: {error:?}");
+            log::line(&format!(
+                "receiver {vid:04X}:{pid:04X}: open failed: {error:?}"
+            ));
             return target_outcome(&error);
         }
     };
     let claimed = {
-        let _span = log::span(format!("device {vid:04X}:{pid:04X} claim"));
+        let _span = log::span_fmt(format_args!("device {vid:04X}:{pid:04X} claim"));
         match log_path {
             Some(path) => claim_query(path, family, vid, pid, SystemTime::now()),
             None => Err(ClaimError::Record("no data directory".to_owned())),
@@ -378,19 +381,25 @@ fn query(
         Ok(()) => {}
         Err(ClaimError::Record(cause)) => {
             eprintln!("receiver {vid:04X}:{pid:04X}: could not record the query time ({cause})");
+            log::line(&format!(
+                "receiver {vid:04X}:{pid:04X}: claim failed, query time not recorded ({cause})"
+            ));
             return Outcome::NotRecorded;
         }
         Err(ClaimError::Wait(_) | ClaimError::ClockBack) => return Outcome::Waiting,
     }
 
     let sent = {
-        let _span = log::span(format!("device {vid:04X}:{pid:04X} send and decode"));
+        let _span = log::span_fmt(format_args!("device {vid:04X}:{pid:04X} send and decode"));
         door.send(&mut target)
     };
     let exchange = match sent {
         Ok(exchange) => exchange,
         Err(error) => {
             eprintln!("receiver {vid:04X}:{pid:04X}: {error:#}");
+            log::line(&format!(
+                "receiver {vid:04X}:{pid:04X}: send failed: {error:#}"
+            ));
             return Outcome::Busy;
         }
     };
@@ -408,7 +417,7 @@ fn query(
     };
     if let (Outcome::Reading(reading, _), Some(path)) = (outcome, log_path) {
         let recorded = {
-            let _span = log::span(format!("device {vid:04X}:{pid:04X} record reading"));
+            let _span = log::span_fmt(format_args!("device {vid:04X}:{pid:04X} record reading"));
             QueryLog::update(path, |log| {
                 log.record_reading(vid, pid, reading, read_at);
                 Ok::<_, anyhow::Error>(())
@@ -419,9 +428,24 @@ fn query(
                 "receiver {vid:04X}:{pid:04X}: could not record the reading ({})",
                 error.root_cause()
             );
+            log::line(&format!(
+                "receiver {vid:04X}:{pid:04X}: record failed: {}",
+                error.root_cause()
+            ));
         }
     }
+    // One result line per query (not per step); traced only, so release stays silent.
+    log::trace(format_args!("{} {}", row_id(device), outcome_text(outcome)));
     outcome
+}
+
+/// The result of a query for the log: the percent of a reading, else the outcome's name.
+fn outcome_text(outcome: Outcome) -> String {
+    match outcome {
+        Outcome::Reading(reading, _) => format!("{}%", reading.percent),
+        Outcome::NoReply => "no reply".to_owned(),
+        other => format!("{other:?}"),
+    }
 }
 
 /// The menu text for an outcome; an unconfirmed device points at its menu action.

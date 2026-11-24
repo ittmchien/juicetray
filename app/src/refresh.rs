@@ -42,7 +42,7 @@ fn run(proxy: &EventLoopProxy<UserEvent>, commands: &Receiver<Command>, mut inte
     let mut receivers = Vec::new();
     // The last failed check per row id, shown by later reads until a check succeeds.
     let mut notes = CheckNotes::new();
-    log::line("worker start");
+    log::trace(format_args!("worker start"));
     loop {
         if read_now {
             let _read = log::span("read cycle");
@@ -62,13 +62,13 @@ fn run(proxy: &EventLoopProxy<UserEvent>, commands: &Receiver<Command>, mut inte
                 receivers = read_receivers(&Config::load().allowed(), &notes, SystemTime::now());
             }
             if !send_devices(proxy, &bluetooth_devices, &receivers) {
-                log::line("worker exit: event loop gone");
+                log::trace(format_args!("worker exit: event loop gone"));
                 return;
             }
         }
         read_now = true;
         let command = wait(commands, interval);
-        log::line(&format!("worker woke: {}", wake_reason(&command)));
+        log::trace(format_args!("worker woke: {}", wake_reason(&command)));
         match command {
             Ok(Command::RefreshNow) | Err(RecvTimeoutError::Timeout) => {}
             Ok(Command::SetInterval(seconds)) => {
@@ -77,7 +77,7 @@ fn run(proxy: &EventLoopProxy<UserEvent>, commands: &Receiver<Command>, mut inte
             }
             Ok(Command::CheckReceiver(id)) => {
                 read_now = false;
-                let _span = log::span(format!("check receiver {id}"));
+                let _span = log::span_fmt(format_args!("check receiver {id}"));
                 // An unknown or unplugged id is ignored.
                 let Some(checked) =
                     check_receiver(&id, &Config::load().allowed(), SystemTime::now())
@@ -91,12 +91,12 @@ fn run(proxy: &EventLoopProxy<UserEvent>, commands: &Receiver<Command>, mut inte
                 });
                 replace_row(&mut receivers, checked.row);
                 if !allowed || !send_devices(proxy, &bluetooth_devices, &receivers) {
-                    log::line("worker exit: event loop gone");
+                    log::trace(format_args!("worker exit: event loop gone"));
                     return;
                 }
             }
             Err(RecvTimeoutError::Disconnected) => {
-                log::line("worker exit: app dropped the sender");
+                log::trace(format_args!("worker exit: app dropped the sender"));
                 return;
             }
         }

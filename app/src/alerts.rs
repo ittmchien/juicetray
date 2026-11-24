@@ -49,7 +49,7 @@ pub fn notify_low_battery(device: &DeviceView) {
         return;
     };
     let name = device.name.clone();
-    log::line(&format!("notification spawn {name} {percent}%"));
+    log::trace(format_args!("notification spawn {name} {percent}%"));
     let spawned = std::thread::Builder::new()
         .name("notify".into())
         .spawn(move || {

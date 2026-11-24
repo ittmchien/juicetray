@@ -39,7 +39,7 @@ pub fn show(entries: Vec<MenuEntry>) {
         if let Some((_, since)) = *open {
             let age = since.elapsed();
             if age < STUCK_AFTER {
-                log::line("menu still open; click ignored");
+                log::trace(format_args!("menu still open; click ignored"));
                 return;
             }
             log::line(&format!(

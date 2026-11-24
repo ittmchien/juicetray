@@ -223,7 +223,7 @@ impl App {
         // Every handled event proves the UI thread is pumping.
         #[cfg(windows)]
         crate::watchdog::beat(crate::watchdog::Watched::Ui);
-        let _span = log::span(format!("handle {}", event.name()));
+        let _span = log::span_fmt(format_args!("handle {}", event.name()));
         match event {
             UserEvent::Devices(devices) => self.on_devices(devices),
             // Config writes stay on this thread, so a check never races a settings save.
@@ -236,7 +236,7 @@ impl App {
                 // muda flips check items on click; a forced rebuild restores the config's ticks.
                 self.shown_entries.clear();
                 if let Some(action) = menu::action_for(event.id.as_ref()) {
-                    log::line(&format!("menu action {action:?}"));
+                    log::trace(format_args!("menu action {action:?}"));
                     if action == MenuAction::Quit {
                         #[cfg(windows)]
                         self.hide_taskbar();
@@ -262,7 +262,7 @@ impl App {
     }
 
     fn on_devices(&mut self, mut devices: Vec<DeviceView>) {
-        log::line(&format!("devices received {}", devices.len()));
+        log::trace(format_args!("devices received {}", devices.len()));
         // Same-kind devices sit together in the strip and menu, weakest first within a kind.
         sort_grouped(&mut devices);
         // Every device is checked so its last reading stays current even while hidden.
@@ -401,7 +401,7 @@ impl App {
     }
 
     fn tell_worker(&self, command: Command) {
-        log::line("tell worker");
+        log::trace(format_args!("tell worker"));
         if self.worker.send(command).is_err() {
             eprintln!("refresh worker has stopped");
         }

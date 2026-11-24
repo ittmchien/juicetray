@@ -49,6 +49,9 @@ query reaches those devices. A receiver or cable device is queried at most once 
 
 ## Diagnostics
 
+- `juicetray.log` sits next to `query-log.toml`. A release build writes it only when something
+  goes wrong (panic, hang dump, error); run with `JUICETRAY_TRACE=1` to trace every step
+  (debug builds always do).
 - `juicetray scan` lists Bluetooth, HID and serial devices, writes nothing, and redacts serial
   numbers.
 - `juicetray probe <VID:PID>` (optional; the menu's Check battery now confirms a device without

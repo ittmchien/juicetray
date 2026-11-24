@@ -72,7 +72,7 @@ static NOTIFY: OnceLock<Box<dyn Fn(Signal) + Send + Sync>> = OnceLock::new();
 
 fn notify(signal: Signal) {
     // Written from the taskbar thread, so a missing line means that thread is not pumping.
-    log::line(&format!("wndproc signal {signal:?}"));
+    log::trace(format_args!("wndproc signal {signal:?}"));
     if let Some(callback) = NOTIFY.get() {
         callback(signal);
     }
@@ -273,7 +273,7 @@ fn render(
     height: u32,
     dpi: u32,
 ) -> Bitmap {
-    let _span = log::span(format!("render taskbar strip {height}px dpi {dpi}"));
+    let _span = log::span_fmt(format_args!("render taskbar strip {height}px dpi {dpi}"));
     let text = texts
         .entry((dpi, height))
         .or_insert_with(|| ui_font::status_text(dpi, height));
@@ -381,7 +381,7 @@ impl TaskbarStrip {
         if !self.active {
             return;
         }
-        let _span = log::span(format!("sync repaint={repaint}"));
+        let _span = log::span_fmt(format_args!("sync repaint={repaint}"));
         let primary = find_taskbar();
         let taskbars: Vec<HWND> = primary
             .into_iter()
@@ -392,7 +392,7 @@ impl TaskbarStrip {
             .into_iter()
             .partition(|dock| dock.strip.is_alive() && taskbars.contains(&dock.taskbar));
         if !gone.is_empty() {
-            log::line(&format!("docks gone {}", gone.len()));
+            log::trace(format_args!("docks gone {}", gone.len()));
         }
         gone.into_iter().for_each(Dock::destroy);
         self.docks = live;
@@ -411,7 +411,8 @@ impl TaskbarStrip {
                 .or_insert_with(|| render(size.0, size.1));
             let is_primary = Some(taskbar) == primary;
             let created = {
-                let _span = log::span(format!("dock add in {}", taskbar_class(is_primary)));
+                let _span =
+                    log::span_fmt(format_args!("dock add in {}", taskbar_class(is_primary)));
                 StripWindow::create(taskbar, self.instance, bitmap)
             };
             match created {
@@ -466,7 +467,10 @@ impl Drop for TaskbarStrip {
 impl Dock {
     /// Docks the copy and reserves its space, or hides it and gives the space back when it does not fit.
     fn place(&mut self, width: i32, height: i32) {
-        let _span = log::span(format!("dock place in {}", taskbar_class(self.is_primary)));
+        let _span = log::span_fmt(format_args!(
+            "dock place in {}",
+            taskbar_class(self.is_primary)
+        ));
         let placement = client_rect_on_screen(self.taskbar).map_or(Placement::Fallback, |bar| {
             if self.is_primary {
                 place_strip(bar, notification_area(self.taskbar), width, height)
@@ -485,7 +489,7 @@ impl Dock {
     /// Shrinks the task-button container to end at `strip_x` (taskbar client coordinates),
     /// moving it only when its rect differs from the wanted one.
     fn reserve(&mut self, strip_x: i32) {
-        let _span = log::span(format!("reserve strip_x={strip_x}"));
+        let _span = log::span_fmt(format_args!("reserve strip_x={strip_x}"));
         // No container (Windows 11 XAML taskbar) leaves the strip floating as before; `reserved`
         // stays as it is, since a sibling being recreated hides a container this copy shrank.
         let Some((container, natural, current)) = self.container_layout() else {
@@ -531,7 +535,10 @@ impl Dock {
     }
 
     fn destroy(mut self) {
-        let _span = log::span(format!("dock remove in {}", taskbar_class(self.is_primary)));
+        let _span = log::span_fmt(format_args!(
+            "dock remove in {}",
+            taskbar_class(self.is_primary)
+        ));
         self.release();
         self.strip.destroy();
     }
@@ -933,7 +940,7 @@ fn child_rect(child: HWND, parent: HWND) -> Option<Rect> {
 fn set_child_rect(window: HWND, rect: Rect, class: &str) {
     // Synchronous into Explorer's thread (no SWP_ASYNCWINDOWPOS): it returns when Explorer has
     // handled the move, so a busy taskbar thread stalls this one.
-    let _span = log::span(format!("SetWindowPos {class} (Explorer, synchronous)"));
+    let _span = log::span_fmt(format_args!("SetWindowPos {class} (Explorer, synchronous)"));
     // SAFETY: only repositions a window by handle; a stale handle fails the call.
     let moved = unsafe {
         SetWindowPos(

@@ -1,6 +1,9 @@
-//! Always-on trace for hang diagnosis: one `<unix ms> <thread> <event>` line per call in
-//! `juicetray.log`, written unbuffered so the last line survives a stuck thread.
+//! `juicetray.log`: one `<unix ms> <thread> <event>` line per call, written unbuffered so the
+//! last line survives a stuck thread. `line` always writes (panics, errors, hang dumps);
+//! `trace` and `span` write only in debug builds or with `JUICETRAY_TRACE=1`, so a release
+//! build writes nothing during normal operation.
 
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -12,7 +15,7 @@ use crate::query_log;
 
 /// A log above this size at startup starts over, so runs never pile up.
 const START_MAX_BYTES: u64 = 1_000_000;
-/// A running app starts the file over at this size; the keeper traces every 2 s.
+/// A running app starts the file over at this size.
 const RUN_MAX_BYTES: u64 = 8_000_000;
 
 struct Sink {
@@ -37,6 +40,16 @@ impl Sink {
 }
 
 static SINK: OnceLock<Mutex<Sink>> = OnceLock::new();
+static TRACE: OnceLock<bool> = OnceLock::new();
+
+/// Whether routine tracing is on: always in debug builds, in release only with
+/// `JUICETRAY_TRACE=1`; read once.
+fn tracing() -> bool {
+    *TRACE.get_or_init(|| {
+        cfg!(debug_assertions)
+            || std::env::var_os("JUICETRAY_TRACE").is_some_and(|value| value == "1")
+    })
+}
 
 /// `juicetray.log` next to `query-log.toml`.
 fn open() -> Result<Sink> {
@@ -74,7 +87,7 @@ pub fn init() {
         line(&format!("PANIC {}", info.to_string().replace('\n', " | ")));
         previous(info);
     }));
-    line(&format!("start pid {}", std::process::id()));
+    trace(format_args!("start pid {}", std::process::id()));
 }
 
 /// Appends `<unix ms> <thread name> <event>`; the lock is held for one small write.
@@ -82,40 +95,65 @@ pub fn line(event: &str) {
     let Some(sink) = SINK.get() else {
         return;
     };
+    write_line(sink, event);
+}
+
+fn write_line(sink: &Mutex<Sink>, event: &str) {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_millis());
     let thread = std::thread::current();
-    let text = format!("{millis} {} {event}\n", thread.name().unwrap_or("unnamed"));
+    let text = format!(
+        "{millis} {} {event}
+",
+        thread.name().unwrap_or("unnamed")
+    );
     sink.lock()
         .unwrap_or_else(PoisonError::into_inner)
         .push(&text, RUN_MAX_BYTES);
 }
 
-/// Logs `<name> begin` now and `<name> end <n> ms` when dropped, so a stuck step shows as a
-/// `begin` with no `end`.
-#[must_use = "the end line is written when the span drops"]
-pub struct Span {
-    name: String,
-    started: Instant,
+/// A routine event: written only when tracing is on, and `event` is not formatted otherwise.
+pub fn trace(event: fmt::Arguments) {
+    trace_to(tracing(), SINK.get(), event);
 }
 
-pub fn span(name: impl Into<String>) -> Span {
-    let name = name.into();
-    line(&format!("{name} begin"));
-    Span {
-        name,
-        started: Instant::now(),
+fn trace_to(enabled: bool, sink: Option<&Mutex<Sink>>, event: fmt::Arguments) {
+    if let (true, Some(sink)) = (enabled, sink) {
+        write_line(sink, &event.to_string());
+    }
+}
+
+/// Logs `<name> begin` now and `<name> end <n> ms` when dropped, so a stuck step shows as a
+/// `begin` with no `end`. Off unless tracing is on: then it holds nothing and writes nothing.
+#[must_use = "the end line is written when the span drops"]
+pub struct Span(Option<(String, Instant)>);
+
+pub fn span(name: &str) -> Span {
+    span_fmt(format_args!("{name}"))
+}
+
+/// `span` with a formatted name; the name is built only when tracing is on.
+pub fn span_fmt(name: fmt::Arguments) -> Span {
+    Span::start(tracing(), name)
+}
+
+impl Span {
+    fn start(enabled: bool, name: fmt::Arguments) -> Self {
+        if !enabled {
+            return Self(None);
+        }
+        let name = name.to_string();
+        line(&format!("{name} begin"));
+        Self(Some((name, Instant::now())))
     }
 }
 
 impl Drop for Span {
     fn drop(&mut self) {
-        line(&format!(
-            "{} end {} ms",
-            self.name,
-            self.started.elapsed().as_millis()
-        ));
+        if let Some((name, started)) = &self.0 {
+            line(&format!("{name} end {} ms", started.elapsed().as_millis()));
+        }
     }
 }
 
@@ -144,5 +182,32 @@ mod tests {
         fs::remove_file(&path).unwrap();
         assert_eq!(text, "cccc\n");
         assert_eq!(bytes, 5);
+    }
+
+    #[test]
+    fn trace_and_span_write_nothing_when_off() {
+        let path =
+            std::env::temp_dir().join(format!("juicetray-trace-test-{}", std::process::id()));
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        let sink = Mutex::new(Sink { file, bytes: 0 });
+
+        trace_to(false, Some(&sink), format_args!("off"));
+        let off = Span::start(false, format_args!("off span"));
+        let off_is_empty = off.0.is_none();
+        drop(off);
+        let quiet = fs::read_to_string(&path).unwrap();
+        trace_to(true, Some(&sink), format_args!("on"));
+        let loud = fs::read_to_string(&path).unwrap();
+        drop(sink);
+        fs::remove_file(&path).unwrap();
+
+        assert!(off_is_empty);
+        assert_eq!(quiet, "");
+        assert!(loud.trim_end().ends_with(" on"));
     }
 }
