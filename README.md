@@ -12,28 +12,53 @@ vendor's software.
 operating system already reads (headsets, mice, keyboards, controllers, …), any brand.
 Juicetray only reads the value the OS stores; it sends nothing to the device.
 
-**2.4 GHz receiver / USB cable:**
+**2.4 GHz receiver / USB cable** — read straight from the receiver, no vendor app needed.
 
-| Device | Kind | Status |
+### Verified on real hardware
+
+The level matches the vendor app; these are read automatically.
+
+**Headsets**
+
+| Device | Receiver | Notes |
 |---|---|---|
-| MCHOSE V9 Pro 2 (`3837:6011` dongle) | Headset | Confirmed |
-| ATK X1 SE (`373B:1216` dongle) | Mouse | Confirmed |
-| ATK N9 Ultra (`373B:1204` dongle) | Headset | Protocol known; close ATK HUB, then check |
-| VGN Dragonfly 3 Master+ (`391D:1A05` receiver) | Mouse | Receiver answers; turn the mouse on, then check |
-| AULA F75 (`3554:FA09` 2.4G receiver) | Keyboard | Protocol known; check while the keyboard is on 2.4G |
+| MCHOSE V9 Pro 2 | `3837:6011` | |
+| ATK N9 Ultra | `373B:1204` | Close ATK HUB first: it holds the receiver's port |
 
-Only confirmed devices are queried automatically. An unconfirmed device is listed but never
-touched until you confirm it from the menu: open the device's submenu and click **Check battery
-now**. That sends one battery query (same floor and safety rules as every other query). A valid
-reply adds the device to `allow` in the config file and puts it on the strip; otherwise the
-menu line shows why (`in use` for a vendor app, `…` while waiting, `charging` on cable, `error` for a bad reply or no answer).
-`allow` can still be edited by hand:
+**Mice**
+
+| Device | Receiver | Notes |
+|---|---|---|
+| ATK X1 SE | `373B:1216` | |
+
+### Read once, not yet checked against the vendor app
+
+**Mice**
+
+| Device | Receiver | Notes |
+|---|---|---|
+| VGN Dragonfly 3 Master+ | `391D:1A05` | Answers only while the mouse is awake |
+
+**Keyboards**
+
+| Device | Receiver | Notes |
+|---|---|---|
+| AULA F75 | `3554:FA09` | Only on 2.4 GHz; on cable the keyboard reports no level |
+
+### Other devices
+
+Many ATK, VXE and VGN mice use the same protocols. Until a model is verified, Juicetray never
+queries it on its own. To try one, use **Add unsupported device…** in the menu (coming in the
+next release): it detects the device when you plug it in, sends one read-only battery query,
+and adds it once you confirm the level. If it does not work, please
+[open an issue](https://github.com/ittmchien/juicetray/issues) — the window fills in the
+details for you.
+
+`allow` in the config file still works for hand-added devices:
 
 ```toml
 allow = ["373B:1204"]
 ```
-
-More devices will be added over time.
 
 ## Platforms
 
