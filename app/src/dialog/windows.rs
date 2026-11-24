@@ -238,7 +238,7 @@ pub(crate) fn set_app_icon(dialog: HWND) {
         (ICON_BIG, SM_CXICON, SM_CYICON),
     ];
     for (kind, width, height) in sizes {
-        // SAFETY: resource 1 is the icon in juicetray.rc (an integer resource id); an LR_SHARED
+        // SAFETY: resource 1 is the app icon from the build script's resource (an integer resource id); an LR_SHARED
         // icon belongs to the system, so nothing frees it.
         let icon = unsafe {
             LoadImageW(
