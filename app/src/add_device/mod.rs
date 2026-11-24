@@ -8,6 +8,7 @@ mod window;
 #[cfg(windows)]
 mod worker;
 
+#[cfg(windows)]
 pub use flow::{AddRequest, Inspection, TryOutcome};
 #[cfg(windows)]
 pub use window::{is_open, open};

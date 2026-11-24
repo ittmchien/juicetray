@@ -66,6 +66,7 @@ pub struct Identity {
 
 impl Identity {
     /// This PC's profile, OneDrive and computer names from the environment.
+    #[cfg(windows)]
     pub fn current() -> Self {
         let value = |name: &str| std::env::var(name).ok().filter(|text| text.len() > 1);
         let mut profiles: Vec<String> = [

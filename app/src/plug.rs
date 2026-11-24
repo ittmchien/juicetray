@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use door::Presence;
 use protocol::{Family, family_vid, is_recovery, known};
 
+#[cfg(windows)]
 use crate::config::Config;
 use crate::device::{Device, lookup};
 
@@ -120,6 +121,8 @@ pub struct Settings {
 }
 
 impl Settings {
+    // Only the Windows plug-in path builds settings from the config.
+    #[cfg(windows)]
     pub fn from_config(config: &Config) -> Self {
         Self {
             allow: config.allowed(),
