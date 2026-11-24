@@ -7,6 +7,8 @@ const CMD_BATTERY: u8 = 0x4A;
 const REPORT_LEN: usize = 20;
 const STATE_DISCHARGING: u8 = 0x01;
 const STATE_ON_CABLE: u8 = 0x10;
+/// Shown in the menu as is; the device reports a level that is not trustworthy while on cable.
+pub const ON_CABLE_TEXT: &str = "on cable";
 
 // The last byte is the checksum of the 19 before it.
 pub(crate) const QUERY: [u8; REPORT_LEN] = {
@@ -41,7 +43,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Decoded {
     }
     match report[6] {
         STATE_DISCHARGING => reading(report[5], false, false),
-        STATE_ON_CABLE => Decoded::Invalid("on cable: level not trustworthy"),
+        STATE_ON_CABLE => Decoded::Invalid(ON_CABLE_TEXT),
         _ => Decoded::Invalid("unknown power state"),
     }
 }
@@ -95,10 +97,7 @@ mod tests {
     #[test]
     fn report13_captured_replies() {
         assert_eq!(decode(&ON_BATTERY_97), battery(97));
-        assert_eq!(
-            decode(&ON_CABLE),
-            Decoded::Invalid("on cable: level not trustworthy")
-        );
+        assert_eq!(decode(&ON_CABLE), Decoded::Invalid(ON_CABLE_TEXT));
     }
 
     #[test]

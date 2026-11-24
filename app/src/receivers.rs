@@ -10,7 +10,9 @@ use std::path::Path as FsPath;
 use std::time::{Duration, SystemTime};
 
 use door::{Door, HidCollection, Inventory, SerialEntry};
-use protocol::{Decoded, Family, KNOWN, KnownDevice, Link, PickError, Reading, known};
+use protocol::{
+    Decoded, Family, KNOWN, KnownDevice, Link, ON_CABLE_TEXT, PickError, Reading, known,
+};
 use ui_model::{DeviceKind, DeviceView, Level, Path};
 
 use crate::log;
@@ -23,10 +25,10 @@ use crate::query_log::{self, QueryLog};
 /// Queries one read may send across all devices.
 const READ_BUDGET: u8 = 8;
 
-const ASLEEP_TEXT: &str = "asleep or off";
+const ASLEEP_TEXT: &str = "asleep";
 
 /// Shown on a stored reading when the last query (newer than the reading) got no valid reply.
-const LAST_QUERY_FAILED_TEXT: &str = "no reply at the last query";
+const LAST_QUERY_FAILED_TEXT: &str = "no reply";
 
 /// What happened to one device in this read; everything but `Reading` and `Waiting` is a
 /// failed or refused attempt.
@@ -400,7 +402,10 @@ fn query(
     let outcome = match exchange.reply {
         None => Outcome::NoReply,
         Some((_, Decoded::Reading(reading))) => Outcome::Reading(reading, read_at),
-        Some((_, Decoded::Invalid(why))) => Outcome::Invalid(why),
+        Some((_, Decoded::Invalid(why))) => {
+            eprintln!("receiver {vid:04X}:{pid:04X}: invalid reply: {why}");
+            Outcome::Invalid(why)
+        }
         // The door never keeps a non-reply as the reply, and only `send_online` yields `Online`.
         Some((_, Decoded::NotTheReply | Decoded::Online(_))) => Outcome::Invalid("not the reply"),
     };
@@ -425,17 +430,23 @@ fn query(
 /// The menu text for an outcome; an unconfirmed device points at its menu action.
 fn reason(outcome: Outcome) -> String {
     match outcome {
-        Outcome::NoChannel => "no battery channel (needs a capture)".to_owned(),
-        Outcome::NeedsCapture => "not supported yet: needs a capture".to_owned(),
-        Outcome::Unconfirmed => "unconfirmed: use Check battery now".to_owned(),
-        Outcome::Waiting => "waiting for the next query".to_owned(),
+        Outcome::NoChannel => "no channel".to_owned(),
+        Outcome::NeedsCapture => "unsupported".to_owned(),
+        Outcome::Unconfirmed => "unchecked".to_owned(),
+        Outcome::Waiting => "waiting".to_owned(),
         Outcome::TooSoon(left) => wait_text(left),
-        Outcome::Busy => "busy: close the vendor app".to_owned(),
-        Outcome::Ambiguous => "several matches: unplug the extra receiver".to_owned(),
-        Outcome::NotRecorded => "could not record the query time".to_owned(),
-        Outcome::BudgetUsed => "query budget used".to_owned(),
-        Outcome::NoReply => "no reply (asleep? move it)".to_owned(),
-        Outcome::Invalid(why) => why.to_owned(),
+        Outcome::Busy => "busy (vendor app)".to_owned(),
+        Outcome::Ambiguous => "2+ receivers".to_owned(),
+        Outcome::NotRecorded => "log error".to_owned(),
+        Outcome::BudgetUsed => "skipped".to_owned(),
+        Outcome::NoReply => "no reply".to_owned(),
+        // The detailed `why` is logged where the reply is decoded; the menu keeps two words.
+        Outcome::Invalid(why) => if why == ON_CABLE_TEXT {
+            why
+        } else {
+            "bad reply"
+        }
+        .to_owned(),
         Outcome::Reading(..) => ASLEEP_TEXT.to_owned(),
     }
 }
@@ -554,7 +565,7 @@ mod tests {
         Outcome::NotRecorded,
         Outcome::BudgetUsed,
         Outcome::NoReply,
-        Outcome::Invalid("on cable: level not trustworthy"),
+        Outcome::Invalid(ON_CABLE_TEXT),
     ];
 
     #[test]
@@ -640,13 +651,10 @@ mod tests {
         assert_eq!(good.row.level, Level::Percent(80));
 
         let failures = [
-            (Outcome::NoReply, "no reply (asleep? move it)"),
-            (Outcome::Busy, "busy: close the vendor app"),
+            (Outcome::NoReply, "no reply"),
+            (Outcome::Busy, "busy (vendor app)"),
             (Outcome::TooSoon(Duration::from_millis(6_500)), "wait 7 s"),
-            (
-                Outcome::Invalid("unknown power state"),
-                "unknown power state",
-            ),
+            (Outcome::Invalid("unknown power state"), "bad reply"),
         ];
         for (outcome, text) in failures {
             let row = checked(vgn, outcome, None, None, at(NOW));
@@ -681,18 +689,15 @@ mod tests {
 
         check(Outcome::NoReply).remember(&mut notes);
         let row = later_read(&notes);
-        assert_eq!(
-            row.level,
-            Level::NoData("unconfirmed: use Check battery now".into())
-        );
-        assert_eq!(row.note.as_deref(), Some("no reply (asleep? move it)"));
+        assert_eq!(row.level, Level::NoData("unchecked".into()));
+        assert_eq!(row.note.as_deref(), Some("no reply"));
 
         // The latest failure wins; a floor wait sent nothing and keeps it.
         check(Outcome::Busy).remember(&mut notes);
         check(Outcome::TooSoon(Duration::from_secs(5))).remember(&mut notes);
         assert_eq!(
             later_read(&notes).note.as_deref(),
-            Some("busy: close the vendor app")
+            Some("busy (vendor app)")
         );
 
         // A note only rides on a device the gate still holds back.
@@ -807,7 +812,7 @@ mod tests {
         );
         assert_eq!(row.level, Level::Percent(55));
         assert!(row.stale);
-        assert_eq!(row.note.as_deref(), Some("asleep or off"));
+        assert_eq!(row.note.as_deref(), Some("asleep"));
     }
 
     #[test]
@@ -833,13 +838,10 @@ mod tests {
             at(NOW),
         );
         assert!(asleep.stale);
-        assert_eq!(asleep.note.as_deref(), Some("asleep or off"));
+        assert_eq!(asleep.note.as_deref(), Some("asleep"));
 
         let empty = view(mchose(), Outcome::Waiting, None, Some(at(NOW - 5)), at(NOW));
-        assert_eq!(
-            empty.level,
-            Level::NoData("waiting for the next query".into())
-        );
+        assert_eq!(empty.level, Level::NoData("waiting".into()));
         assert!(!empty.stale);
         assert_eq!(empty.note, None);
     }
@@ -858,7 +860,7 @@ mod tests {
         assert_eq!(row.level, Level::Percent(70));
         assert_eq!(row.updated_at, at(NOW - 600));
         assert!(row.stale);
-        assert_eq!(row.note.as_deref(), Some("no reply at the last query"));
+        assert_eq!(row.note.as_deref(), Some("no reply"));
 
         // An asleep stored reading keeps its own note next to the unanswered-query one.
         let asleep = view(
@@ -869,10 +871,7 @@ mod tests {
             at(NOW),
         );
         assert!(asleep.stale);
-        assert_eq!(
-            asleep.note.as_deref(),
-            Some("asleep or off; no reply at the last query")
-        );
+        assert_eq!(asleep.note.as_deref(), Some("asleep; no reply"));
 
         // A reading recorded at the stamp's second is the answer to that query.
         let answered = view(
@@ -893,10 +892,7 @@ mod tests {
             Some(at(NOW - 120)),
             at(NOW),
         );
-        assert_eq!(
-            empty.level,
-            Level::NoData("waiting for the next query".into())
-        );
+        assert_eq!(empty.level, Level::NoData("waiting".into()));
         assert!(!empty.stale);
     }
 
@@ -933,26 +929,14 @@ mod tests {
     #[test]
     fn reason_texts() {
         let text = reason;
-        assert_eq!(
-            text(Outcome::Unconfirmed),
-            "unconfirmed: use Check battery now"
-        );
+        assert_eq!(text(Outcome::Unconfirmed), "unchecked");
         assert_eq!(text(Outcome::TooSoon(Duration::from_secs(4))), "wait 4 s");
-        assert_eq!(
-            text(Outcome::NoChannel),
-            "no battery channel (needs a capture)"
-        );
-        assert_eq!(
-            text(Outcome::NeedsCapture),
-            "not supported yet: needs a capture"
-        );
-        assert_eq!(text(Outcome::Busy), "busy: close the vendor app");
-        assert_eq!(text(Outcome::NoReply), "no reply (asleep? move it)");
-        assert_eq!(text(Outcome::BudgetUsed), "query budget used");
-        assert_eq!(
-            text(Outcome::Invalid("unknown power state")),
-            "unknown power state"
-        );
+        assert_eq!(text(Outcome::NoChannel), "no channel");
+        assert_eq!(text(Outcome::NeedsCapture), "unsupported");
+        assert_eq!(text(Outcome::Busy), "busy (vendor app)");
+        assert_eq!(text(Outcome::NoReply), "no reply");
+        assert_eq!(text(Outcome::BudgetUsed), "skipped");
+        assert_eq!(text(Outcome::Invalid("unknown power state")), "bad reply");
     }
 
     #[test]

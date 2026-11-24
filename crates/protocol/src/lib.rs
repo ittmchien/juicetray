@@ -16,6 +16,7 @@ use std::time::{Duration, SystemTime};
 pub use devices::{KNOWN, KnownDevice, known};
 pub use hid::{HidShape, PickError, open_permission, pick_target};
 pub use report::{ReportKind, ReportSize, TopCollection, parse_descriptor, reports_of};
+pub use report13::ON_CABLE_TEXT;
 
 /// Size of one serial frame in both directions.
 pub const SERIAL_FRAME_LEN: usize = 64;

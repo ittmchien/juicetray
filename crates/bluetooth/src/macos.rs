@@ -9,7 +9,7 @@ use ui_model::{DeviceView, Level, Path};
 
 use crate::{kind_from_class, normalize};
 
-const NO_BATTERY_TEXT: &str = "no battery info";
+const NO_BATTERY_TEXT: &str = "no level";
 
 pub fn read_devices() -> anyhow::Result<Vec<DeviceView>> {
     // SAFETY: class method without arguments; nil means nothing is paired.

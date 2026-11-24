@@ -4,7 +4,7 @@ use crate::device::{DeviceView, Level};
 
 pub const EMPTY_MENU_TEXT: &str = "No devices with battery info";
 
-const NO_BATTERY_TEXT: &str = "no battery info";
+const NO_BATTERY_TEXT: &str = "no level";
 
 /// One menu line: `name — battery · path · age` when connected, `… · not connected` otherwise,
 /// then the device's note when it has one.
@@ -115,7 +115,7 @@ mod tests {
         );
 
         let silent = test_device("X", Level::NoData(NO_BATTERY_TEXT.into()));
-        assert_eq!(menu_line(&silent, now()), "X — no battery info · BT");
+        assert_eq!(menu_line(&silent, now()), "X — no level · BT");
 
         let mut away = updated_ago(test_device("Mouse", Level::Percent(40)), 3 * 3600);
         away.connected = false;
@@ -131,10 +131,10 @@ mod tests {
         let mut mouse = updated_ago(test_device("Mouse", Level::Percent(40)), 180);
         mouse.path = Path::Dongle;
         mouse.stale = true;
-        mouse.note = Some("asleep or off".to_owned());
+        mouse.note = Some("asleep".to_owned());
         assert_eq!(
             menu_line(&mouse, now()),
-            "Mouse — 40% · 2.4G · 3 min ago · asleep or off"
+            "Mouse — 40% · 2.4G · 3 min ago · asleep"
         );
     }
 
