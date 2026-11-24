@@ -1,5 +1,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+// Windows only: the Add device window opens from the new-device popup.
+#[cfg(windows)]
+mod add_device;
 mod alerts;
 mod app;
 mod config;
@@ -17,6 +20,11 @@ mod log;
 mod login;
 mod menu;
 mod pause;
+// Plug-in detection and its popup run on Windows; their rules are also tested elsewhere.
+#[cfg(any(windows, test))]
+mod plug;
+#[cfg(any(windows, test))]
+mod popup;
 mod probe;
 mod query;
 mod query_log;

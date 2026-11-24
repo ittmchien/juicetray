@@ -116,7 +116,7 @@ fn queried(present: &[(u16, u16)], allow: &[(u16, u16)], custom: &[Device]) -> V
         let Some(device) = lookup(vid, pid, custom) else {
             continue;
         };
-        if device.verified || device.custom || allow.contains(&(vid, pid)) {
+        if device.is_queried(allow) {
             devices.push(device);
         }
     }

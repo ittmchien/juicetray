@@ -20,6 +20,8 @@ use ui_model::{
 };
 
 #[cfg(windows)]
+use crate::add_device;
+#[cfg(windows)]
 use crate::alerts::notify_update_available;
 use crate::alerts::{AlertState, notify_low_battery};
 use crate::config::{Config, parse_hide_offline_minutes, parse_low_percent};
@@ -27,6 +29,10 @@ use crate::interval::{format_interval, parse_interval};
 use crate::login::{self, LoginState};
 use crate::menu::{self, MenuAction, MenuEntry};
 use crate::pause::{self, PowerSource, PowerState};
+#[cfg(windows)]
+use crate::plug::{self, Arrivals, Id, Offer, Plan, Settings};
+#[cfg(windows)]
+use crate::popup::{self, OfferQueue};
 use crate::refresh::{self, Command};
 use crate::svg_cache::SvgCache;
 #[cfg(windows)]
@@ -95,6 +101,27 @@ pub enum UserEvent {
     /// The new exe is installed and running: this instance quits through the normal exit path.
     #[cfg(windows)]
     UpdateRestart,
+    /// A device interface of this USB id arrived; acted on once its arrivals settle.
+    #[cfg(windows)]
+    Plugged(Id),
+    /// The PC resumed from sleep.
+    #[cfg(windows)]
+    Woke,
+    /// Devices the worker found worth offering in the new-device popup.
+    #[cfg(windows)]
+    Offers(Vec<Offer>),
+    /// The new-device popup closed; its answer, if any, came just before.
+    #[cfg(windows)]
+    OfferClosed,
+    /// The owner answered [Never]: the id goes to `declined`.
+    #[cfg(windows)]
+    Decline(Id),
+    /// The owner answered [OK]: the Add device window opens with the id preselected.
+    #[cfg(windows)]
+    OpenAddDevice(Id),
+    /// The Add device window closed; waiting popups may show.
+    #[cfg(windows)]
+    AddDeviceClosed,
 }
 
 impl UserEvent {
@@ -123,6 +150,20 @@ impl UserEvent {
             Self::UpdateChecked { .. } => "UpdateChecked",
             #[cfg(windows)]
             Self::UpdateRestart => "UpdateRestart",
+            #[cfg(windows)]
+            Self::Plugged(_) => "Plugged",
+            #[cfg(windows)]
+            Self::Woke => "Woke",
+            #[cfg(windows)]
+            Self::Offers(_) => "Offers",
+            #[cfg(windows)]
+            Self::OfferClosed => "OfferClosed",
+            #[cfg(windows)]
+            Self::Decline(_) => "Decline",
+            #[cfg(windows)]
+            Self::OpenAddDevice(_) => "OpenAddDevice",
+            #[cfg(windows)]
+            Self::AddDeviceClosed => "AddDeviceClosed",
         }
     }
 }
@@ -172,17 +213,17 @@ pub fn run() -> ExitCode {
                     *control_flow = app.handle(event);
                 }
             }
-            // An offline device just crossed its "Hide offline after" deadline.
+            // An offline device crossed its "Hide offline after" deadline, or plug-ins settled.
             Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
                 if let Some(app) = app.as_mut() {
-                    app.apply();
+                    app.on_deadline();
                 }
             }
             _ => {}
         }
-        // Sleeps until the next hide deadline instead of forever; each event recomputes it.
+        // Sleeps until the next deadline instead of forever; each event recomputes it.
         if *control_flow == ControlFlow::Wait
-            && let Some(deadline) = app.as_ref().and_then(App::next_hide_instant)
+            && let Some(deadline) = app.as_ref().and_then(App::next_deadline)
         {
             *control_flow = ControlFlow::WaitUntil(deadline);
         }
@@ -246,6 +287,15 @@ struct App {
     /// An automatic check was skipped on battery power and runs when AC returns.
     #[cfg(windows)]
     update_check_waits_for_ac: bool,
+    /// Plug-ins waiting to settle, and when each id last earned a refresh.
+    #[cfg(windows)]
+    arrivals: Arrivals,
+    /// New-device popups waiting their turn.
+    #[cfg(windows)]
+    offers: OfferQueue,
+    /// Plug-in notifications on the heartbeat window; dropped (unregistered) before exit.
+    #[cfg(windows)]
+    device_notify: Option<plug::Registration>,
 }
 
 impl App {
@@ -264,7 +314,8 @@ impl App {
         let tray = builder.build()?;
         // The UI heartbeat timer is this thread's own, so the watchdog runs even without a strip.
         #[cfg(windows)]
-        crate::watchdog::start();
+        let device_notify =
+            crate::watchdog::start().and_then(|window| plug::listen(window, proxy.clone()));
         #[cfg(windows)]
         let taskbar = new_taskbar_strip(proxy.clone());
         // Power changes reach the app only through the strip's window, so without a strip a
@@ -316,8 +367,19 @@ impl App {
             update: None,
             #[cfg(windows)]
             update_check_waits_for_ac: false,
+            #[cfg(windows)]
+            arrivals: Arrivals::default(),
+            #[cfg(windows)]
+            offers: OfferQueue::default(),
+            #[cfg(windows)]
+            device_notify,
         };
         app.apply();
+        // Devices already plugged in get the plug-in check once, after the first read.
+        #[cfg(windows)]
+        if app.config.detect_new_devices {
+            app.tell_worker(Command::FindOffers(None));
+        }
         Ok(app)
     }
 
@@ -337,7 +399,7 @@ impl App {
                     log::trace(format_args!("menu action {action:?}"));
                     if action == MenuAction::Quit {
                         #[cfg(windows)]
-                        self.hide_taskbar();
+                        self.prepare_exit();
                         return ControlFlow::Exit;
                     }
                     self.on_action(action);
@@ -375,8 +437,49 @@ impl App {
             // Same exit as Quit, so the tray icon and strip are removed first.
             #[cfg(windows)]
             UserEvent::UpdateRestart => {
-                self.hide_taskbar();
+                self.prepare_exit();
                 return ControlFlow::Exit;
+            }
+            // New-device events change nothing on screen, so no `apply`.
+            #[cfg(windows)]
+            UserEvent::Plugged(id) => {
+                let now = Instant::now();
+                self.arrivals.arrived(id, now);
+                self.settle_arrivals(now);
+                return ControlFlow::Wait;
+            }
+            #[cfg(windows)]
+            UserEvent::Woke => {
+                self.tell_worker(Command::RefreshNow);
+                return ControlFlow::Wait;
+            }
+            #[cfg(windows)]
+            UserEvent::Offers(offers) => {
+                self.queue_offers(offers);
+                return ControlFlow::Wait;
+            }
+            #[cfg(windows)]
+            UserEvent::OfferClosed => {
+                self.offers.closed();
+                self.show_next_offer();
+                return ControlFlow::Wait;
+            }
+            #[cfg(windows)]
+            UserEvent::Decline((vid, pid)) => {
+                if let Err(error) = self.config.decline_and_save(vid, pid) {
+                    log::line(&format!("saving a declined device failed: {error:#}"));
+                }
+                return ControlFlow::Wait;
+            }
+            #[cfg(windows)]
+            UserEvent::OpenAddDevice(id) => {
+                add_device::open(self.proxy.clone(), id);
+                return ControlFlow::Wait;
+            }
+            #[cfg(windows)]
+            UserEvent::AddDeviceClosed => {
+                self.show_next_offer();
+                return ControlFlow::Wait;
             }
         }
         self.apply();
@@ -454,6 +557,7 @@ impl App {
                 }
             }
             MenuAction::CheckForUpdates => self.check_for_updates(),
+            MenuAction::ToggleDetectNewDevices => self.toggle_detect_new_devices(),
             MenuAction::ToggleCheckUpdates => {
                 self.config.check_updates = !self.config.check_updates;
                 self.save_config();
@@ -530,6 +634,10 @@ impl App {
     fn confirm_refresh_on_battery(&mut self) {
         self.set_refresh_on_battery(true);
     }
+
+    /// Only Windows watches for new devices, so the menu never offers the option elsewhere.
+    #[cfg(not(windows))]
+    fn toggle_detect_new_devices(&mut self) {}
 
     /// The inputs the worker's pause rules read.
     fn power_state(&self) -> PowerState {
@@ -842,6 +950,21 @@ impl App {
             .collect()
     }
 
+    /// A timed wake-up: hide deadlines show through `apply`; settled plug-ins are acted on.
+    fn on_deadline(&mut self) {
+        #[cfg(windows)]
+        self.settle_arrivals(Instant::now());
+        self.apply();
+    }
+
+    /// The next timed wake-up: a hide deadline or, on Windows, a plug-in settling.
+    fn next_deadline(&self) -> Option<Instant> {
+        let hide = self.next_hide_instant();
+        #[cfg(windows)]
+        let hide = hide.into_iter().chain(self.arrivals.next_due()).min();
+        hide
+    }
+
     /// When the earliest shown device crosses "Hide offline after", so the event loop wakes
     /// once for it instead of waiting for the next refresh; `None` when no device is pending.
     fn next_hide_instant(&self) -> Option<Instant> {
@@ -979,6 +1102,79 @@ impl App {
     /// containers are restored, so nothing stays shrunk once the loop exits.
     fn hide_taskbar(&mut self) {
         self.taskbar = None;
+    }
+
+    /// Turning detection off drops waiting popups (one on screen still answers); turning it on
+    /// checks the devices already plugged in, as at start.
+    fn toggle_detect_new_devices(&mut self) {
+        self.config.detect_new_devices = !self.config.detect_new_devices;
+        self.save_config();
+        if self.config.detect_new_devices {
+            self.tell_worker(Command::FindOffers(None));
+        } else {
+            self.offers.drop_waiting();
+        }
+    }
+
+    /// Releases what the OS holds for the app before the loop exits: plug-in notifications and
+    /// the taskbar strip.
+    fn prepare_exit(&mut self) {
+        self.device_notify = None;
+        self.hide_taskbar();
+    }
+
+    /// Acts on the ids whose plug-ins settled by `now`: queried devices earn one read (at most
+    /// once per `REFRESH_GAP` each); offer candidates go to the worker, which checks the device
+    /// lists for something to query.
+    fn settle_arrivals(&mut self, now: Instant) {
+        let due = self.arrivals.take_due(now);
+        if due.is_empty() {
+            return;
+        }
+        let settings = Settings::from_config(&self.config);
+        let mut refresh = false;
+        let mut candidates = Vec::new();
+        for id in due {
+            match plug::plan(id, &settings) {
+                Plan::Refresh => refresh |= self.arrivals.may_refresh(id, now),
+                Plan::Offer => candidates.push(id),
+                Plan::Ignore => {}
+            }
+        }
+        if refresh {
+            self.tell_worker(Command::RefreshNow);
+        }
+        if !candidates.is_empty() {
+            self.tell_worker(Command::FindOffers(Some(candidates)));
+        }
+    }
+
+    /// Queues the worker's offers, minus ids declined since it looked, and shows the next one.
+    fn queue_offers(&mut self, offers: Vec<Offer>) {
+        // Detection was turned off while the worker looked.
+        if !self.config.detect_new_devices {
+            return;
+        }
+        let declined = self.config.declined_ids();
+        for offer in offers {
+            if !declined.contains(&offer.id) {
+                self.offers.push(offer);
+            }
+        }
+        self.show_next_offer();
+    }
+
+    /// Shows the next waiting offer unless a popup or the Add device window is open; the Add
+    /// window detects devices itself, so offers wait until it closes.
+    fn show_next_offer(&mut self) {
+        if add_device::is_open() {
+            return;
+        }
+        if let Some(offer) = self.offers.next()
+            && !popup::show(self.proxy.clone(), offer)
+        {
+            self.offers.closed();
+        }
     }
 }
 

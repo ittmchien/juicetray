@@ -17,6 +17,11 @@ pub enum Command {
     SetInterval(Option<u32>),
     /// The power source or the battery option changed; a pause ending earns one read.
     SetPower(PowerState),
+    /// Looks for devices to offer in the new-device popup among these plugged-in ids (all
+    /// present devices when `None`), from the device lists alone; answers with
+    /// `UserEvent::Offers`.
+    #[cfg(windows)]
+    FindOffers(Option<Vec<crate::plug::Id>>),
 }
 
 /// Starts the worker; it reads at once, then on `RefreshNow` and
@@ -90,6 +95,15 @@ fn run(
                 read_now = pause::reads_on_change(power, next);
                 power = next;
             }
+            #[cfg(windows)]
+            Ok(Command::FindOffers(ids)) => {
+                read_now = false;
+                let offers = crate::plug::find_offers(ids.as_deref(), &Config::load());
+                if !offers.is_empty() && proxy.send_event(UserEvent::Offers(offers)).is_err() {
+                    log::trace(format_args!("worker exit: event loop gone"));
+                    return;
+                }
+            }
             Err(RecvTimeoutError::Disconnected) => {
                 log::trace(format_args!("worker exit: app dropped the sender"));
                 return;
@@ -104,6 +118,8 @@ fn wake_reason(command: &Result<Command, RecvTimeoutError>) -> &'static str {
         Ok(Command::RefreshNow) => "RefreshNow",
         Ok(Command::SetInterval(_)) => "SetInterval",
         Ok(Command::SetPower(_)) => "SetPower",
+        #[cfg(windows)]
+        Ok(Command::FindOffers(_)) => "FindOffers",
         Err(RecvTimeoutError::Timeout) => "timeout",
         Err(RecvTimeoutError::Disconnected) => "disconnected",
     }

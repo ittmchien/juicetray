@@ -70,6 +70,19 @@ pub fn confirm_or_alt(
     platform::confirm_or_alt(title, message, ok_label, alt_label, cancel_label)
 }
 
+/// `confirm_or_alt` with `cancel_label` in the middle and `alt_label` last, so Esc and closing
+/// the dialog never pick the alternative; same threading rule. Windows only.
+#[cfg(windows)]
+pub fn confirm_or_alt_last(
+    title: &str,
+    message: &str,
+    ok_label: &str,
+    cancel_label: &str,
+    alt_label: &str,
+) -> Answer {
+    platform::confirm_or_alt_last(title, message, ok_label, cancel_label, alt_label)
+}
+
 /// Shows `message` with an OK button; blocks the calling thread until it is closed, so it runs
 /// on its own thread, never the event loop's. Windows only.
 #[cfg(windows)]

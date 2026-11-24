@@ -28,6 +28,9 @@ const CUSTOM_REFRESH_ID: &str = "auto:custom";
 const CUSTOM_LOW_ID: &str = "low:custom";
 const CUSTOM_OFFLINE_ID: &str = "offline:custom";
 const REFRESH_ON_BATTERY_ID: &str = "refresh-battery";
+const DETECT_NEW_DEVICES_ID: &str = "detect-new";
+/// Only Windows watches for new devices, so only it offers the switch.
+const DETECT_NEW_AVAILABLE: bool = cfg!(windows);
 const ICON_AUTO: &str = "auto";
 const SECONDS_PER_MINUTE: u32 = 60;
 /// The icon sits on the taskbar on Windows and in the menu bar on macOS.
@@ -112,6 +115,8 @@ pub enum MenuAction {
     SetHideOffline(Option<u32>),
     CustomHideOffline,
     ToggleStartAtLogin,
+    /// New-device popups on or off; plug-in refreshes of queried devices stay.
+    ToggleDetectNewDevices,
     /// Turning it on is confirmed first; turning it off is not.
     ToggleRefreshOnBattery,
     /// Check GitHub Releases now and say the result (macOS opens the releases page instead).
@@ -185,6 +190,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         "refresh" => return Some(MenuAction::Refresh),
         "login" => return Some(MenuAction::ToggleStartAtLogin),
         REFRESH_ON_BATTERY_ID => return Some(MenuAction::ToggleRefreshOnBattery),
+        DETECT_NEW_DEVICES_ID => return Some(MenuAction::ToggleDetectNewDevices),
         CHECK_UPDATES_ID => return Some(MenuAction::CheckForUpdates),
         AUTO_UPDATE_ID => return Some(MenuAction::ToggleCheckUpdates),
         OPEN_UPDATE_ID => return Some(MenuAction::OpenUpdate),
@@ -310,6 +316,13 @@ pub fn menu_entries(
         ),
         login_entry(login),
     ]);
+    if DETECT_NEW_AVAILABLE {
+        entries.push(MenuEntry::check(
+            DETECT_NEW_DEVICES_ID.to_owned(),
+            "Detect new devices",
+            config.detect_new_devices,
+        ));
+    }
     // Only a build that can check on its own offers the switch.
     if AUTO_CHECK_AVAILABLE {
         entries.push(MenuEntry::check(
@@ -777,6 +790,38 @@ mod tests {
     }
 
     #[test]
+    fn detect_new_devices_item_follows_start_at_login_on_windows() {
+        let build = |config: &Config| {
+            menu_entries(
+                &[],
+                config,
+                LoginState::Disabled,
+                false,
+                SystemTime::UNIX_EPOCH,
+            )
+        };
+        let entries = build(&Config::default());
+        let detect = entries
+            .iter()
+            .position(|e| e.id.as_deref() == Some(DETECT_NEW_DEVICES_ID));
+        assert_eq!(detect.is_some(), cfg!(windows));
+        if let Some(detect) = detect {
+            assert_eq!(entries[detect].text, "Detect new devices");
+            assert_eq!(entries[detect].checked, Some(true));
+            assert_eq!(entries[detect - 1].id.as_deref(), Some("login"));
+            let off = Config {
+                detect_new_devices: false,
+                ..Config::default()
+            };
+            let unticked = build(&off)
+                .into_iter()
+                .find(|e| e.id.as_deref() == Some(DETECT_NEW_DEVICES_ID))
+                .unwrap();
+            assert_eq!(unticked.checked, Some(false));
+        }
+    }
+
+    #[test]
     fn update_items_sit_above_quit_and_map_to_actions() {
         let build = |config: &Config| {
             menu_entries(
@@ -868,6 +913,10 @@ mod tests {
             Some(MenuAction::CustomHideOffline)
         );
         assert_eq!(action_for("login"), Some(MenuAction::ToggleStartAtLogin));
+        assert_eq!(
+            action_for("detect-new"),
+            Some(MenuAction::ToggleDetectNewDevices)
+        );
         assert_eq!(action_for("auto:7"), None);
         assert_eq!(action_for("icon:toaster:bt:x"), None);
         assert_eq!(action_for("color:zzz:auto:bt:x"), None);

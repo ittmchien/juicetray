@@ -45,6 +45,10 @@ const THREE_WAY_MESSAGE_RECT: [i16; 4] = [7, 7, 236, 26];
 const THREE_WAY_OK_RECT: [i16; 4] = [37, 38, 64, 14];
 const THREE_WAY_ALT_RECT: [i16; 4] = [105, 38, 88, 14];
 const THREE_WAY_CANCEL_RECT: [i16; 4] = [197, 38, 46, 14];
+/// The cancel-in-the-middle dialog: three equal buttons, the right one is the alternative.
+const MIDDLE_CANCEL_OK_RECT: [i16; 4] = [85, 38, 50, 14];
+const MIDDLE_CANCEL_CANCEL_RECT: [i16; 4] = [139, 38, 50, 14];
+const MIDDLE_CANCEL_ALT_RECT: [i16; 4] = [193, 38, 50, 14];
 
 /// The colour dialog's 16 custom slots, kept for the session; white marks an unused slot.
 static CUSTOM_COLORS: Mutex<[COLORREF; 16]> = Mutex::new([COLORREF(0x00FF_FFFF); 16]);
@@ -116,6 +120,32 @@ pub fn confirm_or_alt(
     cancel_label: &str,
 ) -> Answer {
     let template = three_way_template(title, message, ok_label, alt_label, cancel_label);
+    match run_choice(&template) {
+        Some(id) if id == IDOK.0 as isize => Answer::Ok,
+        Some(id) if id == ALT_ID as isize => Answer::Alt,
+        _ => Answer::Cancel,
+    }
+}
+
+/// Like `confirm_or_alt` with the cancel button in the middle and the alternative last, for a
+/// final choice that Esc must never pick. Blocks the calling thread.
+pub fn confirm_or_alt_last(
+    title: &str,
+    message: &str,
+    ok_label: &str,
+    cancel_label: &str,
+    alt_label: &str,
+) -> Answer {
+    let template = button_template(
+        title,
+        message,
+        [THREE_WAY_RECT, THREE_WAY_MESSAGE_RECT],
+        &[
+            (IDOK.0 as u16, MIDDLE_CANCEL_OK_RECT, ok_label),
+            (IDCANCEL.0 as u16, MIDDLE_CANCEL_CANCEL_RECT, cancel_label),
+            (ALT_ID, MIDDLE_CANCEL_ALT_RECT, alt_label),
+        ],
+    );
     match run_choice(&template) {
         Some(id) if id == IDOK.0 as isize => Answer::Ok,
         Some(id) if id == ALT_ID as isize => Answer::Alt,

@@ -12,6 +12,19 @@ const ATK_VID: u16 = 0x373B;
 const REPORT13_VID: u16 = 0x3554;
 const MCHOSE_VID: u16 = 0x3837;
 const VGN_VID: u16 = 0x391D;
+/// VIDs of the HID families other than Compx; RongYuan F7 goes by catalogue PIDs only.
+const OTHER_FAMILY_VIDS: [u16; 4] = [ATK_VID, REPORT13_VID, MCHOSE_VID, VGN_VID];
+
+/// Whether `vid:pid` falls under Compx's VID rule (its VIDs minus Pulsar's other protocol).
+fn compx_vid(vid: u16, pid: u16) -> bool {
+    COMPX_VIDS.contains(&vid) && !(vid == PULSAR_VID && PULSAR_NOT_COMPX.contains(&pid))
+}
+
+/// Whether some family's VID rule admits `vid:pid`, so an id outside the catalogue may speak a
+/// known protocol; recovery ids never do. Nothing is opened: shapes still decide the family.
+pub fn family_vid(vid: u16, pid: u16) -> bool {
+    !is_recovery(vid, pid) && (compx_vid(vid, pid) || OTHER_FAMILY_VIDS.contains(&vid))
+}
 
 /// The families `vid:pid` can be queried as, in `Family` order. HID families need their
 /// `pick_target` collection among `collections`; ATK serial needs a port and a catalogue ATK
@@ -27,12 +40,13 @@ pub fn families_for(
         return Vec::new();
     }
     let has_target = |family| pick_target(family, collections).is_ok();
-    let compx_vid =
-        COMPX_VIDS.contains(&vid) && !(vid == PULSAR_VID && PULSAR_NOT_COMPX.contains(&pid));
     let catalogue_is = |family| known(vid, pid).is_some_and(|device| device.family == family);
     let atk_serial = vid == ATK_VID && serial_present && catalogue_is(Family::AtkSerial);
     [
-        (Family::Compx, compx_vid && has_target(Family::Compx)),
+        (
+            Family::Compx,
+            compx_vid(vid, pid) && has_target(Family::Compx),
+        ),
         (
             Family::Report13,
             vid == REPORT13_VID && has_target(Family::Report13),
@@ -276,5 +290,23 @@ mod tests {
         let other = shape(0xFF00, 0x0001, both(0x08, 17));
         let third = shape(0xFF01, 0x0001, both(0x08, 17));
         assert!(families_for(0x3554, 0x1234, &[other, third], false).is_empty());
+    }
+
+    #[test]
+    fn family_vids_admit_unknown_ids_except_recovery_and_other_pulsar_protocols() {
+        for (vid, pid) in [
+            (0x373B, 0x9999),
+            (0x3554, 0x1234),
+            (0x3837, 0x1234),
+            (0x391D, 0x1234),
+            (0x3710, 0x1234),
+            (0x260D, 0x1234),
+            (0x33E4, 0x1234),
+        ] {
+            assert!(family_vid(vid, pid), "{vid:04X}:{pid:04X}");
+        }
+        assert!(!family_vid(0x3710, 0x5405));
+        assert!(!family_vid(0x3554, 0xF2FF));
+        assert!(!family_vid(0x046D, 0xC52B));
     }
 }

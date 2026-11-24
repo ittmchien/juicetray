@@ -19,7 +19,7 @@ mod vgn_kc2;
 use std::time::{Duration, SystemTime};
 
 pub use devices::{KNOWN, Kind, KnownDevice, known};
-pub use families::families_for;
+pub use families::{families_for, family_vid};
 pub use hid::{HidShape, PickError, open_permission, pick_target};
 pub use recovery::is_recovery;
 pub use report::{ReportKind, ReportSize, TopCollection, parse_descriptor, reports_of};

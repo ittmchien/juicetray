@@ -20,6 +20,11 @@ pub struct Device {
 }
 
 impl Device {
+    /// The query gate: a verified catalogue model, an `allow` entry or a custom device.
+    pub fn is_queried(&self, allow: &[(u16, u16)]) -> bool {
+        self.verified || self.custom || allow.contains(&(self.vid, self.pid))
+    }
+
     /// A custom BITMOUSE device on a cable, which is never sent to: the frame addresses the
     /// receiver, and the door checks the connection of catalogue rows only.
     pub fn is_custom_bitmouse_cable(&self) -> bool {

@@ -159,22 +159,30 @@ mod win {
     }
 
     /// Gives the calling (UI) thread a heartbeat timer and starts the watchdog; call once from it.
-    pub fn start() {
-        match start_heartbeat_timer() {
-            Ok(()) => watch_current(Watched::Ui),
+    /// Returns the heartbeat window, which also hears plug-in and power broadcasts.
+    pub fn start() -> Option<HWND> {
+        let window = match start_heartbeat_timer() {
+            Ok(window) => {
+                watch_current(Watched::Ui);
+                Some(window)
+            }
             // Without its timer an idle UI thread would look hung, so it goes unwatched.
-            Err(error) => log::line(&format!("watchdog: UI heartbeat unavailable: {error}")),
-        }
+            Err(error) => {
+                log::line(&format!("watchdog: UI heartbeat unavailable: {error}"));
+                None
+            }
+        };
         let spawned = thread::Builder::new().name("watchdog".into()).spawn(watch);
         if let Err(error) = spawned {
             log::line(&format!("watchdog unavailable: {error}"));
         }
+        window
     }
 
     /// A hidden top-level window on the calling thread whose 2 s timer beats the UI heartbeat.
     /// Modal loops (dialogs, the file picker) dispatch it too, so only a stuck loop or a
     /// blocked call goes silent; the window lives for the whole process.
-    fn start_heartbeat_timer() -> windows::core::Result<()> {
+    fn start_heartbeat_timer() -> windows::core::Result<HWND> {
         // SAFETY: a null module name asks for this executable's own handle.
         let instance = HINSTANCE::from(unsafe { GetModuleHandleW(None) }?);
         let class = WNDCLASSEXW {
@@ -217,7 +225,7 @@ mod win {
         {
             return Err(windows::core::Error::from_thread());
         }
-        Ok(())
+        Ok(window)
     }
 
     unsafe extern "system" fn heartbeat_proc(
@@ -230,6 +238,8 @@ mod win {
             beat(Watched::Ui);
             return LRESULT(0);
         }
+        // Device arrivals and resume from sleep reach top-level windows; this one is always there.
+        crate::plug::on_window_message(message, wparam, lparam);
         // SAFETY: forwards the unchanged message arguments of this window procedure.
         unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
     }

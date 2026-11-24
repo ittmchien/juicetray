@@ -72,11 +72,13 @@ pub struct Listing {
     errors: Vec<String>,
 }
 
-/// One listed HID collection: its VID:PID and whether the open rule lets it be opened.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One listed HID collection: its VID:PID, USB product string and whether the open rule lets it
+/// be opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Listed {
     vid: u16,
     pid: u16,
+    product: Option<String>,
     openable: bool,
 }
 
@@ -107,6 +109,7 @@ pub fn list() -> Listing {
                 .map(|(info, verdict)| Listed {
                     vid: info.vendor_id(),
                     pid: info.product_id(),
+                    product: info.product_string().map(str::to_owned),
                     openable: verdict.is_ok(),
                 })
                 .collect();
@@ -164,6 +167,22 @@ impl Listing {
             presence_of(&mut all, port.vid, port.pid).serial += 1;
         }
         all.into_values().collect()
+    }
+
+    /// The USB product string of `vid:pid` from its first listed HID collection, else its first
+    /// serial port; nothing is opened.
+    pub fn product(&self, vid: u16, pid: u16) -> Option<&str> {
+        let hid = self
+            .hid
+            .iter()
+            .filter(|listed| (listed.vid, listed.pid) == (vid, pid));
+        let serial = self
+            .serial
+            .iter()
+            .filter(|entry| (entry.vid, entry.pid) == (vid, pid));
+        hid.filter_map(|listed| listed.product.as_deref())
+            .chain(serial.filter_map(|entry| entry.product.as_deref()))
+            .find(|product| !product.trim().is_empty())
     }
 
     /// Keeps only the VID:PIDs in `filter` (empty = every device) and opens a handle for each
@@ -416,7 +435,12 @@ mod tests {
     }
 
     fn collection(vid: u16, pid: u16, openable: bool) -> Listed {
-        Listed { vid, pid, openable }
+        Listed {
+            vid,
+            pid,
+            product: None,
+            openable,
+        }
     }
 
     fn presence(vid: u16, pid: u16, hid: usize, openable: usize, serial: usize) -> Presence {
@@ -453,6 +477,27 @@ mod tests {
                 presence(0x373B, 0x1216, 4, 3, 0),
             ]
         );
+    }
+
+    #[test]
+    fn product_takes_the_first_named_collection_then_the_serial_port() {
+        let named = |product: &str| Listed {
+            product: Some(product.into()),
+            ..collection(0x373B, 0x1216, true)
+        };
+        let mut serial = port("COM3", 0x373B, 0x1204);
+        serial.product = Some("USB Serial".into());
+        let listed = listing_of(
+            vec![
+                collection(0x373B, 0x1216, false),
+                named(" "),
+                named("X1 SE"),
+            ],
+            vec![serial],
+        );
+        assert_eq!(listed.product(0x373B, 0x1216), Some("X1 SE"));
+        assert_eq!(listed.product(0x373B, 0x1204), Some("USB Serial"));
+        assert_eq!(listed.product(0x046D, 0xC52B), None);
     }
 
     #[test]

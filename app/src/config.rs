@@ -81,6 +81,9 @@ pub struct Config {
     pub declined: Vec<String>,
     /// Devices outside the catalogue the owner added with a family; kept verbatim.
     pub custom_devices: Vec<CustomEntry>,
+    /// Offer unverified and unknown family devices in the new-device popup (Windows); on by
+    /// default. Off leaves plug-in and wake refreshes of queried devices as they are.
+    pub detect_new_devices: bool,
     /// Keep auto-refreshing while a laptop runs on battery; off by default.
     pub refresh_on_battery: bool,
     /// Ask GitHub Releases for a newer version once a day (Windows); on by default.
@@ -101,6 +104,7 @@ impl Default for Config {
             allow: Vec::new(),
             declined: Vec::new(),
             custom_devices: Vec::new(),
+            detect_new_devices: true,
             refresh_on_battery: false,
             check_updates: true,
             notified_update: None,
@@ -133,6 +137,10 @@ impl Config {
             allow: string_items(&table, "allow"),
             declined: string_items(&table, "declined"),
             custom_devices: custom_entries(&table),
+            detect_new_devices: table
+                .get("detect_new_devices")
+                .and_then(Value::as_bool)
+                .unwrap_or(defaults.detect_new_devices),
             refresh_on_battery: table
                 .get("refresh_on_battery")
                 .and_then(Value::as_bool)
@@ -165,6 +173,10 @@ impl Config {
             Value::Boolean(self.refresh_on_battery),
         );
         table.insert("check_updates".into(), Value::Boolean(self.check_updates));
+        table.insert(
+            "detect_new_devices".into(),
+            Value::Boolean(self.detect_new_devices),
+        );
         if let Some(version) = &self.notified_update {
             table.insert("notified_update".into(), Value::String(version.clone()));
         }
@@ -195,10 +207,16 @@ impl Config {
 
     /// The `allow` entries that are valid `VID:PID`; others stay in `allow` but are ignored.
     pub fn allowed(&self) -> Vec<(u16, u16)> {
-        self.allow
-            .iter()
-            .filter_map(|entry| crate::query::parse_vid_pid(entry).ok())
-            .collect()
+        valid_ids(&self.allow)
+    }
+
+    /// The `declined` entries that are valid `VID:PID`; others stay in the list but are ignored.
+    #[cfg_attr(
+        not(windows),
+        allow(dead_code, reason = "only Windows offers new devices")
+    )]
+    pub fn declined_ids(&self) -> Vec<(u16, u16)> {
+        valid_ids(&self.declined)
     }
 
     /// The valid `custom_devices` entries; an invalid one stays in the file but is ignored,
@@ -286,16 +304,35 @@ impl Config {
     pub fn allow_and_save(&mut self, vid: u16, pid: u16) -> Result<()> {
         let _span = log::span("config allow and save");
         let path = path().context("no config directory available")?;
-        self.allow_and_save_to(&path, vid, pid)
+        self.add_id_and_save_to(&path, |config| &mut config.allow, vid, pid)
     }
 
-    /// The file's device keys (hand edits win, as in `save_to`) plus this device in `allow`,
-    /// written with the rest of the in-memory config; `save_to` itself would drop the new entry.
-    fn allow_and_save_to(&mut self, path: &Path, vid: u16, pid: u16) -> Result<()> {
+    /// Adds a device the owner declined in the new-device popup to `declined`, in memory and in
+    /// the file, so it is never offered again.
+    #[cfg_attr(
+        not(windows),
+        allow(dead_code, reason = "only Windows offers new devices")
+    )]
+    pub fn decline_and_save(&mut self, vid: u16, pid: u16) -> Result<()> {
+        let _span = log::span("config decline and save");
+        let path = path().context("no config directory available")?;
+        self.add_id_and_save_to(&path, |config| &mut config.declined, vid, pid)
+    }
+
+    /// The file's device keys (hand edits win, as in `save_to`) plus this device in the `list`
+    /// key, written with the rest of the in-memory config; `save_to` itself would drop the new
+    /// entry.
+    fn add_id_and_save_to(
+        &mut self,
+        path: &Path,
+        list: fn(&mut Self) -> &mut Vec<String>,
+        vid: u16,
+        pid: u16,
+    ) -> Result<()> {
         if let Ok(text) = fs::read_to_string(path) {
             self.take_device_lists(Self::parse(&text));
         }
-        if !self.allow_device(vid, pid) {
+        if !add_id(list(self), vid, pid) {
             return Ok(());
         }
         write_atomically(path, &self.to_toml())
@@ -310,15 +347,23 @@ impl Config {
         }
         write_atomically(path, &config.to_toml())
     }
+}
 
-    /// Adds `VID:PID` unless an entry already names the device; other entries stay as they are.
-    fn allow_device(&mut self, vid: u16, pid: u16) -> bool {
-        if self.allowed().contains(&(vid, pid)) {
-            return false;
-        }
-        self.allow.push(format!("{vid:04X}:{pid:04X}"));
-        true
+/// The entries of an id list that are valid `VID:PID`.
+fn valid_ids(entries: &[String]) -> Vec<(u16, u16)> {
+    entries
+        .iter()
+        .filter_map(|entry| parse_vid_pid(entry).ok())
+        .collect()
+}
+
+/// Adds `VID:PID` unless an entry already names the device; other entries stay as they are.
+fn add_id(entries: &mut Vec<String>, vid: u16, pid: u16) -> bool {
+    if valid_ids(entries).contains(&(vid, pid)) {
+        return false;
     }
+    entries.push(format!("{vid:04X}:{pid:04X}"));
+    true
 }
 
 /// Writes `<path>.<pid>.tmp` then renames it over `path`, so a crash never leaves a half-written
@@ -671,11 +716,29 @@ mod tests {
                 kind: "mouse".into(),
                 connection: "receiver".into(),
             }],
+            detect_new_devices: false,
             refresh_on_battery: true,
             check_updates: false,
             notified_update: Some("0.2.0".into()),
         };
         assert_eq!(Config::parse(&config.to_toml()), config);
+    }
+
+    #[test]
+    fn detect_new_devices_defaults_on_and_round_trips() {
+        // Old files, and a wrongly typed value, keep detection on.
+        for text in ["refresh_seconds = 300", "detect_new_devices = \"no\""] {
+            assert!(Config::parse(text).detect_new_devices, "{text}");
+        }
+        assert!(
+            Config::default()
+                .to_toml()
+                .contains("detect_new_devices = true")
+        );
+        let off = Config::parse("detect_new_devices = false");
+        assert!(!off.detect_new_devices);
+        assert!(off.to_toml().contains("detect_new_devices = false"));
+        assert_eq!(Config::parse(&off.to_toml()), off);
     }
 
     #[test]
@@ -848,15 +911,15 @@ mod tests {
     }
 
     #[test]
-    fn allow_device_adds_once_and_keeps_others() {
+    fn add_id_adds_once_and_keeps_others() {
         let mut config = Config::parse("allow = [\"junk\", \"3837:6011\"]\n");
-        assert!(config.allow_device(0x373B, 0x1216));
-        assert!(!config.allow_device(0x373B, 0x1216));
+        assert!(add_id(&mut config.allow, 0x373B, 0x1216));
+        assert!(!add_id(&mut config.allow, 0x373B, 0x1216));
         assert_eq!(config.allow, ["junk", "3837:6011", "373B:1216"]);
 
         // An entry in another case already names the device.
         let mut lower = Config::parse("allow = [\"373b:1216\"]\n");
-        assert!(!lower.allow_device(0x373B, 0x1216));
+        assert!(!add_id(&mut lower.allow, 0x373B, 0x1216));
         assert_eq!(lower.allow, ["373b:1216"]);
     }
 
@@ -873,8 +936,13 @@ mod tests {
         // Added by hand while the app runs; the in-memory list does not have it.
         fs::write(&path, "allow = [\"373B:1204\"]\nrefresh_seconds = 300\n").unwrap();
 
-        config.allow_and_save_to(&path, 0x373B, 0x1216).unwrap();
-        config.allow_and_save_to(&path, 0x373B, 0x1216).unwrap();
+        let allow: fn(&mut Config) -> &mut Vec<String> = |config| &mut config.allow;
+        config
+            .add_id_and_save_to(&path, allow, 0x373B, 0x1216)
+            .unwrap();
+        config
+            .add_id_and_save_to(&path, allow, 0x373B, 0x1216)
+            .unwrap();
         // A later ordinary save keeps the entry.
         config.save_to(&path).unwrap();
         let loaded = Config::parse(&fs::read_to_string(&path).unwrap());
@@ -883,6 +951,39 @@ mod tests {
         assert_eq!(config.allow, ["373B:1204", "373B:1216"]);
         assert_eq!(loaded.allow, ["373B:1204", "373B:1216"]);
         assert_eq!(loaded.refresh_seconds, Some(300));
+    }
+
+    #[test]
+    fn decline_and_save_adds_once_and_keeps_hand_edits() {
+        let root = std::env::temp_dir().join(format!(
+            "juicetray-decline-save-test-{}",
+            std::process::id()
+        ));
+        let path = root.join("config.toml");
+        let mut config = Config::default();
+        config.save_to(&path).unwrap();
+        // Declined by hand in another casing while the app runs.
+        fs::write(
+            &path,
+            "declined = [\"391d:2001\"]
+allow = [\"373B:1204\"]
+",
+        )
+        .unwrap();
+
+        let declined: fn(&mut Config) -> &mut Vec<String> = |config| &mut config.declined;
+        config
+            .add_id_and_save_to(&path, declined, 0x3554, 0xFA09)
+            .unwrap();
+        config
+            .add_id_and_save_to(&path, declined, 0x391D, 0x2001)
+            .unwrap();
+        let loaded = Config::parse(&fs::read_to_string(&path).unwrap());
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(loaded.declined, ["391d:2001", "3554:FA09"]);
+        assert_eq!(loaded.declined_ids(), [(0x391D, 0x2001), (0x3554, 0xFA09)]);
+        assert_eq!(loaded.allow, ["373B:1204"]);
     }
 
     #[test]
@@ -978,7 +1079,9 @@ mod tests {
         config.save_to(&path).unwrap();
         let saved = Config::parse(&fs::read_to_string(&path).unwrap());
         // Adding to `allow` keeps the file's other device keys too.
-        config.allow_and_save_to(&path, 0x373B, 0x1216).unwrap();
+        config
+            .add_id_and_save_to(&path, |config| &mut config.allow, 0x373B, 0x1216)
+            .unwrap();
         let added = Config::parse(&fs::read_to_string(&path).unwrap());
         fs::remove_dir_all(&root).unwrap();
 
