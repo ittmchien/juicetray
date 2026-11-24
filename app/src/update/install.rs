@@ -8,6 +8,7 @@ use super::check::EXE_ASSET;
 
 /// The running exe's real file: winget starts a portable app through a link in its Links folder,
 /// and the swap must replace the target, not the link.
+#[cfg(windows)]
 pub fn running_exe() -> std::io::Result<PathBuf> {
     std::env::current_exe().and_then(std::fs::canonicalize)
 }
