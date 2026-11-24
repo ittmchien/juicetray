@@ -17,14 +17,17 @@ Juicetray only reads the value the OS stores; it sends nothing to the device.
 | Device | Kind | Status |
 |---|---|---|
 | MCHOSE V9 Pro 2 (`3837:6011` dongle) | Headset | Confirmed |
-| ATK X1 SE (`373B:1216` dongle) | Mouse | Protocol known, waiting for a probe |
-| ATK N9 Ultra (`373B:1204` dongle) | Headset | Protocol known; close ATK HUB, then probe |
-| VGN Dragonfly 3 Master+ (`391D:1A05` receiver) | Mouse | Receiver answers; turn the mouse on, then probe |
-| AULA F75 (`3554:FA09` 2.4G receiver) | Keyboard | Protocol known; probe while the keyboard is on 2.4G |
+| ATK X1 SE (`373B:1216` dongle) | Mouse | Confirmed |
+| ATK N9 Ultra (`373B:1204` dongle) | Headset | Protocol known; close ATK HUB, then check |
+| VGN Dragonfly 3 Master+ (`391D:1A05` receiver) | Mouse | Receiver answers; turn the mouse on, then check |
+| AULA F75 (`3554:FA09` 2.4G receiver) | Keyboard | Protocol known; check while the keyboard is on 2.4G |
 
 Only confirmed devices are queried automatically. An unconfirmed device is listed but never
-touched until you confirm it with `juicetray probe <VID:PID>` and add it to `allow` in the
-config file:
+touched until you confirm it from the menu: open the device's submenu and click **Check battery
+now**. That sends one battery query (same floor and safety rules as every other query). A valid
+reply adds the device to `allow` in the config file and puts it on the strip; otherwise the
+menu line shows why (no reply, busy: close the vendor app, wait N s, or the invalid reply).
+`allow` can still be edited by hand:
 
 ```toml
 allow = ["373B:1204"]
@@ -48,8 +51,9 @@ query reaches those devices. A receiver or cable device is queried at most once 
 
 - `juicetray scan` lists Bluetooth, HID and serial devices, writes nothing, and redacts serial
   numbers.
-- `juicetray probe <VID:PID>` sends one read-only battery query to a supported device and
-  prints the raw reply. Close the vendor app first; probe refuses within the device's floor.
+- `juicetray probe <VID:PID>` (optional; the menu's Check battery now confirms a device without
+  it) sends one read-only battery query to a supported device and prints the raw reply. Close
+  the vendor app first; probe refuses within the device's floor.
 - `juicetray probe --online <VID:PID>` sends the read-only Compx online-status query instead
   (Compx devices only, same floor) and prints `online: yes/no/unsupported`.
 - `juicetray listen <VID:PID> [seconds]` only reads (1-60 s, default 10) and prints each

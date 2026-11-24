@@ -8,8 +8,10 @@ use ui_model::{DeviceKind, DeviceView, EMPTY_MENU_TEXT, IconChoice, IconColor, m
 use crate::config::{Config, LOW_CHOICES, REFRESH_CHOICES, hex, parse_color};
 use crate::interval::format_interval;
 use crate::login::LoginState;
+use crate::receivers::can_check;
 
 const CHOICE_OFF: &str = "off";
+const CHECK_BATTERY_TEXT: &str = "Check battery now";
 const CUSTOM_REFRESH_ID: &str = "auto:custom";
 const ICON_AUTO: &str = "auto";
 const SECONDS_PER_MINUTE: u32 = 60;
@@ -49,6 +51,8 @@ pub enum MenuAction {
     PickSvg(String),
     SetColor(String, IconColor),
     CustomColor(String),
+    /// One battery query for an unconfirmed receiver; carries only the row id.
+    CheckBattery(String),
     ToggleShowDisconnected,
     ToggleStartAtLogin,
     Quit,
@@ -130,6 +134,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         "pct" => Some(MenuAction::TogglePercent(device)),
         "svg" => Some(MenuAction::PickSvg(device)),
         "ccolor" => Some(MenuAction::CustomColor(device)),
+        "check" => Some(MenuAction::CheckBattery(device)),
         "icon" => {
             let (value, device) = rest.split_once(':')?;
             let icon = if value == ICON_AUTO {
@@ -215,19 +220,21 @@ fn device_entry(device: &DeviceView, config: &Config, now: SystemTime) -> MenuEn
     let id = &device.id;
     let options = config.display_options(id);
     let is_svg = matches!(options.icon, IconChoice::Svg(_));
-    MenuEntry::submenu(
-        menu_line(device, now),
-        vec![
-            MenuEntry::check(
-                format!("hide:{id}"),
-                "Show on strip",
-                !config.is_hidden(id, &device.name),
-            ),
-            MenuEntry::check(format!("pct:{id}"), "Show percentage", options.show_percent),
-            MenuEntry::submenu("Icon", icon_entries(id, &options.icon)),
-            MenuEntry::submenu("Icon colour", color_entries(id, options.color, is_svg)),
-        ],
-    )
+    // Only a receiver held back for want of confirmation offers the one-query check.
+    let check = can_check(id, &config.allowed())
+        .then(|| MenuEntry::item(&format!("check:{id}"), CHECK_BATTERY_TEXT));
+    let mut children: Vec<MenuEntry> = check.into_iter().collect();
+    children.extend([
+        MenuEntry::check(
+            format!("hide:{id}"),
+            "Show on strip",
+            !config.is_hidden(id, &device.name),
+        ),
+        MenuEntry::check(format!("pct:{id}"), "Show percentage", options.show_percent),
+        MenuEntry::submenu("Icon", icon_entries(id, &options.icon)),
+        MenuEntry::submenu("Icon colour", color_entries(id, options.color, is_svg)),
+    ]);
+    MenuEntry::submenu(menu_line(device, now), children)
 }
 
 /// Built-in icons then `Custom SVG…`, the current choice ticked.
@@ -500,6 +507,50 @@ mod tests {
             assert!(action_for(id).is_some(), "{id}");
             assert!(id.ends_with(MAC_ID), "{id}");
         }
+    }
+
+    #[test]
+    fn check_battery_id_roundtrips() {
+        for id in ["usb-373b-1216", MAC_ID] {
+            assert_eq!(
+                action_for(&format!("check:{id}")),
+                Some(MenuAction::CheckBattery(id.to_owned()))
+            );
+        }
+    }
+
+    #[test]
+    fn check_battery_only_for_unconfirmed_not_allowed_receivers() {
+        let row = |id: &str| DeviceView {
+            id: id.to_owned(),
+            path: Path::Dongle,
+            ..device(id, Level::NoData("x".into()), true)
+        };
+        let check_ids = |config: &Config| -> Vec<String> {
+            let devices = [
+                row("usb-391d-1a05"),
+                row("usb-3837-6011"),
+                device("Headset", Level::Percent(50), true),
+            ];
+            entries(&devices, config, LoginState::Disabled)
+                .iter()
+                .flat_map(|e| &e.children)
+                .filter(|e| e.text == "Check battery now")
+                .filter_map(|e| e.id.clone())
+                .collect()
+        };
+        let ids = check_ids(&Config::default());
+        assert_eq!(ids, ["check:usb-391d-1a05"]);
+        assert_eq!(
+            action_for(&ids[0]),
+            Some(MenuAction::CheckBattery("usb-391d-1a05".into()))
+        );
+
+        let allowed = Config {
+            allow: vec!["391d:1a05".into()],
+            ..Config::default()
+        };
+        assert!(check_ids(&allowed).is_empty());
     }
 
     #[test]

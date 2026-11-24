@@ -89,7 +89,8 @@ pub const KNOWN: &[KnownDevice] = &[
         0x1216,
         "ATK X1 SE (dongle)",
         Family::AtkBitmouse,
-        false,
+        // Confirmed 2026-11-24: probe read 53 %, matching the owner's vendor app.
+        true,
         false,
         false,
     ),
@@ -182,7 +183,7 @@ mod tests {
                 .map(|d| (d.vid, d.pid))
                 .collect()
         };
-        assert_eq!(ids(|d| d.confirmed), [(0x3837, 0x6011)]);
+        assert_eq!(ids(|d| d.confirmed), [(0x3837, 0x6011), (0x373B, 0x1216)]);
         assert_eq!(ids(|d| d.cable), [(0x3837, 0x6010), (0x373B, 0x11CA)]);
     }
 
@@ -210,7 +211,7 @@ mod tests {
     fn x1_se_dongle_is_bitmouse_and_dragonfly_receiver_is_compx() {
         let dongle = known(0x373B, 0x1216).expect("X1 SE dongle is in the table");
         assert_eq!(dongle.family, Family::AtkBitmouse);
-        assert!(!dongle.confirmed);
+        assert!(dongle.confirmed);
         let receiver = known(0x391D, 0x1A05).expect("Dragonfly receiver is in the table");
         assert_eq!(receiver.family, Family::Compx);
         assert!(!receiver.cable && !receiver.confirmed);

@@ -44,6 +44,8 @@ const COLOR_HINT: &str = "That is not a colour. Type #RRGGBB, for example #FF880
 
 pub enum UserEvent {
     Devices(Vec<DeviceView>),
+    /// A menu check got a valid reading from this unconfirmed `VID:PID`.
+    Allowed(u16, u16),
     Menu(MenuEvent),
     #[cfg(target_os = "macos")]
     ThemeChanged,
@@ -177,6 +179,12 @@ impl App {
     fn handle(&mut self, event: UserEvent) -> ControlFlow {
         match event {
             UserEvent::Devices(devices) => self.on_devices(devices),
+            // Config writes stay on this thread, so a check never races a settings save.
+            UserEvent::Allowed(vid, pid) => {
+                if let Err(error) = self.config.allow_and_save(vid, pid) {
+                    eprintln!("saving config failed: {error:#}");
+                }
+            }
             UserEvent::Menu(event) => {
                 // muda flips check items on click; a forced rebuild restores the config's ticks.
                 self.shown_entries.clear();
@@ -216,6 +224,8 @@ impl App {
         }
         self.devices = devices;
         self.has_read = true;
+        // Hand edits change `allow` in the file; the menu's "Check battery now" items follow it.
+        self.config.allow = Config::load().allow;
     }
 
     fn on_action(&mut self, action: MenuAction) {
@@ -225,6 +235,7 @@ impl App {
             MenuAction::CustomRefresh => self.prompt_refresh(),
             MenuAction::PickSvg(id) => self.pick_svg(&id),
             MenuAction::CustomColor(id) => self.prompt_color(&id),
+            MenuAction::CheckBattery(id) => self.tell_worker(Command::CheckReceiver(id)),
             MenuAction::SetLow(percent) => {
                 self.config.low_battery_percent = percent;
                 self.save_config();

@@ -2,9 +2,12 @@
 //! from the device lists alone, only confirmed or allowed devices are ever opened, one door per
 //! read, at most one query per such device, never past the query floor.
 //! Every decision before the first I/O is the pure `plan`; `view` turns the outcome into a row.
+//! An owner-asked check (`check_receiver`) is the same plan for one device with its
+//! confirmation gate passed; nothing else is relaxed.
 
+use std::collections::HashMap;
 use std::path::Path as FsPath;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use door::{Door, HidCollection, Inventory, SerialEntry};
 use protocol::{Decoded, Family, KNOWN, KnownDevice, Link, PickError, Reading, known};
@@ -12,7 +15,7 @@ use ui_model::{DeviceKind, DeviceView, Level, Path};
 
 use crate::query::{
     ClaimError, TargetError, claim_query, floor_check, open_hid_target, open_serial_target,
-    pick_hid, pick_port,
+    pick_hid, pick_port, wait_text,
 };
 use crate::query_log::{self, QueryLog};
 
@@ -32,6 +35,8 @@ enum Outcome {
     NeedsCapture,
     Unconfirmed,
     Waiting,
+    /// An owner-asked check within the floor: nothing was sent; the time left.
+    TooSoon(Duration),
     Busy,
     Ambiguous,
     NotRecorded,
@@ -52,64 +57,209 @@ enum Step {
 /// Rows for every known device that is plugged in, in `KNOWN` order. `allow` lists the
 /// unconfirmed devices the owner lets the worker query. Presence comes from the device lists
 /// alone; only the openable devices are listed in depth (and opened), so every other one is
-/// never touched.
-pub fn read_receivers(allow: &[(u16, u16)], now: SystemTime) -> Vec<DeviceView> {
+/// never touched. `notes` holds the last failed check per row id.
+pub fn read_receivers(
+    allow: &[(u16, u16)],
+    notes: &CheckNotes,
+    now: SystemTime,
+) -> Vec<DeviceView> {
     let ids: Vec<(u16, u16)> = KNOWN
         .iter()
         .map(|device| (device.vid, device.pid))
         .collect();
     let present = door::present(&ids);
-    let openable: Vec<(u16, u16)> = present
-        .iter()
-        .copied()
-        .filter(|&(vid, pid)| known(vid, pid).is_some_and(|d| gate(d, allow).is_ok()))
-        .collect();
-    // An empty filter would list every device, so with nothing openable no inventory is made.
-    let inventory = (!openable.is_empty()).then(|| door::inventory(&openable));
-    if let Some(inventory) = &inventory {
-        for error in &inventory.errors {
-            eprintln!("receivers: {error}");
-        }
-    }
+    let inventory = list_in_depth(&openable(&present, allow));
     let log_path = query_log::path();
-    let log = log_path
-        .as_deref()
-        .map(QueryLog::load_from)
-        .unwrap_or_default();
+    let log = load_log(log_path.as_deref());
     let mut door = Door::new(READ_BUDGET);
 
     KNOWN
         .iter()
         .filter(|device| present.contains(&(device.vid, device.pid)))
         .map(|device| {
+            let outcome = attempt(
+                device,
+                allow,
+                inventory.as_ref(),
+                (&log, log_path.as_deref()),
+                &mut door,
+                now,
+            );
             let (vid, pid) = (device.vid, device.pid);
-            let gate_result = gate(device, allow);
-            let pick = match &inventory {
-                Some(inv) if gate_result.is_ok() => {
-                    pick_channel(&inv.hid, &inv.serial, &inv.errors, device)
-                        .map_err(|error| target_outcome(&error))
-                }
-                _ => Ok(()),
-            };
-            let floor = floor_check(&log, device.family, vid, pid, now);
-            let outcome = match (
-                plan(gate_result, pick, floor, door.writes_left() > 0),
-                &inventory,
-            ) {
-                (Step::Show(outcome), _) => outcome,
-                (Step::Query, Some(inv)) => query(inv, device, &mut door, log_path.as_deref()),
-                // `Query` is planned only for an openable device, which is in the inventory.
-                (Step::Query, None) => Outcome::NoChannel,
-            };
-            view(
+            let row = view(
                 device,
                 outcome,
                 log.reading(vid, pid),
                 log.last(vid, pid),
                 now,
-            )
+            );
+            with_check_note(row, outcome, notes)
         })
         .collect()
+}
+
+/// The last failed check's reason per row id, kept by the worker for this session.
+pub type CheckNotes = HashMap<String, String>;
+
+/// An owner-asked check's result: the device's new row, and the `VID:PID` to add to `allow`
+/// (only a valid reading of a device not confirmed in the table).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Checked {
+    pub row: DeviceView,
+    pub confirm: Option<(u16, u16)>,
+    outcome: Outcome,
+}
+
+impl Checked {
+    /// A reading clears the device's note and a failed query sets it (latest wins); a floor
+    /// wait sent nothing, so the earlier note stays.
+    pub fn remember(&self, notes: &mut CheckNotes) {
+        match self.outcome {
+            Outcome::Reading(..) => {
+                notes.remove(&self.row.id);
+            }
+            Outcome::TooSoon(_) | Outcome::Waiting => {}
+            failed => {
+                notes.insert(self.row.id.clone(), reason(failed));
+            }
+        }
+    }
+}
+
+/// A device the gate still holds back shows its last check's reason as the note, so a read
+/// does not hide why the check failed.
+fn with_check_note(mut row: DeviceView, outcome: Outcome, notes: &CheckNotes) -> DeviceView {
+    if outcome == Outcome::Unconfirmed
+        && let Some(note) = notes.get(&row.id)
+    {
+        row.note = Some(note.clone());
+    }
+    row
+}
+
+/// One query for the known device whose row id is `id`, on the owner's click: the same plan,
+/// floor, claim and door as a read, with the confirmation gate passed for this id alone, and
+/// only this device listed in depth. `None` for an id outside `KNOWN` or an unplugged device.
+pub fn check_receiver(id: &str, allow: &[(u16, u16)], now: SystemTime) -> Option<Checked> {
+    let (device, allow) = check_scope(id, allow)?;
+    let present = door::present(&[(device.vid, device.pid)]);
+    if present.is_empty() {
+        return None;
+    }
+    let inventory = list_in_depth(&openable(&present, &allow));
+    let log_path = query_log::path();
+    let log = load_log(log_path.as_deref());
+    let mut door = Door::new(1);
+    let outcome = attempt(
+        device,
+        &allow,
+        inventory.as_ref(),
+        (&log, log_path.as_deref()),
+        &mut door,
+        now,
+    );
+    // The owner clicked, so a floor wait shows the time left instead of the waiting text.
+    let floor = floor_check(&log, device.family, device.vid, device.pid, now);
+    let outcome = match (outcome, floor) {
+        (Outcome::Waiting, Err(ClaimError::Wait(left))) => Outcome::TooSoon(left),
+        (outcome, _) => outcome,
+    };
+    let (vid, pid) = (device.vid, device.pid);
+    Some(checked(
+        device,
+        outcome,
+        log.reading(vid, pid),
+        log.last(vid, pid),
+        now,
+    ))
+}
+
+/// Whether the menu offers "Check battery now" for the row `id`: a known device the gate holds
+/// back only for want of confirmation.
+pub fn can_check(id: &str, allow: &[(u16, u16)]) -> bool {
+    known_receiver(id).is_some_and(|device| gate(device, allow) == Err(Outcome::Unconfirmed))
+}
+
+/// The known device behind the row id `id` and `allow` with that device added, so the gate
+/// opens for it alone; `None` for any other id.
+fn check_scope(id: &str, allow: &[(u16, u16)]) -> Option<(&'static KnownDevice, Vec<(u16, u16)>)> {
+    let device = known_receiver(id)?;
+    let mut allow = allow.to_vec();
+    allow.push((device.vid, device.pid));
+    Some((device, allow))
+}
+
+fn known_receiver(id: &str) -> Option<&'static KnownDevice> {
+    KNOWN.iter().find(|device| row_id(device) == id)
+}
+
+/// The row of a check; only a valid reading confirms, and only a device the table leaves
+/// unconfirmed.
+fn checked(
+    device: &KnownDevice,
+    outcome: Outcome,
+    stored: Option<(Reading, SystemTime)>,
+    last_query: Option<SystemTime>,
+    now: SystemTime,
+) -> Checked {
+    let is_reading = matches!(outcome, Outcome::Reading(..));
+    Checked {
+        row: view(device, outcome, stored, last_query, now),
+        confirm: (is_reading && !device.confirmed).then_some((device.vid, device.pid)),
+        outcome,
+    }
+}
+
+/// The present devices the gate lets through; only these are listed in depth and opened.
+fn openable(present: &[(u16, u16)], allow: &[(u16, u16)]) -> Vec<(u16, u16)> {
+    present
+        .iter()
+        .copied()
+        .filter(|&(vid, pid)| known(vid, pid).is_some_and(|d| gate(d, allow).is_ok()))
+        .collect()
+}
+
+/// The in-depth listing of `openable`. An empty filter would list every device, so with
+/// nothing openable no inventory is made.
+fn list_in_depth(openable: &[(u16, u16)]) -> Option<Inventory> {
+    let inventory = (!openable.is_empty()).then(|| door::inventory(openable))?;
+    for error in &inventory.errors {
+        eprintln!("receivers: {error}");
+    }
+    Some(inventory)
+}
+
+fn load_log(log_path: Option<&FsPath>) -> QueryLog {
+    log_path.map(QueryLog::load_from).unwrap_or_default()
+}
+
+/// One device's outcome: the pure plan first, then the query only when the plan allows it.
+fn attempt(
+    device: &KnownDevice,
+    allow: &[(u16, u16)],
+    inventory: Option<&Inventory>,
+    (log, log_path): (&QueryLog, Option<&FsPath>),
+    door: &mut Door,
+    now: SystemTime,
+) -> Outcome {
+    let gate_result = gate(device, allow);
+    let pick = match inventory {
+        Some(inv) if gate_result.is_ok() => {
+            pick_channel(&inv.hid, &inv.serial, &inv.errors, device)
+                .map_err(|error| target_outcome(&error))
+        }
+        _ => Ok(()),
+    };
+    let floor = floor_check(log, device.family, device.vid, device.pid, now);
+    match (
+        plan(gate_result, pick, floor, door.writes_left() > 0),
+        inventory,
+    ) {
+        (Step::Show(outcome), _) => outcome,
+        (Step::Query, Some(inv)) => query(inv, device, door, log_path),
+        // `Query` is planned only for an openable device, which is in the inventory.
+        (Step::Query, None) => Outcome::NoChannel,
+    }
 }
 
 /// Whether the device may be opened at all: it must have a known working command, and be
@@ -244,16 +394,14 @@ fn query(
     outcome
 }
 
-/// The menu text for an outcome.
-fn reason(device: &KnownDevice, outcome: Outcome) -> String {
+/// The menu text for an outcome; an unconfirmed device points at its menu action.
+fn reason(outcome: Outcome) -> String {
     match outcome {
         Outcome::NoChannel => "no battery channel (needs a capture)".to_owned(),
         Outcome::NeedsCapture => "not supported yet: needs a capture".to_owned(),
-        Outcome::Unconfirmed => format!(
-            "unconfirmed: run juicetray probe {:04X}:{:04X}",
-            device.vid, device.pid
-        ),
+        Outcome::Unconfirmed => "unconfirmed: use Check battery now".to_owned(),
         Outcome::Waiting => "waiting for the next query".to_owned(),
+        Outcome::TooSoon(left) => wait_text(left),
         Outcome::Busy => "busy: close the vendor app".to_owned(),
         Outcome::Ambiguous => "several matches: unplug the extra receiver".to_owned(),
         Outcome::NotRecorded => "could not record the query time".to_owned(),
@@ -262,6 +410,11 @@ fn reason(device: &KnownDevice, outcome: Outcome) -> String {
         Outcome::Invalid(why) => why.to_owned(),
         Outcome::Reading(..) => ASLEEP_TEXT.to_owned(),
     }
+}
+
+/// The row id the menu and config use for a receiver or cable device.
+fn row_id(device: &KnownDevice) -> String {
+    format!("usb-{:04x}-{:04x}", device.vid, device.pid)
 }
 
 fn kind(family: Family) -> DeviceKind {
@@ -293,7 +446,7 @@ fn view(
         (_, None) => (None, now, false),
     };
     let row = DeviceView {
-        id: format!("usb-{:04x}-{:04x}", device.vid, device.pid),
+        id: row_id(device),
         name: device.name.to_owned(),
         kind: kind(device.family),
         path: if device.cable {
@@ -301,7 +454,7 @@ fn view(
         } else {
             Path::Dongle
         },
-        level: Level::NoData(reason(device, outcome)),
+        level: Level::NoData(reason(outcome)),
         charging: false,
         connected: true,
         updated_at,
@@ -318,7 +471,7 @@ fn view(
                 format!("{ASLEEP_TEXT}; {LAST_QUERY_FAILED_TEXT}")
             }
             Outcome::Waiting => LAST_QUERY_FAILED_TEXT.to_owned(),
-            _ => reason(device, outcome),
+            _ => reason(outcome),
         })
     } else {
         reading.asleep.then(|| ASLEEP_TEXT.to_owned())
@@ -378,19 +531,153 @@ mod tests {
 
     #[test]
     fn gate_blocks_capture_first_then_unconfirmed() {
-        let x1 = device(0x373B, 0x1216);
+        let vgn = device(0x391D, 0x1A05);
         // A device that needs a capture stays closed even when the owner allows it.
         let needs_capture = KnownDevice {
             needs_capture: true,
-            ..*x1
+            ..*vgn
         };
         let id = (needs_capture.vid, needs_capture.pid);
         assert_eq!(gate(&needs_capture, &[id]), Err(Outcome::NeedsCapture));
         assert_eq!(gate(&needs_capture, &[]), Err(Outcome::NeedsCapture));
-        assert_eq!(gate(x1, &[]), Err(Outcome::Unconfirmed));
-        assert_eq!(gate(x1, &[(0x3837, 0x6011)]), Err(Outcome::Unconfirmed));
-        assert_eq!(gate(x1, &[(0x373B, 0x1216)]), Ok(()));
+        assert_eq!(gate(vgn, &[]), Err(Outcome::Unconfirmed));
+        assert_eq!(gate(vgn, &[(0x3837, 0x6011)]), Err(Outcome::Unconfirmed));
+        assert_eq!(gate(vgn, &[(0x391D, 0x1A05)]), Ok(()));
         assert_eq!(gate(mchose(), &[]), Ok(()));
+        // X1 SE is confirmed in the table, so it passes with no allow entry.
+        assert_eq!(gate(device(0x373B, 0x1216), &[]), Ok(()));
+    }
+
+    const VGN: (u16, u16) = (0x391D, 0x1A05);
+
+    #[test]
+    fn check_is_offered_only_for_unconfirmed_not_allowed_devices() {
+        assert!(can_check("usb-391d-1a05", &[]));
+        assert!(can_check("usb-391d-1a05", &[(0x3837, 0x6011)]));
+        assert!(!can_check("usb-391d-1a05", &[VGN]));
+        assert!(!can_check("usb-3837-6011", &[]));
+        assert!(!can_check("usb-373b-1216", &[]));
+        assert!(!can_check("bt:a4-c3-f0-11-22-33", &[]));
+        assert!(!can_check("usb-046d-c52b", &[]));
+        assert!(!can_check("usb-391D-1A05", &[]));
+    }
+
+    #[test]
+    fn forced_check_opens_only_its_own_device() {
+        let all: Vec<(u16, u16)> = KNOWN.iter().map(|d| (d.vid, d.pid)).collect();
+        let (vgn, allow) = check_scope("usb-391d-1a05", &[]).unwrap();
+        assert_eq!((vgn.vid, vgn.pid), VGN);
+        let opened_unconfirmed: Vec<(u16, u16)> = openable(&all, &allow)
+            .into_iter()
+            .filter(|&(vid, pid)| !device(vid, pid).confirmed)
+            .collect();
+        assert_eq!(opened_unconfirmed, [VGN]);
+        assert_eq!(
+            gate(device(0x3554, 0xFA09), &allow),
+            Err(Outcome::Unconfirmed)
+        );
+        assert_eq!(plan(gate(vgn, &allow), Ok(()), Ok(()), true), Step::Query);
+
+        // Nothing else is relaxed: the floor, the pick and a missing capture still refuse.
+        let wait = Err(ClaimError::Wait(Duration::from_secs(4)));
+        assert_eq!(
+            plan(gate(vgn, &allow), Ok(()), wait, true),
+            Step::Show(Outcome::Waiting)
+        );
+        assert_eq!(
+            plan(gate(vgn, &allow), Err(Outcome::Busy), Ok(()), true),
+            Step::Show(Outcome::Busy)
+        );
+        let needs_capture = KnownDevice {
+            needs_capture: true,
+            ..*vgn
+        };
+        assert_eq!(gate(&needs_capture, &allow), Err(Outcome::NeedsCapture));
+
+        assert!(check_scope("bt:a4-c3-f0-11-22-33", &[]).is_none());
+        assert!(check_scope("usb-046d-c52b", &[]).is_none());
+    }
+
+    #[test]
+    fn only_a_valid_reading_confirms_a_check() {
+        let vgn = device(VGN.0, VGN.1);
+        let good = checked(
+            vgn,
+            Outcome::Reading(reading(80, false, false), at(NOW)),
+            None,
+            None,
+            at(NOW),
+        );
+        assert_eq!(good.confirm, Some(VGN));
+        assert_eq!(good.row.level, Level::Percent(80));
+
+        let failures = [
+            (Outcome::NoReply, "no reply (asleep? move it)"),
+            (Outcome::Busy, "busy: close the vendor app"),
+            (Outcome::TooSoon(Duration::from_millis(6_500)), "wait 7 s"),
+            (
+                Outcome::Invalid("unknown power state"),
+                "unknown power state",
+            ),
+        ];
+        for (outcome, text) in failures {
+            let row = checked(vgn, outcome, None, None, at(NOW));
+            assert_eq!(row.confirm, None, "{outcome:?}");
+            assert_eq!(row.row.level, Level::NoData(text.into()), "{outcome:?}");
+
+            // A stored reading keeps its percent and carries the reason as the note.
+            let stored = Some((reading(61, false, false), at(NOW - 300)));
+            let row = checked(vgn, outcome, stored, None, at(NOW));
+            assert_eq!(row.confirm, None, "{outcome:?}");
+            assert_eq!(row.row.note.as_deref(), Some(text), "{outcome:?}");
+        }
+
+        // A table-confirmed device needs no `allow` entry.
+        let mchose_reading = Outcome::Reading(reading(50, false, false), at(NOW));
+        assert_eq!(
+            checked(mchose(), mchose_reading, None, None, at(NOW)).confirm,
+            None
+        );
+    }
+
+    #[test]
+    fn failed_check_reason_survives_later_reads() {
+        let vgn = device(VGN.0, VGN.1);
+        let id = "usb-391d-1a05";
+        let mut notes = CheckNotes::new();
+        let check = |outcome| checked(vgn, outcome, None, None, at(NOW));
+        let later_read = |notes: &CheckNotes| {
+            let row = view(vgn, Outcome::Unconfirmed, None, None, at(NOW));
+            with_check_note(row, Outcome::Unconfirmed, notes)
+        };
+
+        check(Outcome::NoReply).remember(&mut notes);
+        let row = later_read(&notes);
+        assert_eq!(
+            row.level,
+            Level::NoData("unconfirmed: use Check battery now".into())
+        );
+        assert_eq!(row.note.as_deref(), Some("no reply (asleep? move it)"));
+
+        // The latest failure wins; a floor wait sent nothing and keeps it.
+        check(Outcome::Busy).remember(&mut notes);
+        check(Outcome::TooSoon(Duration::from_secs(5))).remember(&mut notes);
+        assert_eq!(
+            later_read(&notes).note.as_deref(),
+            Some("busy: close the vendor app")
+        );
+
+        // A note only rides on a device the gate still holds back.
+        let queried = view(vgn, Outcome::NoReply, None, None, at(NOW));
+        assert_eq!(
+            with_check_note(queried, Outcome::NoReply, &notes).note,
+            None
+        );
+
+        // A valid reading clears it.
+        check(Outcome::Reading(reading(80, false, false), at(NOW))).remember(&mut notes);
+        assert!(!notes.contains_key(id));
+        assert_eq!(later_read(&notes).note, None);
     }
 
     #[test]
@@ -600,7 +887,7 @@ mod tests {
             assert!(row.charging, "{outcome:?}");
             assert_eq!(row.updated_at, at(NOW - 300), "{outcome:?}");
             assert!(row.stale, "{outcome:?}");
-            assert_eq!(row.note, Some(reason(mchose(), outcome)), "{outcome:?}");
+            assert_eq!(row.note, Some(reason(outcome)), "{outcome:?}");
             assert!(row.connected);
         }
     }
@@ -609,11 +896,7 @@ mod tests {
     fn failure_without_stored_reading_is_no_data() {
         for outcome in FAILURES {
             let row = view(mchose(), outcome, None, None, at(NOW));
-            assert_eq!(
-                row.level,
-                Level::NoData(reason(mchose(), outcome)),
-                "{outcome:?}"
-            );
+            assert_eq!(row.level, Level::NoData(reason(outcome)), "{outcome:?}");
             assert_eq!(row.note, None, "{outcome:?}");
             assert!(!row.stale, "{outcome:?}");
         }
@@ -621,12 +904,12 @@ mod tests {
 
     #[test]
     fn reason_texts() {
-        let vgn = device(0x3554, 0xFA09);
-        let text = |outcome| reason(vgn, outcome);
+        let text = reason;
         assert_eq!(
             text(Outcome::Unconfirmed),
-            "unconfirmed: run juicetray probe 3554:FA09"
+            "unconfirmed: use Check battery now"
         );
+        assert_eq!(text(Outcome::TooSoon(Duration::from_secs(4))), "wait 4 s");
         assert_eq!(
             text(Outcome::NoChannel),
             "no battery channel (needs a capture)"

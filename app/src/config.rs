@@ -12,7 +12,7 @@ use crate::interval::INTERVAL_SECONDS;
 /// Auto-refresh quick choices in seconds; any other value in `INTERVAL_SECONDS` is a custom one.
 pub const REFRESH_CHOICES: [Option<u32>; 6] =
     [None, Some(60), Some(120), Some(300), Some(600), Some(1800)];
-pub const LOW_CHOICES: [Option<u8>; 5] = [None, Some(10), Some(15), Some(20), Some(30)];
+pub const LOW_CHOICES: [Option<u8>; 6] = [None, Some(5), Some(10), Some(15), Some(20), Some(30)];
 
 const DEFAULT_REFRESH_SECONDS: Option<u32> = Some(120);
 const DEFAULT_LOW_PERCENT: Option<u8> = Some(15);
@@ -171,6 +171,24 @@ impl Config {
         self.save_to(&path)
     }
 
+    /// Adds a device the owner confirmed from the menu to `allow`, in memory and in the file.
+    pub fn allow_and_save(&mut self, vid: u16, pid: u16) -> Result<()> {
+        let path = path().context("no config directory available")?;
+        self.allow_and_save_to(&path, vid, pid)
+    }
+
+    /// The file's `allow` (hand edits win, as in `save_to`) plus this device, written with the
+    /// rest of the in-memory config; `save_to` itself would drop the new entry.
+    fn allow_and_save_to(&mut self, path: &Path, vid: u16, pid: u16) -> Result<()> {
+        if let Ok(text) = fs::read_to_string(path) {
+            self.allow = Self::parse(&text).allow;
+        }
+        if !self.allow_device(vid, pid) {
+            return Ok(());
+        }
+        write_atomically(path, &self.to_toml())
+    }
+
     /// `allow` is owner-edited while the app runs, so the file's value wins over the in-memory one.
     fn save_to(&self, path: &Path) -> Result<()> {
         let mut config = self.clone();
@@ -178,6 +196,15 @@ impl Config {
             config.allow = Self::parse(&text).allow;
         }
         write_atomically(path, &config.to_toml())
+    }
+
+    /// Adds `VID:PID` unless an entry already names the device; other entries stay as they are.
+    fn allow_device(&mut self, vid: u16, pid: u16) -> bool {
+        if self.allowed().contains(&(vid, pid)) {
+            return false;
+        }
+        self.allow.push(format!("{vid:04X}:{pid:04X}"));
+        true
     }
 }
 
@@ -408,6 +435,44 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
 
         assert_eq!(loaded.allow, ["373B:1204"]);
+    }
+
+    #[test]
+    fn allow_device_adds_once_and_keeps_others() {
+        let mut config = Config::parse("allow = [\"junk\", \"3837:6011\"]\n");
+        assert!(config.allow_device(0x373B, 0x1216));
+        assert!(!config.allow_device(0x373B, 0x1216));
+        assert_eq!(config.allow, ["junk", "3837:6011", "373B:1216"]);
+
+        // An entry in another case already names the device.
+        let mut lower = Config::parse("allow = [\"373b:1216\"]\n");
+        assert!(!lower.allow_device(0x373B, 0x1216));
+        assert_eq!(lower.allow, ["373b:1216"]);
+    }
+
+    #[test]
+    fn allow_and_save_keeps_hand_edits_and_other_keys() {
+        let root =
+            std::env::temp_dir().join(format!("juicetray-allow-save-test-{}", std::process::id()));
+        let path = root.join("config.toml");
+        let mut config = Config {
+            refresh_seconds: Some(300),
+            ..Config::default()
+        };
+        config.save_to(&path).unwrap();
+        // Added by hand while the app runs; the in-memory list does not have it.
+        fs::write(&path, "allow = [\"373B:1204\"]\nrefresh_seconds = 300\n").unwrap();
+
+        config.allow_and_save_to(&path, 0x373B, 0x1216).unwrap();
+        config.allow_and_save_to(&path, 0x373B, 0x1216).unwrap();
+        // A later ordinary save keeps the entry.
+        config.save_to(&path).unwrap();
+        let loaded = Config::parse(&fs::read_to_string(&path).unwrap());
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(config.allow, ["373B:1204", "373B:1216"]);
+        assert_eq!(loaded.allow, ["373B:1204", "373B:1216"]);
+        assert_eq!(loaded.refresh_seconds, Some(300));
     }
 
     #[test]
