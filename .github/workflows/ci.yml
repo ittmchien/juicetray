@@ -101,4 +101,6 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           target_commitish: ${{ github.sha }}
+          # The release text comes from RELEASE_NOTES.md, written on dev before the release PR.
+          body_path: RELEASE_NOTES.md
           files: dist/*
