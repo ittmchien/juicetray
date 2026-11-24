@@ -4,8 +4,10 @@
 
 # Juicetray
 
-**Battery levels of your wireless mice, headsets and keyboards, right next to the clock —
-without each vendor's software.**
+**Don't get caught low on juice.** 🧃
+
+Juicetray keeps the battery ("juice") of your wireless mice, headsets and keyboards in your
+tray — right next to the clock, without each vendor's software.
 
 [![Release](https://img.shields.io/github/v/release/ittmchien/juicetray?include_prereleases&label=release)](https://github.com/ittmchien/juicetray/releases)
 [![CI](https://github.com/ittmchien/juicetray/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/ittmchien/juicetray/actions/workflows/ci.yml)
@@ -117,6 +119,13 @@ nothing but the version in the User-Agent (`juicetray/<version>`).
 `SHA256SUMS.txt`, swaps it in and restarts; if anything fails, the old exe stays in place. When
 the exe's folder is not writable it opens the download page instead.
 
+## ⚠️ Known issues
+
+- **"Windows protected your PC"** — the exe is not code-signed yet: **More info → Run anyway**.
+  Installing with winget (package under review) will avoid the warning.
+- Some receivers answer only while the device is awake (VGN Dragonfly 3 Master+), and some
+  keyboards report no level over a cable (AULA F75).
+
 ## 🛡️ Safety
 
 - Only read-only battery and online-status queries, one at a time, with no retry loops.
@@ -124,6 +133,9 @@ the exe's folder is not writable it opens the download page instead.
 - Bluetooth levels come from what Windows already stores, so no query reaches those devices.
 - A receiver or cable device is queried at most once per 10 s (mice) or 5 min (headsets),
   whatever the auto-refresh setting.
+- While a brand's app is open (MCHOSE HUB, ATK HUB, VGN VHUB), Juicetray pauses that brand's
+  receivers and cables: nothing is opened or sent, and the menu keeps the last level marked
+  `paused (… open)`. Reading resumes on the next refresh after the app closes.
 
 ## 🩺 Diagnostics
 
@@ -154,11 +166,46 @@ git clone -b dev https://github.com/ittmchien/juicetray
 A model is one line in its brand's file under `crates/protocol/devices/` (for example
 `atk.toml`), with `vid` and `pid` as 4 hex digits, `name`, `family`, `kind` (`mouse`, `headset`,
 `keyboard`, `gamepad` or `other`), `connection` (`receiver` or `cable`) and `verified`. `family`
-is one of `Compx`, `Report13`, `Mchose`, `AtkSerial`, `AtkBitmouse`, `VgnKc2`, `RongYuanF7` or
-`Driveall`; a model that needs another protocol needs a new family in code first. The build checks every line (unknown family or kind,
-bad hex, duplicate VID:PID) and fails with the file and entry named. Open the pull request against
-`dev` with `verified = false`; a model becomes `verified = true` only after a hardware check
-(`juicetray probe <VID:PID>` read the same level as the vendor app).
+is one of `Compx`, `Report13`, `Mchose`, `AtkSerial`, `AtkBitmouse`, `VgnKc2`, `RongYuanF7`,
+`Driveall` or `Generic`; a model whose protocol none of them covers can often be a `Generic` row
+(below), otherwise it needs a new family in code first. The build checks every line (unknown
+family or kind, bad hex, duplicate VID:PID) and fails with the file and entry named. Open the pull
+request against `dev` with `verified = false`; a model becomes `verified = true` only after a
+hardware check (`juicetray probe <VID:PID>` read the same level as the vendor app).
+
+#### Generic rows
+
+A `Generic` row carries its own query instead of family code. Its extra fields are all required
+(except the last three) and are refused on any other family:
+
+- `usage_page`, `usage`: the vendor collection, 4 hex digits (`FF00`–`FFFF` only; page `008C`
+  and system collections are refused).
+- `report`: `output` (answered by an input report) or `feature` (SetFeature, then GetFeature of
+  the same id); `report_bytes`: that report's size exactly as `juicetray scan` prints it
+  (`out 05:33` → 33).
+- `request`: the one frame sent, hex, report id first, at most 64 bytes and no longer than the
+  report; it is zero-padded to the report.
+- `reply_prefix`: hex bytes a valid reply starts with, report id first (an output row needs a
+  byte after the id); other replies are ignored.
+- `level_byte`: index of the level in the reply, report id = byte 0 (also when the id is 0).
+- optional `charging_byte` + `charging_mask` (together; masked nonzero = charging) and `scale`
+  (default 100; percent = raw × 100 / scale, anything over 100 is rejected).
+
+```toml
+{ vid = "1234", pid = "5678", name = "Example 2.4G dongle", family = "Generic", kind = "mouse", connection = "receiver", verified = false, usage_page = "FF00", usage = "0001", report = "output", report_bytes = 33, request = "05 01", reply_prefix = "05 81", level_byte = 3, charging_byte = 4, charging_mask = 0x01 }
+```
+
+The example is made up: it sends output report `05 01` (padded to 33 bytes) once per query and
+reads byte 3 of an input report starting `05 81` as the percent. Like ATK serial, RongYuan F7
+and Driveall, a Generic row is used only for its own catalogue VID:PID; a custom device or the
+Add device window never gets it. One fixed frame per query, no retries, 10 s query floor.
+
+**From a device report to a row.** The Add device report lists every collection of the device
+as `scan` prints it: `HID if 2 FF00:0001 vendor · Usb · in 05:33 out 05:33` gives `usage_page`,
+`usage`, `report` and `report_bytes`, and the descriptor hex below it lets a reviewer check the
+sizes. The request and the reply layout come from what the brand's app sends and receives (a
+USB capture); `level_byte` is the reply byte that equals the percent the brand's app shows.
+Pick a request the brand's app sends only to read status, never a setter.
 
 ## 📜 License
 

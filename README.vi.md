@@ -4,8 +4,10 @@
 
 # Juicetray
 
-**Xem mức pin chuột, tai nghe, bàn phím không dây ngay cạnh đồng hồ trên taskbar — không cần
-cài phần mềm của từng hãng.**
+**Đừng để chuột, tai nghe cạn pin giữa trận.** 🧃
+
+Juicetray hiện mức pin chuột, tai nghe, bàn phím không dây ngay cạnh đồng hồ trên taskbar — không
+cần cài phần mềm của từng hãng.
 
 [![Release](https://img.shields.io/github/v/release/ittmchien/juicetray?include_prereleases&label=release)](https://github.com/ittmchien/juicetray/releases)
 [![CI](https://github.com/ittmchien/juicetray/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/ittmchien/juicetray/actions/workflows/ci.yml)
@@ -116,6 +118,13 @@ tối đa một lần (mở lại app cũng không kiểm thêm). Tắt bằng m
 khởi động lại; lỗi ở bất kỳ bước nào thì exe cũ được giữ nguyên. Nếu thư mục chứa exe không ghi
 được thì app mở trang tải về thay vào đó.
 
+## ⚠️ Lỗi đã biết
+
+- **"Windows protected your PC"** — exe chưa được ký số: bấm **More info → Run anyway**. Cài bằng
+  winget (gói đang chờ duyệt) sẽ không bị cảnh báo này.
+- Một số receiver chỉ trả lời khi thiết bị đang thức (VGN Dragonfly 3 Master+), và một số bàn phím
+  không báo mức pin khi cắm cáp (AULA F75).
+
 ## 🛡️ An toàn
 
 - Chỉ gửi lệnh hỏi pin và hỏi trạng thái kết nối dạng chỉ-đọc, mỗi lần một lệnh, không lặp lại
@@ -124,6 +133,9 @@ khởi động lại; lỗi ở bất kỳ bước nào thì exe cũ được gi
 - Mức pin Bluetooth lấy từ dữ liệu Windows đã lưu, nên không có lệnh nào tới các thiết bị đó.
 - Thiết bị qua receiver hoặc cáp được hỏi tối đa 10 giây một lần (chuột) hoặc 5 phút một lần
   (tai nghe), bất kể cài đặt auto-refresh.
+- Khi app của một hãng đang mở (MCHOSE HUB, ATK HUB, VGN VHUB), Juicetray tạm dừng receiver và
+  cáp của hãng đó: không mở, không gửi gì, menu giữ mức pin cuối kèm `paused (… open)`. Lần
+  refresh đầu tiên sau khi app đóng sẽ đọc lại bình thường.
 
 ## 🩺 Chẩn đoán
 
@@ -155,10 +167,47 @@ Mỗi model là một dòng trong file của hãng đó dưới `crates/protocol
 `atk.toml`), gồm `vid` và `pid` (4 chữ số hex), `name`, `family`, `kind` (`mouse`, `headset`,
 `keyboard`, `gamepad` hoặc `other`), `connection` (`receiver` hoặc `cable`) và `verified`.
 `family` là một trong `Compx`, `Report13`, `Mchose`, `AtkSerial`, `AtkBitmouse`, `VgnKc2`,
-`RongYuanF7` hoặc `Driveall`; model cần giao thức khác thì phải thêm family vào code trước. Bước build kiểm từng dòng (family hoặc kind
-lạ, hex sai, VID:PID trùng) và báo lỗi kèm tên file và vị trí dòng. Mở pull request vào `dev`
-với `verified = false`; model chỉ được đổi thành `verified = true` sau khi kiểm trên thiết bị
-thật (`juicetray probe <VID:PID>` đọc ra cùng mức pin với app của hãng).
+`RongYuanF7`, `Driveall` hoặc `Generic`; model có giao thức không family nào ở trên hỗ trợ thường
+có thể là một dòng `Generic` (bên dưới), nếu không thì phải thêm family vào code trước. Bước build
+kiểm từng dòng (family hoặc kind lạ, hex sai, VID:PID trùng) và báo lỗi kèm tên file và vị trí
+dòng. Mở pull request vào `dev` với `verified = false`; model chỉ được đổi thành
+`verified = true` sau khi kiểm trên thiết bị thật (`juicetray probe <VID:PID>` đọc ra cùng mức pin
+với app của hãng).
+
+#### Dòng Generic
+
+Một dòng `Generic` tự mang lệnh hỏi của nó thay vì code của family. Các trường thêm đều bắt buộc
+(trừ ba trường cuối) và bị từ chối ở mọi family khác:
+
+- `usage_page`, `usage`: collection riêng của hãng, 4 chữ số hex (chỉ `FF00`–`FFFF`; page `008C`
+  và các collection hệ thống bị từ chối).
+- `report`: `output` (trả lời bằng một input report) hoặc `feature` (SetFeature, rồi GetFeature
+  cùng id); `report_bytes`: kích thước report đó, đúng như `juicetray scan` in ra
+  (`out 05:33` → 33).
+- `request`: frame duy nhất được gửi, dạng hex, report id đứng đầu, tối đa 64 byte và không dài
+  hơn report; phần thiếu được đệm số 0 cho đủ report.
+- `reply_prefix`: các byte hex mà phản hồi hợp lệ bắt đầu bằng, report id đứng đầu (dòng `output`
+  cần ít nhất một byte sau id); phản hồi khác bị bỏ qua.
+- `level_byte`: vị trí byte mức pin trong phản hồi, report id = byte 0 (kể cả khi id là 0).
+- tuỳ chọn `charging_byte` + `charging_mask` (đi cùng nhau; kết quả AND khác 0 = đang sạc) và
+  `scale` (mặc định 100; phần trăm = giá trị thô × 100 / scale, trên 100 bị loại).
+
+```toml
+{ vid = "1234", pid = "5678", name = "Example 2.4G dongle", family = "Generic", kind = "mouse", connection = "receiver", verified = false, usage_page = "FF00", usage = "0001", report = "output", report_bytes = 33, request = "05 01", reply_prefix = "05 81", level_byte = 3, charging_byte = 4, charging_mask = 0x01 }
+```
+
+Ví dụ trên là bịa: mỗi lần hỏi nó gửi output report `05 01` (đệm đủ 33 byte) một lần và đọc
+byte 3 của input report bắt đầu bằng `05 81` làm phần trăm. Giống ATK serial, RongYuan F7 và
+Driveall, dòng Generic chỉ dùng cho đúng VID:PID của nó trong catalogue; thiết bị custom hay cửa
+sổ Add device không bao giờ dùng nó. Mỗi lần hỏi một frame cố định, không lặp lại, khoảng chờ
+10 giây.
+
+**Từ báo cáo thiết bị tới một dòng.** Báo cáo của Add device liệt kê mọi collection của thiết bị
+như `scan` in ra: `HID if 2 FF00:0001 vendor · Usb · in 05:33 out 05:33` cho ra `usage_page`,
+`usage`, `report` và `report_bytes`, còn đoạn hex descriptor bên dưới giúp người review kiểm lại
+kích thước. Lệnh hỏi và cấu trúc phản hồi lấy từ những gì app của hãng gửi và nhận (bắt gói
+USB); `level_byte` là byte phản hồi bằng đúng phần trăm app của hãng hiển thị. Chọn lệnh mà app
+của hãng chỉ gửi để đọc trạng thái, không bao giờ là lệnh ghi cài đặt.
 
 ## 📜 Giấy phép
 
