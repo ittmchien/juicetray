@@ -10,6 +10,7 @@ use tray_icon::menu::{Icon, IconMenuItem};
 use tray_icon::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use ui_model::{
     DeviceKind, DeviceView, EMPTY_MENU_TEXT, IconChoice, IconColor, group_label, menu_line,
+    needs_charge,
 };
 
 use crate::config::{Config, HIDE_OFFLINE_CHOICES, LOW_CHOICES, REFRESH_CHOICES, hex, parse_color};
@@ -348,8 +349,16 @@ fn device_entry(device: &DeviceView, config: &Config, now: SystemTime) -> MenuEn
             color_entries(id, (options.color_light, options.color_dark), is_svg),
         ),
     ]);
-    MenuEntry::submenu(menu_line(device, now), children)
+    // A native menu cannot colour text, so a low device says it in words.
+    let mut line = menu_line(device, now);
+    if needs_charge(device, config.low_battery_percent) {
+        line.push_str(NEEDS_CHARGE_TEXT);
+    }
+    MenuEntry::submenu(line, children)
 }
+
+/// Tail of a device line at or below the low-battery threshold.
+const NEEDS_CHARGE_TEXT: &str = " · needs charge";
 
 /// Lead of a device line under its group header (two em spaces: menus keep them, unlike tabs).
 const GROUP_INDENT: &str = "\u{2003}\u{2003}";
@@ -1292,6 +1301,34 @@ mod tests {
         assert_eq!(alpha(1, 1), 0, "the corner of the square is empty");
         assert_eq!(alpha(10, 12), 0, "below the long stroke is empty");
         assert!(rgba.chunks(4).all(|px| px[0] == 0xF0));
+    }
+
+    #[test]
+    fn low_device_line_says_needs_charge() {
+        let config = Config {
+            low_battery_percent: Some(20),
+            ..Config::default()
+        };
+        let mut charging = device("Charging", Level::Percent(10), true);
+        charging.charging = true;
+        let devices = [
+            device("Low", Level::Percent(20), true),
+            device("Fine", Level::Percent(21), true),
+            device("Away", Level::Percent(5), false),
+            charging,
+        ];
+        let entries = entries(&devices, &config, LoginState::Disabled);
+        let line = |name: &str| {
+            let prefix = format!("{name} — ");
+            let entry = entries
+                .iter()
+                .find(|e| e.text.trim_start().contains(&prefix));
+            entry.unwrap().text.clone()
+        };
+        assert!(line("Low").ends_with(NEEDS_CHARGE_TEXT));
+        for quiet in ["Fine", "Away", "Charging"] {
+            assert!(!line(quiet).contains("needs charge"), "{quiet}");
+        }
     }
 
     #[test]

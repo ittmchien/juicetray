@@ -108,6 +108,15 @@ fn placeholder() -> Segment {
     }
 }
 
+/// The device shows the red low style: online, not charging, at or below the low threshold
+/// (`DEFAULT_LOW_PERCENT` while the alert is off).
+pub fn needs_charge(device: &DeviceView, low_threshold: Option<u8>) -> bool {
+    let threshold = low_threshold.unwrap_or(DEFAULT_LOW_PERCENT);
+    device
+        .shown_percent()
+        .is_some_and(|percent| style_for(device, percent, threshold) == SegmentStyle::Low)
+}
+
 fn style_for(device: &DeviceView, percent: u8, threshold: u8) -> SegmentStyle {
     // An offline reading is dimmed, never alarming.
     if device.is_offline() {
@@ -171,6 +180,19 @@ mod tests {
         assert_eq!(style_of(percent("a", 15), Some(15)), SegmentStyle::Low);
         assert_eq!(style_of(percent("a", 16), Some(15)), SegmentStyle::Medium);
         assert_eq!(style_of(percent("a", 15), None), SegmentStyle::Low);
+    }
+
+    #[test]
+    fn needs_charge_matches_the_red_style() {
+        assert!(needs_charge(&percent("a", 15), Some(15)));
+        assert!(!needs_charge(&percent("a", 16), Some(15)));
+        assert!(needs_charge(&percent("a", 10), None));
+        let mut charging = percent("a", 5);
+        charging.charging = true;
+        assert!(!needs_charge(&charging, Some(15)));
+        let mut away = percent("a", 5);
+        away.connected = false;
+        assert!(!needs_charge(&away, Some(15)));
     }
 
     #[test]

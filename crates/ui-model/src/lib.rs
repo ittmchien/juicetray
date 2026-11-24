@@ -12,5 +12,5 @@ pub use device::{
     sort_by_level, sort_grouped,
 };
 pub use display::{DisplayOptions, IconChoice, IconColor};
-pub use strip::{Segment, SegmentStyle, build_strip};
+pub use strip::{Segment, SegmentStyle, build_strip, needs_charge};
 pub use text::{EMPTY_MENU_TEXT, menu_line, tooltip_compact};
