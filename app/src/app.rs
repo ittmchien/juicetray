@@ -93,7 +93,6 @@ impl UserEvent {
             #[cfg(windows)]
             Self::Taskbar(taskbar::Signal::ThemeChanged) => "Taskbar::ThemeChanged",
             #[cfg(windows)]
-            Self::Taskbar(taskbar::Signal::Fullscreen(_)) => "Taskbar::Fullscreen",
             #[cfg(windows)]
             Self::Taskbar(taskbar::Signal::PowerChanged) => "Taskbar::PowerChanged",
             #[cfg(windows)]
@@ -185,8 +184,6 @@ struct App {
     #[cfg(target_os = "macos")]
     shown_entries: Vec<MenuEntry>,
     svgs: SvgCache,
-    /// A fullscreen app has the screen: the worker reads nothing until it closes.
-    fullscreen: bool,
     power_source: PowerSource,
     /// For the confirm dialog's thread, which answers with a `UserEvent`.
     #[cfg(windows)]
@@ -228,7 +225,6 @@ impl App {
         #[cfg(windows)]
         let taskbar = new_taskbar_strip(proxy.clone());
         let power = PowerState {
-            fullscreen: pause::fullscreen_now(),
             source: pause::current_power_source(),
             refresh_on_battery: config.refresh_on_battery,
         };
@@ -248,7 +244,6 @@ impl App {
             #[cfg(target_os = "macos")]
             shown_entries: Vec::new(),
             svgs: SvgCache::default(),
-            fullscreen: power.fullscreen,
             power_source: power.source,
             #[cfg(windows)]
             proxy,
@@ -301,11 +296,6 @@ impl App {
             // The theme changed; `apply` below re-reads it and sends the strip again.
             #[cfg(windows)]
             UserEvent::Taskbar(taskbar::Signal::ThemeChanged) => {}
-            #[cfg(windows)]
-            UserEvent::Taskbar(taskbar::Signal::Fullscreen(on)) => {
-                self.on_fullscreen(on);
-                return ControlFlow::Wait;
-            }
             #[cfg(windows)]
             UserEvent::Taskbar(taskbar::Signal::PowerChanged) => {
                 self.on_power_changed();
@@ -440,7 +430,6 @@ impl App {
     /// The inputs the worker's pause rules read.
     fn power_state(&self) -> PowerState {
         PowerState {
-            fullscreen: self.fullscreen,
             source: self.power_source,
             refresh_on_battery: self.config.refresh_on_battery,
         }
@@ -722,13 +711,6 @@ impl App {
 
 #[cfg(windows)]
 impl App {
-    /// A fullscreen app opened or closed; the worker pauses or, on close, reads once.
-    fn on_fullscreen(&mut self, on: bool) {
-        log::trace(format_args!("game mode {}", if on { "on" } else { "off" }));
-        self.fullscreen = on;
-        self.send_power();
-    }
-
     /// The power status changed; the worker hears of it only when AC or battery actually flipped.
     fn on_power_changed(&mut self) {
         let source = pause::current_power_source();

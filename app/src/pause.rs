@@ -1,5 +1,5 @@
-//! When the app may touch devices: game mode (a fullscreen app has the screen) and a laptop on
-//! battery. The rules are pure; only the two start-up probes read the OS.
+//! When the app may touch devices: a laptop on battery pauses the auto-refresh timer. The rules
+//! are pure; only the start-up probe reads the OS.
 
 #[cfg(any(windows, test))]
 use std::time::{Duration, Instant};
@@ -26,48 +26,24 @@ pub enum PowerSource {
     Battery,
 }
 
-/// Everything that decides whether a read may start.
+/// Everything that decides whether the auto-refresh timer may read.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PowerState {
-    /// A fullscreen app (game, video, presentation) has the screen.
-    pub fullscreen: bool,
     pub source: PowerSource,
     /// The owner allows auto-refresh on battery.
     pub refresh_on_battery: bool,
 }
 
-/// What asks for a read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Trigger {
-    /// The auto-refresh timer.
-    Timer,
-    /// Someone asked: app start, Refresh now, menu open, device plug-in, wake from sleep.
-    Requested,
-}
-
-/// Whether a read caused by `trigger` may touch devices. Game mode blocks every trigger; battery
-/// power blocks only the timer, so a click or a plug-in still gets an answer.
-pub fn allows_read(state: PowerState, trigger: Trigger) -> bool {
-    if state.fullscreen {
-        return false;
-    }
-    match trigger {
-        Trigger::Requested => true,
-        // A laptop on battery waits for AC unless the owner allowed battery refresh.
-        Trigger::Timer => state.source != PowerSource::Battery || state.refresh_on_battery,
-    }
+/// Whether the auto-refresh timer may read: a laptop on battery waits for AC unless the owner
+/// allowed battery refresh. Requested reads (start, Refresh now, menu open, plug-in) always run.
+pub fn timer_may_read(state: PowerState) -> bool {
+    state.source != PowerSource::Battery || state.refresh_on_battery
 }
 
 /// Whether going from `before` to `after` ends a pause and so earns one immediate read: the
-/// fullscreen app closed, or the laptop is back on AC. Turning the battery option on only
-/// restarts the timer.
+/// laptop is back on AC. Turning the battery option on only restarts the timer.
 pub fn reads_on_change(before: PowerState, after: PowerState) -> bool {
-    if after.fullscreen {
-        return false;
-    }
-    let game_ended = before.fullscreen;
-    let back_on_ac = before.source == PowerSource::Battery && after.source != PowerSource::Battery;
-    game_ended || back_on_ac
+    before.source == PowerSource::Battery && after.source != PowerSource::Battery
 }
 
 /// The power source from `GetSystemPowerStatus` fields: `ACLineStatus` 0 = unplugged, 1 =
@@ -108,99 +84,40 @@ pub fn current_power_source() -> PowerSource {
     PowerSource::NoBattery
 }
 
-/// Whether a fullscreen app, D3D game or presentation has the screen right now; the appbar
-/// notification only reports changes, so this gives the state at start.
-#[cfg(windows)]
-pub fn fullscreen_now() -> bool {
-    use windows::Win32::UI::Shell::{
-        QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
-        SHQueryUserNotificationState,
-    };
-
-    // SAFETY: the call takes no arguments.
-    matches!(
-        unsafe { SHQueryUserNotificationState() },
-        Ok(QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE)
-    )
-}
-
-/// Game mode is Windows only.
-#[cfg(not(windows))]
-pub fn fullscreen_now() -> bool {
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn state(fullscreen: bool, source: PowerSource, refresh_on_battery: bool) -> PowerState {
+    fn state(source: PowerSource, refresh_on_battery: bool) -> PowerState {
         PowerState {
-            fullscreen,
             source,
             refresh_on_battery,
         }
     }
 
     #[test]
-    fn fullscreen_blocks_every_trigger() {
-        for source in [
-            PowerSource::NoBattery,
-            PowerSource::Ac,
-            PowerSource::Battery,
-        ] {
-            for allow in [false, true] {
-                let state = state(true, source, allow);
-                assert!(!allows_read(state, Trigger::Timer));
-                assert!(!allows_read(state, Trigger::Requested));
-            }
-        }
-    }
-
-    #[test]
-    fn battery_blocks_only_the_timer_unless_allowed() {
-        let paused = state(false, PowerSource::Battery, false);
-        assert!(!allows_read(paused, Trigger::Timer));
-        assert!(allows_read(paused, Trigger::Requested));
-
-        let allowed = state(false, PowerSource::Battery, true);
-        assert!(allows_read(allowed, Trigger::Timer));
+    fn battery_blocks_the_timer_unless_allowed() {
+        assert!(!timer_may_read(state(PowerSource::Battery, false)));
+        assert!(timer_may_read(state(PowerSource::Battery, true)));
     }
 
     #[test]
     fn ac_and_machines_without_a_battery_never_pause() {
         for source in [PowerSource::Ac, PowerSource::NoBattery] {
-            let state = state(false, source, false);
-            assert!(allows_read(state, Trigger::Timer));
-            assert!(allows_read(state, Trigger::Requested));
+            assert!(timer_may_read(state(source, false)));
         }
     }
 
     #[test]
     fn leaving_a_pause_reads_once() {
-        let game = state(true, PowerSource::Ac, false);
-        let idle = state(false, PowerSource::Ac, false);
-        assert!(reads_on_change(game, idle));
-        // Game over on a laptop that is still on battery: the stored values are old, read.
-        assert!(reads_on_change(
-            state(true, PowerSource::Battery, false),
-            state(false, PowerSource::Battery, false)
-        ));
-        assert!(reads_on_change(
-            state(false, PowerSource::Battery, false),
-            idle
-        ));
-        // Entering a pause, staying put and the battery option itself read nothing.
-        assert!(!reads_on_change(idle, game));
+        let idle = state(PowerSource::Ac, false);
+        assert!(reads_on_change(state(PowerSource::Battery, false), idle));
+        // Staying put, entering battery and the battery option itself read nothing.
         assert!(!reads_on_change(idle, idle));
+        assert!(!reads_on_change(idle, state(PowerSource::Battery, false)));
         assert!(!reads_on_change(
-            state(false, PowerSource::Battery, false),
-            state(false, PowerSource::Battery, true)
-        ));
-        // Back on AC while a game is running waits for the game to end.
-        assert!(!reads_on_change(
-            state(true, PowerSource::Battery, false),
-            game
+            state(PowerSource::Battery, false),
+            state(PowerSource::Battery, true)
         ));
     }
 

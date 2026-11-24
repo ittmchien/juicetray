@@ -9,7 +9,7 @@ use ui_model::DeviceView;
 use crate::app::UserEvent;
 use crate::config::Config;
 use crate::log;
-use crate::pause::{self, PowerState, Trigger};
+use crate::pause::{self, PowerState};
 use crate::receivers::{CheckNotes, check_receiver, read_receivers};
 
 pub enum Command {
@@ -17,7 +17,7 @@ pub enum Command {
     SetInterval(Option<u32>),
     /// One battery query for the receiver row with this id, asked from the menu.
     CheckReceiver(String),
-    /// Game mode or the power source changed; a pause ending earns one read.
+    /// The power source or the battery option changed; a pause ending earns one read.
     SetPower(PowerState),
 }
 
@@ -30,7 +30,7 @@ pub enum ReadScope {
     Single,
 }
 
-/// Starts the worker; it reads at once (unless game mode forbids it), then on `RefreshNow` and
+/// Starts the worker; it reads at once, then on `RefreshNow` and
 /// every `interval` seconds while `power` lets the timer run.
 pub fn spawn_worker(
     proxy: EventLoopProxy<UserEvent>,
@@ -55,7 +55,7 @@ fn run(
     mut power: PowerState,
 ) {
     crate::efficiency::enter_background_mode();
-    let mut read_now = pause::allows_read(power, Trigger::Requested);
+    let mut read_now = true;
     // The last Bluetooth list that was read; a failed Bluetooth read sends it again.
     let mut bluetooth_devices = Vec::new();
     // The last receiver rows, so a check replaces only its own row.
@@ -92,11 +92,11 @@ fn run(
         }
         read_now = true;
         // While the timer may not read, the wait has no timeout and only a command wakes it.
-        let timer = interval.filter(|_| pause::allows_read(power, Trigger::Timer));
+        let timer = interval.filter(|_| pause::timer_may_read(power));
         let command = wait(commands, timer);
         log::trace(format_args!("worker woke: {}", wake_reason(&command)));
         match command {
-            Ok(Command::RefreshNow) => read_now = pause::allows_read(power, Trigger::Requested),
+            Ok(Command::RefreshNow) => {}
             Err(RecvTimeoutError::Timeout) => {}
             Ok(Command::SetInterval(seconds)) => {
                 interval = seconds;
@@ -109,10 +109,6 @@ fn run(
             }
             Ok(Command::CheckReceiver(id)) => {
                 read_now = false;
-                if !pause::allows_read(power, Trigger::Requested) {
-                    log::trace(format_args!("check receiver skipped: game mode"));
-                    continue;
-                }
                 let _span = log::span_fmt(format_args!("check receiver {id}"));
                 // An unknown or unplugged id is ignored.
                 let Some(checked) =
