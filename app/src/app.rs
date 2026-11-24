@@ -66,9 +66,10 @@ const COLOR_HINT: &str = "That is not a colour. Type #RRGGBB, for example #FF880
 
 #[cfg(windows)]
 const BATTERY_CONFIRM_TITLE: &str = "Refresh on battery power";
+/// Task dialog text: the question as main instruction, the cost as content.
 #[cfg(windows)]
-const BATTERY_CONFIRM: &str =
-    "Auto-refresh while on battery power uses more of your laptop's battery. Turn it on?";
+const BATTERY_CONFIRM: &str = "Turn on auto-refresh on battery power?\n\nAuto-refresh while on \
+                               battery power uses more of your laptop's battery.";
 #[cfg(windows)]
 const BATTERY_CONFIRM_OK: &str = "Turn on";
 

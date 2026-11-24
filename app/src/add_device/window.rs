@@ -29,7 +29,7 @@ use super::flow::{Effect, Event, Flow, Input, Inspection, KINDS, TryOutcome, Vie
 use crate::app::UserEvent;
 use crate::config::Config;
 use crate::dialog::{
-    BUTTON_CLASS, COMBO_BOX_CLASS, EDIT_CLASS, STATIC_CLASS, TemplateWords, dialog_style,
+    self, BUTTON_CLASS, COMBO_BOX_CLASS, EDIT_CLASS, STATIC_CLASS, TemplateWords, dialog_style,
 };
 use crate::plug::{self, Id, Registration};
 use crate::refresh::Command;
@@ -61,27 +61,33 @@ const FORM_IDS: [u16; 6] = [
 /// `SS_NOPREFIX`: a device name's `&` shows as itself.
 const NO_PREFIX: i32 = 0x0080;
 
-/// Layout in dialog units: `[x, y, width, height]`; a combo box's height includes its list.
-const DIALOG_RECT: [i16; 4] = [0, 0, 260, 153];
+/// Layout in dialog units `[x, y, width, height]` per the Windows guidelines: 7 DLU margins,
+/// 4 DLU between related controls, 7 DLU above the button row; a combo box's height includes
+/// its list. The list, the custom-device form and the details never show together, so each
+/// starts right under the message.
+const DIALOG_RECT: [i16; 4] = [0, 0, 260, 155];
 const MESSAGE_RECT: [i16; 4] = [7, 7, 246, 48];
-const LIST_RECT: [i16; 4] = [7, 58, 246, 90];
-const KIND_LABEL_RECT: [i16; 4] = [7, 78, 44, 10];
-const KIND_RECT: [i16; 4] = [54, 76, 100, 90];
-const CONNECTION_LABEL_RECT: [i16; 4] = [7, 96, 44, 10];
-const CONNECTION_RECT: [i16; 4] = [54, 94, 199, 60];
-const NAME_LABEL_RECT: [i16; 4] = [7, 114, 44, 10];
-const NAME_RECT: [i16; 4] = [54, 112, 199, 14];
-const DETAILS_RECT: [i16; 4] = [7, 58, 246, 68];
-const PRIMARY_RECT: [i16; 4] = [55, 132, 62, 14];
-/// The primary button over the [Alt] button's room, for a label `PRIMARY_RECT` cannot hold.
-const PRIMARY_WIDE_RECT: [i16; 4] = [55, 132, 146, 14];
-/// Longest primary label `PRIMARY_RECT` holds ("Try in 10 s").
+const LIST_RECT: [i16; 4] = [7, 59, 246, 90];
+/// Form rows are 14 high, 4 apart; labels sit 2 DLU down so their text lines up with the field's.
+const KIND_LABEL_RECT: [i16; 4] = [7, 61, 46, 8];
+const KIND_RECT: [i16; 4] = [57, 59, 100, 90];
+const CONNECTION_LABEL_RECT: [i16; 4] = [7, 79, 46, 8];
+const CONNECTION_RECT: [i16; 4] = [57, 77, 196, 60];
+const NAME_LABEL_RECT: [i16; 4] = [7, 97, 46, 8];
+const NAME_RECT: [i16; 4] = [57, 95, 196, 14];
+const DETAILS_RECT: [i16; 4] = [7, 59, 246, 68];
+/// The button row: [Close] at the right margin, the shown buttons right-aligned left of it.
+const BUTTON_Y: i16 = 134;
+const BUTTON_HEIGHT: i16 = 14;
+const BUTTON_GAP: i16 = 4;
+const BUTTON_WIDTH: i16 = 50;
+/// Wider buttons, only for labels 50 DLU cannot hold.
+const PRIMARY_WIDE_WIDTH: i16 = 146;
+const ALT_WIDTH: i16 = 60;
+const EXTRA_WIDTH: i16 = 72;
+/// Longest primary label `BUTTON_WIDTH` holds ("Try in 10 s").
 const SHORT_LABEL: usize = 12;
-const ALT_RECT: [i16; 4] = [121, 132, 80, 14];
-/// With an [Extra] button, [Primary] moves here, [Alt] to `PRIMARY_RECT` and [Extra] takes
-/// `ALT_RECT`, so all three sit left of [Close] in their usual order.
-const PRIMARY_LEFT_RECT: [i16; 4] = [7, 132, 44, 14];
-const CLOSE_RECT: [i16; 4] = [205, 132, 48, 14];
+const CLOSE_RECT: [i16; 4] = [203, BUTTON_Y, BUTTON_WIDTH, BUTTON_HEIGHT];
 
 /// Posted by `open` to the running window: focus it and take the handed-over id.
 const WM_HANDOVER: u32 = WM_APP + 1;
@@ -417,6 +423,7 @@ unsafe fn on_message(dialog: HWND, message: u32, wparam: WPARAM, lparam: LPARAM)
         };
         WINDOW.store(dialog.0 as isize, Ordering::Relaxed);
         session.registration = plug::register(dialog);
+        dialog::set_app_icon(dialog);
         fill_combo(dialog, KIND_ID, &KINDS.map(|(label, _)| label), 0);
         session.take_handover(dialog);
         // TRUE lets the dialog manager focus the first tab stop.
@@ -509,17 +516,25 @@ fn render(dialog: HWND, view: &View, shown: Option<&View>) {
     if changed(&|old| old.primary != view.primary || old.alt != view.alt || old.extra != view.extra)
     {
         let label = view.primary.as_deref().unwrap_or_default();
-        // A long label (the receiver confirmation) takes the hidden [Alt] button's room too; an
-        // [Extra] button shifts [Primary] and [Alt] one slot left.
-        let (primary, alt) = if view.extra.is_some() {
-            (PRIMARY_LEFT_RECT, PRIMARY_RECT)
-        } else if view.alt.is_none() && label.chars().count() > SHORT_LABEL {
-            (PRIMARY_WIDE_RECT, ALT_RECT)
+        // Shown buttons line up right to left from [Close], 4 DLU apart, in tab order
+        // [Primary] [Alt] [Extra]; a long primary label (the receiver confirmation) gets a wide one.
+        let primary_width = if label.chars().count() > SHORT_LABEL {
+            PRIMARY_WIDE_WIDTH
         } else {
-            (PRIMARY_RECT, ALT_RECT)
+            BUTTON_WIDTH
         };
-        place(dialog, IDOK.0 as u16, primary);
-        place(dialog, ALT_ID, alt);
+        let row = [
+            (EXTRA_ID, EXTRA_WIDTH, view.extra.is_some()),
+            (ALT_ID, ALT_WIDTH, view.alt.is_some()),
+            (IDOK.0 as u16, primary_width, view.primary.is_some()),
+        ];
+        let mut left = CLOSE_RECT[0];
+        for (id, width, shown) in row {
+            if shown {
+                left -= BUTTON_GAP + width;
+                place(dialog, id, [left, BUTTON_Y, width, BUTTON_HEIGHT]);
+            }
+        }
         set_text(dialog, IDOK.0 as u16, label);
         show(dialog, IDOK.0 as u16, view.primary.is_some());
     }
@@ -527,7 +542,7 @@ fn render(dialog: HWND, view: &View, shown: Option<&View>) {
         set_text(dialog, ALT_ID, view.alt.unwrap_or_default());
         show(dialog, ALT_ID, view.alt.is_some());
     }
-    // The third button sits in `ALT_RECT` and is hidden while the view has none.
+    // The third button is hidden while the view has none.
     if changed(&|old| old.extra != view.extra) {
         set_text(dialog, EXTRA_ID, view.extra.unwrap_or_default());
         show(dialog, EXTRA_ID, view.extra.is_some());
@@ -681,24 +696,25 @@ fn template() -> Vec<u32> {
             EDIT_CLASS,
             "",
         ),
+        // `render` places the three hidden buttons before showing any.
         (
             hidden | button(BS_DEFPUSHBUTTON),
-            PRIMARY_RECT,
+            CLOSE_RECT,
             IDOK.0 as u16,
             BUTTON_CLASS,
             "",
         ),
         (
             hidden | button(BS_PUSHBUTTON),
-            ALT_RECT,
+            CLOSE_RECT,
             ALT_ID,
             BUTTON_CLASS,
             "",
         ),
-        // [Extra] after [Alt] in the tab order; `render` places [Primary] and [Alt] around it.
+        // [Extra] after [Alt] in the tab order.
         (
             hidden | button(BS_PUSHBUTTON),
-            ALT_RECT,
+            CLOSE_RECT,
             EXTRA_ID,
             BUTTON_CLASS,
             "",

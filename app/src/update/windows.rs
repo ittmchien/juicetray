@@ -215,7 +215,12 @@ fn offer(info: &UpdateInfo, proxy: &EventLoopProxy<UserEvent>) {
         dialog::notice(DIALOG_TITLE, BUSY_MESSAGE);
         return;
     }
-    let message = format!("Juicetray v{} is available.", info.version);
+    // Main instruction, then the installed version as content.
+    let message = format!(
+        "Juicetray v{} is available.\n\nYou have v{}.",
+        info.version,
+        env!("CARGO_PKG_VERSION")
+    );
     match &info.assets {
         Some(assets) => {
             let answer = dialog::confirm_or_alt(
@@ -251,9 +256,11 @@ fn update_now(info: &UpdateInfo, assets: &check::UpdateAssets, proxy: &EventLoop
         }
         Err(Failure::ReadOnlyFolder(reason)) => {
             log::line(&format!("update: folder not writable: {reason}"));
+            // Line continuations, so the wrapped source adds no runs of spaces to the text.
             offer_download_page(
                 info,
-                "Juicetray can't replace itself in the folder it runs from.                  Open the download page to update by hand?",
+                "Juicetray can't replace itself in the folder it runs from.\n\nOpen the download \
+                 page to update by hand?",
             );
         }
         Err(Failure::Other(reason)) => {
@@ -261,7 +268,8 @@ fn update_now(info: &UpdateInfo, assets: &check::UpdateAssets, proxy: &EventLoop
             offer_download_page(
                 info,
                 &format!(
-                    "The update failed and the installed version is unchanged: {reason}.                      Open the download page to update by hand?"
+                    "The update failed and the installed version is unchanged.\n\n{reason}. Open \
+                     the download page to update by hand?"
                 ),
             );
         }
@@ -270,7 +278,8 @@ fn update_now(info: &UpdateInfo, assets: &check::UpdateAssets, proxy: &EventLoop
             offer_download_page(
                 info,
                 &format!(
-                    "The update failed and Juicetray could not put the previous version back:                      {reason}. Open the download page to reinstall?"
+                    "The update failed and Juicetray could not put the previous version \
+                     back.\n\n{reason}. Open the download page to reinstall?"
                 ),
             );
         }

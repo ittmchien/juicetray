@@ -68,7 +68,8 @@ mod win {
         let spawned = std::thread::Builder::new()
             .name("popup".into())
             .spawn(move || {
-                let message = format!("New device found: {}. Add it to Juicetray?", offer.name);
+                // Main instruction, then content: the task dialog shows them in two sizes.
+                let message = format!("New device found: {}\n\nAdd it to Juicetray?", offer.name);
                 let answer = {
                     let _span = log::span("dialog new device");
                     dialog::confirm_or_alt_last(TITLE, &message, "OK", "Not now", "Never")
