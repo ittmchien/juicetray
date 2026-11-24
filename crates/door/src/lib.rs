@@ -8,7 +8,9 @@ mod listen;
 mod transport;
 mod write;
 
-pub use enumerate::{Access, HidCollection, Inventory, SerialEntry, inventory, present};
+pub use enumerate::{
+    Access, HidCollection, Inventory, Listing, SerialEntry, inventory, list, present,
+};
 pub use transport::Target;
 pub use write::{Door, Exchange, MAX_KEPT_UNRELATED};
 

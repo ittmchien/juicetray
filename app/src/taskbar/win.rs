@@ -30,12 +30,13 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowExW,
-    FindWindowW, GetClientRect, GetMessageW, GetWindowRect, HWND_TOP, IsWindow, IsWindowVisible,
-    MA_NOACTIVATE, MSG, PostMessageW, RegisterClassExW, SW_HIDE, SWP_NOACTIVATE,
-    SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW, SetTimer,
-    SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA, UpdateLayeredWindow, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_APP, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW,
-    WNDPROC, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP,
+    FindWindowW, GW_HWNDPREV, GetClientRect, GetMessageW, GetWindow, GetWindowRect, HWND_TOP,
+    IsWindow, IsWindowVisible, MA_NOACTIVATE, MSG, PostMessageW, RegisterClassExW, SW_HIDE,
+    SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW,
+    SetTimer, SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA, UpdateLayeredWindow,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_RBUTTONUP, WM_TIMER,
+    WNDCLASSEXW, WNDPROC, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -43,8 +44,8 @@ use crate::watchdog::{self, Watched};
 use crate::{log, ui_font};
 
 use super::layout::{
-    Placement, Rect, natural_container, place_secondary_strip, place_strip, shrink_to_clear,
-    strip_height,
+    Placement, Rect, natural_container, place_secondary_strip, place_strip, placement_stale,
+    shrink_to_clear, strip_height,
 };
 use super::premultiplied_bgra;
 
@@ -120,6 +121,8 @@ struct Dock {
     reserved: bool,
     /// `None` until the copy has been painted.
     shown: Option<Shown>,
+    /// The placement last applied to the window; `None` until applied.
+    placed: Option<Placement>,
 }
 
 /// Renders the strip for one taskbar's (height px, DPI).
@@ -423,6 +426,7 @@ impl TaskbarStrip {
                         strip,
                         reserved: false,
                         shown: None,
+                        placed: None,
                     });
                     self.create_failure_logged = false;
                 }
@@ -479,7 +483,10 @@ impl Dock {
                 place_secondary_strip(bar, clock, width, height)
             }
         });
-        self.strip.place(placement);
+        // The window is moved only when the placement changed or Explorer displaced it.
+        if placement_stale(self.placed, placement, || self.strip.is_in_place(placement)) {
+            self.placed = self.strip.place(placement).then_some(placement);
+        }
         match placement {
             Placement::Docked(rect) => self.reserve(rect.x),
             Placement::Fallback => self.release(),
@@ -694,8 +701,23 @@ impl StripWindow {
         }
     }
 
+    /// Whether the window still sits where `placement` left it: docked = visible and topmost
+    /// among its siblings, fallback = hidden.
+    fn is_in_place(&self, placement: Placement) -> bool {
+        // SAFETY: IsWindowVisible accepts any handle value.
+        let visible = unsafe { IsWindowVisible(self.hwnd) }.as_bool();
+        match placement {
+            // SAFETY: GetWindow accepts any handle value; no previous sibling = already on top.
+            Placement::Docked(_) => {
+                visible && unsafe { GetWindow(self.hwnd, GW_HWNDPREV) }.is_err()
+            }
+            Placement::Fallback => !visible,
+        }
+    }
+
     /// Moves the window to its docked spot, or hides it when the layout does not fit.
-    fn place(&self, placement: Placement) {
+    /// `false` when the move failed, so the caller does not remember it as applied.
+    fn place(&self, placement: Placement) -> bool {
         match placement {
             Placement::Docked(rect) => {
                 let _span = log::span("SetWindowPos JuicetrayTaskbarStrip");
@@ -711,14 +733,16 @@ impl StripWindow {
                         SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
                     )
                 };
-                if let Err(error) = moved {
+                if let Err(error) = &moved {
                     eprintln!("moving the taskbar strip failed: {error}");
                 }
+                moved.is_ok()
             }
             Placement::Fallback => {
                 let _span = log::span("ShowWindow SW_HIDE JuicetrayTaskbarStrip");
                 // SAFETY: the window is ours; the result is the previous visibility, not an error.
                 let _ = unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+                true
             }
         }
     }
@@ -1037,15 +1061,19 @@ fn windows_build() -> String {
     )
 }
 
-/// The real Windows version (RtlGetVersion ignores the compatibility manifest).
+/// The real Windows version (RtlGetVersion ignores the compatibility manifest), read once: it
+/// cannot change while the process runs.
 fn os_version() -> Option<OSVERSIONINFOW> {
     use windows::Wdk::System::SystemServices::RtlGetVersion;
 
-    let mut info = OSVERSIONINFOW {
-        dwOSVersionInfoSize: size_of::<OSVERSIONINFOW>() as u32,
-        ..Default::default()
-    };
-    // SAFETY: `info` is initialised with its own size, as the call requires.
-    let status = unsafe { RtlGetVersion(&mut info) };
-    status.is_ok().then_some(info)
+    static VERSION: OnceLock<Option<OSVERSIONINFOW>> = OnceLock::new();
+    *VERSION.get_or_init(|| {
+        let mut info = OSVERSIONINFOW {
+            dwOSVersionInfoSize: size_of::<OSVERSIONINFOW>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: `info` is initialised with its own size, as the call requires.
+        let status = unsafe { RtlGetVersion(&mut info) };
+        status.is_ok().then_some(info)
+    })
 }

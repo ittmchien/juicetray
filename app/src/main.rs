@@ -7,6 +7,7 @@ mod config;
 #[cfg(windows)]
 mod context_menu;
 mod dialog;
+mod efficiency;
 mod instance;
 mod interval;
 mod licenses;
@@ -67,7 +68,7 @@ fn run_scan() -> ExitCode {
 
     let bluetooth_ok = match bluetooth::read_devices() {
         Ok(mut devices) => {
-            ui_model::sort_weakest_first(&mut devices);
+            ui_model::sort_by_level(&mut devices);
             println!("{}", scan::scan_report(&devices, SystemTime::now()));
             true
         }

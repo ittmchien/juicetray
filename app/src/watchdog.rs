@@ -5,10 +5,11 @@
 #[cfg(windows)]
 pub use win::{Watched, beat, start, watch_current};
 
-/// Silence longer than this counts as a hang; both heartbeat timers fire every 2 s.
-const STALL_MS: u64 = 5000;
+/// Silence longer than this counts as a hang; both heartbeat timers fire every 2 s and the
+/// watchdog ticks every 2 s, so a healthy beat is up to ~4 s old when judged.
+const STALL_MS: u64 = 6000;
 /// A watchdog tick this late after the previous one means the machine slept, not the UI.
-const GAP_MS: u64 = 3000;
+const GAP_MS: u64 = 5000;
 
 /// What one watchdog tick reports.
 #[derive(Debug, PartialEq, Eq)]
@@ -65,7 +66,7 @@ mod win {
     use std::collections::BTreeMap;
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-    use std::sync::{Mutex, PoisonError};
+    use std::sync::{Mutex, Once, PoisonError};
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -100,7 +101,7 @@ mod win {
     use super::{Stall, Verdict};
     use crate::log;
 
-    const TICK: Duration = Duration::from_secs(1);
+    const TICK: Duration = Duration::from_secs(2);
     const MAX_FRAMES: usize = 64;
     /// Longest symbol name kept, in UTF-16 units; longer generic names are cut.
     const MAX_NAME: usize = 512;
@@ -233,11 +234,9 @@ mod win {
         unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
     }
 
-    /// Checks every watched heartbeat each second; a stall dumps every stack once and logs its end.
+    /// Checks every watched heartbeat each `TICK`; a stall dumps every stack once and logs its end.
     fn watch() {
-        if let Err(error) = init_symbols() {
-            log::line(&format!("watchdog: SymInitialize failed: {error}"));
-        }
+        crate::efficiency::enter_background_mode();
         let mut stalls: [Stall; 2] = Default::default();
         let mut reported_menu = None;
         loop {
@@ -386,6 +385,13 @@ mod win {
     /// Logs the `stalled` thread's stack, then the other watched one's, then every other
     /// thread's except the watchdog's own.
     fn dump_all(stalled: Watched) {
+        // dbghelp loads its module list only for a real hang; an idle run never pays for it.
+        static SYMBOLS: Once = Once::new();
+        SYMBOLS.call_once(|| {
+            if let Err(error) = init_symbols() {
+                log::line(&format!("watchdog: SymInitialize failed: {error}"));
+            }
+        });
         let _dbghelp = DBGHELP.lock().unwrap_or_else(PoisonError::into_inner);
         // SAFETY: GetCurrentProcess returns a pseudo handle with no preconditions.
         let process = unsafe { GetCurrentProcess() };
@@ -610,40 +616,52 @@ mod tests {
 
     const T: u64 = 1_000_000;
 
-    /// Ticks once a second from `from` to `to` (inclusive) with a fixed heartbeat.
+    /// Ticks every 2 s (the watchdog tick) from `from` to `to` (inclusive) with a fixed heartbeat.
     fn tick_range(stall: &mut Stall, heartbeat: u64, from: u64, to: u64) -> Vec<Verdict> {
         (from..=to)
-            .step_by(1000)
+            .step_by(2000)
             .map(|now| stall.check(heartbeat, now))
             .collect()
     }
 
     #[test]
-    fn dumps_once_per_stall_after_five_seconds() {
+    fn dumps_once_per_stall_after_six_seconds() {
         let mut stall = Stall::default();
-        let quiet = tick_range(&mut stall, T, T, T + 5000);
+        let quiet = tick_range(&mut stall, T, T, T + 6000);
         assert!(quiet.iter().all(|verdict| *verdict == Verdict::Quiet));
 
-        assert_eq!(stall.check(T, T + 6000), Verdict::Hang { silent_ms: 6000 });
-        let later = tick_range(&mut stall, T, T + 7000, T + 20_000);
+        assert_eq!(stall.check(T, T + 8000), Verdict::Hang { silent_ms: 8000 });
+        let later = tick_range(&mut stall, T, T + 10_000, T + 20_000);
         assert!(later.iter().all(|verdict| *verdict == Verdict::Quiet));
+    }
+
+    #[test]
+    fn a_healthy_beat_never_reads_as_a_hang() {
+        // Beats every 2 s, judged every 2 s with the worst phase (the beat just missed the
+        // tick) and 0.5 s of timer lateness: still inside the stall limit.
+        let mut stall = Stall::default();
+        for tick in 0..100 {
+            let now = T + tick * 2000;
+            let heartbeat = now.saturating_sub(2000 + 500);
+            assert_eq!(stall.check(heartbeat.max(T), now), Verdict::Quiet);
+        }
     }
 
     #[test]
     fn a_resumed_heartbeat_clears_the_stall_and_rearms() {
         let mut stall = Stall::default();
-        tick_range(&mut stall, T, T, T + 5000);
-        assert_eq!(stall.check(T, T + 6000), Verdict::Hang { silent_ms: 6000 });
+        tick_range(&mut stall, T, T, T + 6000);
+        assert_eq!(stall.check(T, T + 8000), Verdict::Hang { silent_ms: 8000 });
         assert_eq!(
-            stall.check(T + 9000, T + 9000),
+            stall.check(T + 9000, T + 10_000),
             Verdict::Cleared { after_ms: 9000 }
         );
 
-        let quiet = tick_range(&mut stall, T + 9000, T + 10_000, T + 14_000);
+        let quiet = tick_range(&mut stall, T + 9000, T + 12_000, T + 14_000);
         assert!(quiet.iter().all(|verdict| *verdict == Verdict::Quiet));
         assert_eq!(
-            stall.check(T + 9000, T + 15_000),
-            Verdict::Hang { silent_ms: 6000 }
+            stall.check(T + 9000, T + 16_000),
+            Verdict::Hang { silent_ms: 7000 }
         );
     }
 
@@ -652,11 +670,11 @@ mod tests {
         let mut stall = Stall::default();
         assert_eq!(stall.check(T, T), Verdict::Quiet);
         // The machine slept a minute: the stale heartbeat is not a hang yet.
-        let quiet = tick_range(&mut stall, T, T + 60_000, T + 65_000);
+        let quiet = tick_range(&mut stall, T, T + 60_000, T + 66_000);
         assert!(quiet.iter().all(|verdict| *verdict == Verdict::Quiet));
         assert_eq!(
-            stall.check(T, T + 66_000),
-            Verdict::Hang { silent_ms: 6000 }
+            stall.check(T, T + 68_000),
+            Verdict::Hang { silent_ms: 8000 }
         );
     }
 }

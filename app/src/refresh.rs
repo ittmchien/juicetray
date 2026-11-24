@@ -35,6 +35,7 @@ pub fn spawn_worker(
 /// the wait without a read, and the loop ends when the app drops the sender or the event loop
 /// is gone.
 fn run(proxy: &EventLoopProxy<UserEvent>, commands: &Receiver<Command>, mut interval: Option<u32>) {
+    crate::efficiency::enter_background_mode();
     let mut read_now = true;
     // The last Bluetooth list that was read; a failed Bluetooth read sends it again.
     let mut bluetooth_devices = Vec::new();

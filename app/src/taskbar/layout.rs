@@ -111,9 +111,43 @@ fn dock_left_of(taskbar: Rect, edge: i32, strip_w: i32, strip_h: i32) -> Placeme
     })
 }
 
+/// Whether the window must be moved or hidden again: the wanted placement differs from the last
+/// applied one, or (checked only then) the window is no longer where that placement left it.
+pub fn placement_stale(
+    applied: Option<Placement>,
+    wanted: Placement,
+    in_place: impl FnOnce() -> bool,
+) -> bool {
+    applied != Some(wanted) || !in_place()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unchanged_placement_in_place_is_not_stale() {
+        let rect = Rect {
+            x: 10,
+            y: 5,
+            w: 120,
+            h: 30,
+        };
+        let docked = Placement::Docked(rect);
+        assert!(!placement_stale(Some(docked), docked, || true));
+        assert!(!placement_stale(
+            Some(Placement::Fallback),
+            Placement::Fallback,
+            || true
+        ));
+        // Nothing applied yet, a moved rect, or a switch between docked and hidden.
+        assert!(placement_stale(None, docked, || panic!("not asked")));
+        let moved = Placement::Docked(Rect { x: 11, ..rect });
+        assert!(placement_stale(Some(docked), moved, || panic!("not asked")));
+        assert!(placement_stale(Some(docked), Placement::Fallback, || true));
+        // Same placement but displaced or re-shown by Explorer.
+        assert!(placement_stale(Some(docked), docked, || false));
+    }
 
     const TASKBAR: Rect = Rect {
         x: 0,

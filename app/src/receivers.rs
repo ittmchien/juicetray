@@ -9,8 +9,11 @@ use std::collections::HashMap;
 use std::path::Path as FsPath;
 use std::time::{Duration, SystemTime};
 
-use door::{Door, HidCollection, Inventory, SerialEntry};
-use protocol::{Decoded, KNOWN, Kind, KnownDevice, Link, ON_CABLE_TEXT, PickError, Reading, known};
+use door::{Door, HidCollection, Inventory, Listing, SerialEntry, Target};
+use protocol::{
+    Decoded, Family, KNOWN, Kind, KnownDevice, Link, ON_CABLE_TEXT, Online, PickError, Reading,
+    known,
+};
 use ui_model::{DeviceKind, DeviceView, Level, Path};
 
 use crate::log;
@@ -40,6 +43,8 @@ enum Outcome {
     NotRecorded,
     BudgetUsed,
     NoReply,
+    /// The receiver answered but its headset is not linked: no battery query was sent.
+    Offline,
     Invalid(&'static str),
     /// A valid reading and the time it was taken.
     Reading(Reading, SystemTime),
@@ -65,13 +70,14 @@ pub fn read_receivers(
         .iter()
         .map(|device| (device.vid, device.pid))
         .collect();
-    let present = present_ids(&ids);
-    let inventory = list_in_depth(&openable(&present, allow));
+    let listing = list_devices();
+    let present = listing.present(&ids);
+    let inventory = list_in_depth(listing, &openable(&present, allow));
     let log_path = query_log::path();
     let log = load_log(log_path.as_deref());
     let mut door = Door::new(READ_BUDGET);
 
-    KNOWN
+    let outcomes: Vec<(&KnownDevice, Outcome)> = KNOWN
         .iter()
         .filter(|device| present.contains(&(device.vid, device.pid)))
         .map(|device| {
@@ -83,6 +89,13 @@ pub fn read_receivers(
                 &mut door,
                 now,
             );
+            (device, outcome)
+        })
+        .collect();
+    record_readings(log_path.as_deref(), &outcomes);
+    outcomes
+        .into_iter()
+        .map(|(device, outcome)| {
             let (vid, pid) = (device.vid, device.pid);
             let row = view(
                 device,
@@ -140,14 +153,15 @@ fn with_check_note(mut row: DeviceView, outcome: Outcome, notes: &CheckNotes) ->
 /// only this device listed in depth. `None` for an id outside `KNOWN` or an unplugged device.
 pub fn check_receiver(id: &str, allow: &[(u16, u16)], now: SystemTime) -> Option<Checked> {
     let (device, allow) = check_scope(id, allow)?;
-    let present = present_ids(&[(device.vid, device.pid)]);
+    let listing = list_devices();
+    let present = listing.present(&[(device.vid, device.pid)]);
     if present.is_empty() {
         return None;
     }
-    let inventory = list_in_depth(&openable(&present, &allow));
+    let inventory = list_in_depth(listing, &openable(&present, &allow));
     let log_path = query_log::path();
     let log = load_log(log_path.as_deref());
-    let mut door = Door::new(1);
+    let mut door = Door::new(writes_needed(device.family));
     let outcome = attempt(
         device,
         &allow,
@@ -156,6 +170,7 @@ pub fn check_receiver(id: &str, allow: &[(u16, u16)], now: SystemTime) -> Option
         &mut door,
         now,
     );
+    record_readings(log_path.as_deref(), &[(device, outcome)]);
     // The owner clicked, so a floor wait shows the time left instead of the waiting text.
     let floor = floor_check(&log, device.family, device.vid, device.pid, now);
     let outcome = match (outcome, floor) {
@@ -208,10 +223,15 @@ fn checked(
     }
 }
 
-/// `door::present`, traced: it lists HID and serial devices, which is slow while one unplugs.
-fn present_ids(ids: &[(u16, u16)]) -> Vec<(u16, u16)> {
-    let _span = log::span("door::present");
-    door::present(ids)
+/// One traced listing of the HID and serial devices (slow while one unplugs); presence and the
+/// in-depth inventory both come from it.
+fn list_devices() -> Listing {
+    let _span = log::span("door::list");
+    let listing = door::list();
+    for error in listing.errors() {
+        eprintln!("receivers: {error}");
+    }
+    listing
 }
 
 /// The present devices the gate lets through; only these are listed in depth and opened.
@@ -223,17 +243,14 @@ fn openable(present: &[(u16, u16)], allow: &[(u16, u16)]) -> Vec<(u16, u16)> {
         .collect()
 }
 
-/// The in-depth listing of `openable`. An empty filter would list every device, so with
-/// nothing openable no inventory is made.
-fn list_in_depth(openable: &[(u16, u16)]) -> Option<Inventory> {
-    let inventory = (!openable.is_empty()).then(|| {
-        let _span = log::span("door::inventory");
-        door::inventory(openable)
-    })?;
-    for error in &inventory.errors {
-        eprintln!("receivers: {error}");
+/// The in-depth inventory of `openable` from the same listing. An empty filter would keep every
+/// device, so with nothing openable no inventory is made.
+fn list_in_depth(listing: Listing, openable: &[(u16, u16)]) -> Option<Inventory> {
+    if openable.is_empty() {
+        return None;
     }
-    Some(inventory)
+    let _span = log::span("door::inventory");
+    Some(listing.into_inventory(openable))
 }
 
 fn load_log(log_path: Option<&FsPath>) -> QueryLog {
@@ -264,7 +281,12 @@ fn attempt(
     };
     let floor = floor_check(log, device.family, device.vid, device.pid, now);
     match (
-        plan(gate_result, pick, floor, door.writes_left() > 0),
+        plan(
+            gate_result,
+            pick,
+            floor,
+            door.writes_left() >= writes_needed(device.family),
+        ),
         inventory,
     ) {
         (Step::Show(outcome), _) => outcome,
@@ -342,8 +364,9 @@ fn plan(
     Step::Query
 }
 
-/// Opens the target, claims the query time (saved before the write), sends the one query and
-/// records a valid reading. No retries; full errors go to the log only.
+/// Opens the target, claims the query time (saved before the first write), sends the status
+/// query where the family has one, then the battery query, and records a valid reading. No
+/// retries; full errors go to the log only.
 fn query(
     inventory: &Inventory,
     device: &KnownDevice,
@@ -387,6 +410,13 @@ fn query(
         Err(ClaimError::Wait(_) | ClaimError::ClockBack) => return Outcome::Waiting,
     }
 
+    if online_first(family)
+        && let Some(outcome) = status_verdict(door, &mut target, device)
+    {
+        log::trace(format_args!("{} {}", row_id(device), outcome_text(outcome)));
+        return outcome;
+    }
+
     let sent = {
         let _span = log::span_fmt(format_args!("device {vid:04X}:{pid:04X} send and decode"));
         door.send(&mut target)
@@ -413,28 +443,95 @@ fn query(
         // The door never keeps a non-reply as the reply, and only `send_online` yields `Online`.
         Some((_, Decoded::NotTheReply | Decoded::Online(_))) => Outcome::Invalid("not the reply"),
     };
-    if let (Outcome::Reading(reading, _), Some(path)) = (outcome, log_path) {
-        let recorded = {
-            let _span = log::span_fmt(format_args!("device {vid:04X}:{pid:04X} record reading"));
-            QueryLog::update(path, |log| {
-                log.record_reading(vid, pid, reading, read_at);
-                Ok::<_, anyhow::Error>(())
-            })
-        };
-        if let Err(error) = recorded {
-            eprintln!(
-                "receiver {vid:04X}:{pid:04X}: could not record the reading ({})",
-                error.root_cause()
-            );
-            log::line(&format!(
-                "receiver {vid:04X}:{pid:04X}: record failed: {}",
-                error.root_cause()
-            ));
-        }
-    }
     // One result line per query (not per step); traced only, so release stays silent.
     log::trace(format_args!("{} {}", row_id(device), outcome_text(outcome)));
     outcome
+}
+
+/// The valid readings among one cycle's outcomes, with their device ids.
+fn readings_of(outcomes: &[(&KnownDevice, Outcome)]) -> Vec<(u16, u16, Reading, SystemTime)> {
+    outcomes
+        .iter()
+        .filter_map(|&(device, outcome)| match outcome {
+            Outcome::Reading(reading, at) => Some((device.vid, device.pid, reading, at)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Stores all of a cycle's readings in one locked update of the query log; the query stamps were
+/// already saved before each send. Nothing is written when no device gave a reading.
+fn record_readings(log_path: Option<&FsPath>, outcomes: &[(&KnownDevice, Outcome)]) {
+    let readings = readings_of(outcomes);
+    let Some(path) = log_path.filter(|_| !readings.is_empty()) else {
+        return;
+    };
+    let _span = log::span("record readings");
+    let recorded = QueryLog::update(path, |log| {
+        for &(vid, pid, reading, read_at) in &readings {
+            log.record_reading(vid, pid, reading, read_at);
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    if let Err(error) = recorded {
+        eprintln!(
+            "receivers: could not record the readings ({})",
+            error.root_cause()
+        );
+        log::line(&format!("receivers: record failed: {}", error.root_cause()));
+    }
+}
+
+/// Whether the worker asks the online status before the battery. The ATK serial receiver keeps
+/// answering the battery query with the last level after the headset is off.
+fn online_first(family: Family) -> bool {
+    family == Family::AtkSerial
+}
+
+/// Writes one try needs: the status query first, then the battery query.
+fn writes_needed(family: Family) -> u8 {
+    1 + u8::from(online_first(family))
+}
+
+/// Sends the status query; `Some` ends the try (headset off, or the send failed and is not
+/// retried), `None` goes on to the battery query. A missing or unusable status reply is
+/// logged and falls through, so an unverified decoder never hides a working device.
+fn status_verdict(door: &mut Door, target: &mut Target, device: &KnownDevice) -> Option<Outcome> {
+    let (vid, pid) = (device.vid, device.pid);
+    let sent = {
+        let _span = log::span_fmt(format_args!("device {vid:04X}:{pid:04X} status"));
+        door.send_online(target)
+    };
+    let exchange = match sent {
+        Ok(exchange) => exchange,
+        Err(error) => {
+            eprintln!("receiver {vid:04X}:{pid:04X}: {error:#}");
+            log::line(&format!(
+                "receiver {vid:04X}:{pid:04X}: status send failed: {error:#}"
+            ));
+            return Some(Outcome::Busy);
+        }
+    };
+    let decoded = exchange.reply.map(|(_, decoded)| decoded);
+    match status_offline(decoded) {
+        Some(true) => Some(Outcome::Offline),
+        Some(false) => None,
+        None => {
+            log::line(&format!(
+                "receiver {vid:04X}:{pid:04X}: status unusable ({decoded:?}); querying the battery"
+            ));
+            None
+        }
+    }
+}
+
+/// `Some(true)` = headset not linked, `Some(false)` = linked, `None` = no usable status.
+fn status_offline(reply: Option<Decoded>) -> Option<bool> {
+    match reply {
+        Some(Decoded::Online(Online::No)) => Some(true),
+        Some(Decoded::Online(Online::Yes)) => Some(false),
+        _ => None,
+    }
 }
 
 /// The result of a query for the log: the percent of a reading, else the outcome's name.
@@ -457,6 +554,7 @@ fn reason(outcome: Outcome) -> String {
         Outcome::NotRecorded | Outcome::BudgetUsed => "error".to_owned(),
         // A device that never answered has nothing to show yet; it is not broken.
         Outcome::NoReply => "no data".to_owned(),
+        Outcome::Offline => "offline".to_owned(),
         // The detailed `why` is logged where the reply is decoded; the menu keeps one word.
         Outcome::Invalid(_) if on_cable(outcome) => "charging".to_owned(),
         Outcome::Invalid(_) => "error".to_owned(),
@@ -515,7 +613,8 @@ fn view(
         },
         level: Level::NoData(reason(outcome)),
         charging: false,
-        connected: true,
+        // An unlinked headset is a disconnected row: the menu greys it and keeps the stored level.
+        connected: outcome != Outcome::Offline,
         updated_at,
         stale: false,
         note: None,
@@ -528,7 +627,7 @@ fn view(
     let note = if failed {
         match outcome {
             Outcome::Waiting if reading.asleep => Some(ASLEEP_TEXT.to_owned()),
-            Outcome::Waiting | Outcome::NoReply => None,
+            Outcome::Waiting | Outcome::NoReply | Outcome::Offline => None,
             _ if on_cable(outcome) => None,
             _ => Some(reason(outcome)),
         }
@@ -573,6 +672,55 @@ mod tests {
             charging,
             asleep,
         }
+    }
+
+    #[test]
+    fn one_cycle_records_every_reading_in_one_update() {
+        let (mchose, n9) = (mchose(), device(0x373B, 0x1204));
+        let outcomes = [
+            (mchose, Outcome::Reading(reading(80, false, false), at(NOW))),
+            (n9, Outcome::NoReply),
+            (
+                device(0x3554, 0xFA09),
+                Outcome::Reading(reading(55, true, false), at(NOW + 1)),
+            ),
+        ];
+        // Only valid readings are batched; a failed device records nothing.
+        let readings = readings_of(&outcomes);
+        assert_eq!(readings.len(), 2);
+
+        let root = std::env::temp_dir().join(format!("juicetray-receivers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("query-log.toml");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut stamped = QueryLog::default();
+        stamped.stamp(0x373B, 0x1204, at(NOW));
+        stamped.save_to(&path).unwrap();
+
+        record_readings(Some(&path), &outcomes);
+
+        let log = QueryLog::load_from(&path);
+        assert_eq!(
+            log.reading(0x3837, 0x6011),
+            Some((reading(80, false, false), at(NOW)))
+        );
+        assert_eq!(
+            log.reading(0x3554, 0xFA09),
+            Some((reading(55, true, false), at(NOW + 1)))
+        );
+        assert_eq!(log.reading(0x373B, 0x1204), None);
+        // The stamp saved before the send is untouched.
+        assert_eq!(log.last(0x373B, 0x1204), Some(at(NOW)));
+
+        // No reading, no write.
+        let none =
+            std::env::temp_dir().join(format!("juicetray-receivers-none-{}", std::process::id()));
+        record_readings(
+            Some(&none.join("query-log.toml")),
+            &[(n9, Outcome::NoReply)],
+        );
+        assert!(!none.exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Every attempt that ends without a fresh reading or a floor wait.
@@ -947,6 +1095,55 @@ mod tests {
     }
 
     #[test]
+    fn only_atk_serial_asks_the_status_first() {
+        for device in KNOWN {
+            let atk = device.family == Family::AtkSerial;
+            assert_eq!(online_first(device.family), atk);
+            assert_eq!(writes_needed(device.family), if atk { 2 } else { 1 });
+        }
+    }
+
+    #[test]
+    fn status_reply_verdicts() {
+        assert_eq!(
+            status_offline(Some(Decoded::Online(Online::No))),
+            Some(true)
+        );
+        assert_eq!(
+            status_offline(Some(Decoded::Online(Online::Yes))),
+            Some(false)
+        );
+        // No reply, an unparseable one or an unsupported answer must not hide the device.
+        for unusable in [
+            None,
+            Some(Decoded::Online(Online::Unsupported)),
+            Some(Decoded::Invalid("x")),
+            Some(Decoded::NotTheReply),
+        ] {
+            assert_eq!(status_offline(unusable), None, "{unusable:?}");
+        }
+    }
+
+    #[test]
+    fn offline_is_a_disconnected_row() {
+        let n9 = device(0x373B, 0x1204);
+        let stored = (reading(40, false, false), at(NOW - 3600));
+        let kept = view(n9, Outcome::Offline, Some(stored), Some(at(NOW)), at(NOW));
+        assert_eq!(kept.level, Level::Percent(40));
+        assert!(!kept.connected);
+        assert!(kept.is_offline());
+        assert_eq!(kept.note, None);
+        assert_eq!(kept.updated_at, at(NOW - 3600));
+
+        let bare = view(n9, Outcome::Offline, None, None, at(NOW));
+        assert_eq!(bare.level, Level::NoData("offline".into()));
+        assert!(!bare.connected);
+
+        // Every other outcome keeps the row connected.
+        assert!(view(n9, Outcome::NoReply, None, None, at(NOW)).connected);
+    }
+
+    #[test]
     fn reason_texts() {
         let text = reason;
         assert_eq!(text(Outcome::Unconfirmed), "new");
@@ -955,6 +1152,7 @@ mod tests {
         assert_eq!(text(Outcome::NeedsCapture), "unsupported");
         assert_eq!(text(Outcome::Busy), "in use");
         assert_eq!(text(Outcome::NoReply), "no data");
+        assert_eq!(text(Outcome::Offline), "offline");
         assert_eq!(text(Outcome::BudgetUsed), "error");
         assert_eq!(text(Outcome::Invalid("unknown power state")), "error");
         assert_eq!(text(Outcome::Invalid(ON_CABLE_TEXT)), "charging");

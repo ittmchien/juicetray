@@ -61,14 +61,28 @@ pub struct Inventory {
 /// A descriptor read once per path, with its parse result.
 type PathRead = Result<(Vec<u8>, Result<Vec<TopCollection>, String>), String>;
 
-/// Lists HID collections and USB serial ports, keeping only the VID:PIDs in `filter` (empty =
-/// every device). Never fails as a whole; a source that cannot be listed is named in `errors`.
-pub fn inventory(filter: &[(u16, u16)]) -> Inventory {
+/// One enumeration of the HID and serial device lists; nothing is opened. `present` and
+/// `into_inventory` both read it, so a refresh lists the devices once.
+pub struct Listing {
+    api: Option<HidApi>,
+    /// VID:PID of every HID collection hidapi listed.
+    hid_ids: Vec<(u16, u16)>,
+    /// Every USB serial port, unfiltered.
+    serial: Vec<SerialEntry>,
+    errors: Vec<String>,
+}
+
+/// Lists the HID collections and USB serial ports once. Never fails as a whole; a source that
+/// cannot be listed is named in `errors`.
+pub fn list() -> Listing {
     let mut errors = Vec::new();
-    let (api, hid) = match HidApi::new() {
+    let (api, hid_ids) = match HidApi::new() {
         Ok(api) => {
-            let hid = hid_collections(&api, filter);
-            (Some(api), hid)
+            let ids = api
+                .device_list()
+                .map(|info| (info.vendor_id(), info.product_id()))
+                .collect();
+            (Some(api), ids)
         }
         Err(error) => {
             errors.push(format!("HID devices could not be listed: {error}"));
@@ -76,37 +90,68 @@ pub fn inventory(filter: &[(u16, u16)]) -> Inventory {
         }
     };
     let serial = match serialport::available_ports() {
-        Ok(ports) => serial_entries(ports, filter),
+        Ok(ports) => serial_entries(ports),
         Err(error) => {
             errors.push(format!("serial ports could not be listed: {error}"));
             Vec::new()
         }
     };
-    Inventory {
+    Listing {
         api,
-        hid,
+        hid_ids,
         serial,
         errors,
     }
 }
 
-/// The `ids` that are plugged in, in `ids` order, from the device lists alone: nothing is opened,
-/// so a device that must stay untouched can be checked. A source that cannot be listed counts
-/// as having none of them.
+impl Listing {
+    /// Per-source failures (hidapi init, serial port listing).
+    pub fn errors(&self) -> &[String] {
+        &self.errors
+    }
+
+    /// The `ids` that are plugged in, in `ids` order, from the lists alone: nothing is opened,
+    /// so a device that must stay untouched can be checked. A source that cannot be listed
+    /// counts as having none of them.
+    pub fn present(&self, ids: &[(u16, u16)]) -> Vec<(u16, u16)> {
+        let seen: Vec<(u16, u16)> = self
+            .hid_ids
+            .iter()
+            .copied()
+            .chain(self.serial.iter().map(|entry| (entry.vid, entry.pid)))
+            .collect();
+        listed_ids(ids, &seen)
+    }
+
+    /// Keeps only the VID:PIDs in `filter` (empty = every device) and opens a handle for each
+    /// kept HID collection the open rule allows, to fetch its report descriptor.
+    pub fn into_inventory(self, filter: &[(u16, u16)]) -> Inventory {
+        let hid = self
+            .api
+            .as_ref()
+            .map(|api| hid_collections(api, filter))
+            .unwrap_or_default();
+        let mut serial = self.serial;
+        serial.retain(|entry| wanted(filter, entry.vid, entry.pid));
+        Inventory {
+            api: self.api,
+            hid,
+            serial,
+            errors: self.errors,
+        }
+    }
+}
+
+/// Lists HID collections and USB serial ports, keeping only the VID:PIDs in `filter` (empty =
+/// every device).
+pub fn inventory(filter: &[(u16, u16)]) -> Inventory {
+    list().into_inventory(filter)
+}
+
+/// The `ids` that are plugged in, from one fresh listing; `list` shares a listing with
+/// `into_inventory`.
 pub fn present(ids: &[(u16, u16)]) -> Vec<(u16, u16)> {
-    let mut seen = Vec::new();
-    match HidApi::new() {
-        Ok(api) => seen.extend(
-            api.device_list()
-                .map(|info| (info.vendor_id(), info.product_id())),
-        ),
-        Err(error) => eprintln!("HID devices could not be listed: {error}"),
-    }
-    match serialport::available_ports() {
-        Ok(ports) => seen.extend(serial_entries(ports, ids).iter().map(|e| (e.vid, e.pid))),
-        Err(error) => eprintln!("serial ports could not be listed: {error}"),
-    }
-    listed_ids(ids, &seen)
+    list().present(ids)
 }
 
 /// The `ids` that appear in `seen`, once each, in `ids` order.
@@ -229,8 +274,8 @@ fn has_serial(info: &DeviceInfo) -> bool {
         || info.serial_number_raw().is_some_and(|raw| !raw.is_empty())
 }
 
-/// Keeps USB ports only, then the VID:PIDs in `filter` (empty = all).
-fn serial_entries(ports: Vec<SerialPortInfo>, filter: &[(u16, u16)]) -> Vec<SerialEntry> {
+/// Keeps USB ports only, sorted.
+fn serial_entries(ports: Vec<SerialPortInfo>) -> Vec<SerialEntry> {
     let mut serial: Vec<SerialEntry> = ports
         .into_iter()
         .filter_map(|port| match port.port_type {
@@ -244,7 +289,6 @@ fn serial_entries(ports: Vec<SerialPortInfo>, filter: &[(u16, u16)]) -> Vec<Seri
             }),
             _ => None,
         })
-        .filter(|entry| wanted(filter, entry.vid, entry.pid))
         .collect();
     serial.sort_by(|a, b| (a.vid, a.pid, &a.port_name).cmp(&(b.vid, b.pid, &b.port_name)));
     serial
@@ -252,7 +296,50 @@ fn serial_entries(ports: Vec<SerialPortInfo>, filter: &[(u16, u16)]) -> Vec<Seri
 
 #[cfg(test)]
 mod tests {
-    use super::{listed_ids, wanted};
+    use super::{Listing, SerialEntry, listed_ids, wanted};
+
+    fn port(name: &str, vid: u16, pid: u16) -> SerialEntry {
+        SerialEntry {
+            port_name: name.into(),
+            vid,
+            pid,
+            manufacturer: None,
+            product: None,
+            serial_number: None,
+        }
+    }
+
+    /// A listing with no hidapi handle: HID ids and serial ports as if enumerated.
+    fn listing(hid_ids: &[(u16, u16)], serial: Vec<SerialEntry>) -> Listing {
+        Listing {
+            api: None,
+            hid_ids: hid_ids.to_vec(),
+            serial,
+            errors: vec!["HID devices could not be listed: x".into()],
+        }
+    }
+
+    #[test]
+    fn one_listing_feeds_presence_and_inventory() {
+        let ids = [(0x3837, 0x6011), (0x3554, 0xFA09), (0x373B, 0x1204)];
+        let listed = listing(
+            &[(0x373B, 0x1204), (0x046D, 0xC52B)],
+            vec![port("COM4", 0x3837, 0x6011), port("COM5", 0x1A86, 0x7523)],
+        );
+        // Presence spans HID and serial, in `ids` order.
+        assert_eq!(listed.present(&ids), [(0x3837, 0x6011), (0x373B, 0x1204)]);
+        // The same listing then narrows to the openable ids and keeps its errors.
+        let inventory = listed.into_inventory(&[(0x3837, 0x6011)]);
+        assert_eq!(inventory.serial, [port("COM4", 0x3837, 0x6011)]);
+        assert!(inventory.hid.is_empty());
+        assert_eq!(inventory.errors.len(), 1);
+    }
+
+    #[test]
+    fn inventory_with_an_empty_filter_keeps_every_port() {
+        let listed = listing(&[], vec![port("COM4", 0x3837, 0x6011), port("COM5", 1, 2)]);
+        assert_eq!(listed.into_inventory(&[]).serial.len(), 2);
+    }
 
     #[test]
     fn listed_ids_keeps_ids_order_and_drops_duplicates() {
