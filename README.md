@@ -1,5 +1,7 @@
 # Juicetray
 
+**English** · [Tiếng Việt](README.vi.md)
+
 Battery levels of your wireless mice and headsets, right next to the clock — without each
 vendor's software.
 
