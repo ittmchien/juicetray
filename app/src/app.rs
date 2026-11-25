@@ -25,6 +25,8 @@ use crate::add_device;
 use crate::alerts::notify_update_available;
 use crate::alerts::{AlertState, notify_low_battery};
 use crate::config::{Config, parse_hide_offline_minutes, parse_low_percent};
+#[cfg(any(target_os = "macos", windows))]
+use crate::connections;
 use crate::interval::{format_interval, parse_interval};
 use crate::login::{self, LoginState};
 use crate::menu::{self, MenuAction, MenuEntry};
@@ -44,6 +46,8 @@ use crate::taskbar::{self, StripContent, TaskbarHandle};
 use crate::ui_font;
 #[cfg(windows)]
 use crate::update::check::{UpdateCheck, UpdateInfo};
+#[cfg(target_os = "macos")]
+use crate::wake;
 use crate::{dialog, instance, log, theme, update};
 
 /// The tray icon reads at 22 pt; twice that gives sharp pixels on Retina bars.
@@ -78,6 +82,11 @@ pub enum UserEvent {
     Menu(MenuEvent),
     #[cfg(target_os = "macos")]
     ThemeChanged,
+    /// A Bluetooth device connected or disconnected; its battery values arrive a moment later.
+    BluetoothChanged,
+    /// The Mac flipped between AC and battery power.
+    #[cfg(target_os = "macos")]
+    PowerChanged,
     #[cfg(windows)]
     Taskbar(taskbar::Signal),
     /// A left or right click released on the tray icon: opens the menu thread's menu.
@@ -105,7 +114,7 @@ pub enum UserEvent {
     #[cfg(windows)]
     Plugged(Id),
     /// The PC resumed from sleep.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     Woke,
     /// Devices the worker found worth offering in the new-device popup.
     #[cfg(windows)]
@@ -137,6 +146,9 @@ impl UserEvent {
             Self::Menu(_) => "Menu",
             #[cfg(target_os = "macos")]
             Self::ThemeChanged => "ThemeChanged",
+            Self::BluetoothChanged => "BluetoothChanged",
+            #[cfg(target_os = "macos")]
+            Self::PowerChanged => "PowerChanged",
             #[cfg(windows)]
             Self::Taskbar(taskbar::Signal::ThemeChanged) => "Taskbar::ThemeChanged",
             #[cfg(windows)]
@@ -157,7 +169,7 @@ impl UserEvent {
             Self::UpdateRestart => "UpdateRestart",
             #[cfg(windows)]
             Self::Plugged(_) => "Plugged",
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             Self::Woke => "Woke",
             #[cfg(windows)]
             Self::Offers(_) => "Offers",
@@ -202,7 +214,13 @@ pub fn run() -> ExitCode {
     #[cfg(windows)]
     forward_tray_clicks(proxy.clone());
     #[cfg(target_os = "macos")]
-    theme::watch_changes(proxy.clone());
+    {
+        theme::watch_changes(proxy.clone());
+        wake::watch(proxy.clone());
+    }
+    // Connects and disconnects (macOS: also AC/battery) arrive as events; polls start with the loop.
+    #[cfg(any(target_os = "macos", windows))]
+    connections::watch(proxy.clone());
 
     let mut app: Option<App> = None;
     event_loop.run(move |event, _, control_flow| {
@@ -327,6 +345,9 @@ impl App {
         #[cfg(windows)]
         let builder = builder.with_icon(Icon::from_resource(1, None)?);
         let tray = builder.build()?;
+        // The button's appearance settles after launch; observe it so the strip re-renders then.
+        #[cfg(target_os = "macos")]
+        theme::watch_button_appearance(&tray, proxy.clone());
         // The UI heartbeat timer is this thread's own, so the watchdog runs even without a strip.
         #[cfg(windows)]
         let device_notify =
@@ -417,9 +438,18 @@ impl App {
                     self.on_action(action);
                 }
             }
-            // `apply` below re-reads the theme.
+            // The system theme or the button's appearance changed; `apply` below re-reads the theme.
             #[cfg(target_os = "macos")]
             UserEvent::ThemeChanged => {}
+            UserEvent::BluetoothChanged => {
+                self.tell_worker(Command::RefreshSoon);
+                return ControlFlow::Wait;
+            }
+            #[cfg(target_os = "macos")]
+            UserEvent::PowerChanged => {
+                self.refresh_power_source();
+                return ControlFlow::Wait;
+            }
             // The theme changed; `apply` below re-reads it and sends the strip again.
             #[cfg(windows)]
             UserEvent::Taskbar(taskbar::Signal::ThemeChanged) => {}
@@ -460,7 +490,7 @@ impl App {
                 self.settle_arrivals(now);
                 return ControlFlow::Wait;
             }
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             UserEvent::Woke => {
                 self.tell_worker(Command::RefreshNow);
                 return ControlFlow::Wait;
@@ -676,7 +706,7 @@ impl App {
         }
     }
 
-    /// Only Windows detects a battery, so the menu never offers the option elsewhere.
+    /// macOS asks no confirmation (the option is only offered on a laptop).
     #[cfg(not(windows))]
     fn confirm_refresh_on_battery(&mut self) {
         self.set_refresh_on_battery(true);
@@ -1072,13 +1102,14 @@ impl App {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 impl App {
-    /// The power status changed; the worker hears of it only when AC or battery actually flipped.
-    fn on_power_changed(&mut self) {
+    /// Re-reads the power source; the worker hears of it only when AC or battery actually
+    /// flipped. Returns whether it did.
+    fn refresh_power_source(&mut self) -> bool {
         let source = pause::current_power_source();
         if source == self.power_source {
-            return;
+            return false;
         }
         log::trace(format_args!(
             "power source {:?} -> {source:?}",
@@ -1086,6 +1117,17 @@ impl App {
         ));
         self.power_source = source;
         self.send_power();
+        true
+    }
+}
+
+#[cfg(windows)]
+impl App {
+    /// The power status changed; a flip may also release an update check that waited for AC.
+    fn on_power_changed(&mut self) {
+        if !self.refresh_power_source() {
+            return;
+        }
         if self.update_check_waits_for_ac && pause::timer_may_read(self.power_state()) {
             self.on_update_due();
         }

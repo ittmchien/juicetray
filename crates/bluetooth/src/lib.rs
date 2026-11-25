@@ -7,6 +7,12 @@ mod macos;
 #[cfg(windows)]
 mod windows;
 
+// The connected-device set the app polls to notice connects and disconnects (Windows can fail).
+#[cfg(target_os = "macos")]
+pub use macos::connected_ids;
+#[cfg(windows)]
+pub use windows::connected_ids;
+
 /// All paired/known Bluetooth devices, connected or not; empty on other platforms.
 pub fn read_devices() -> anyhow::Result<Vec<DeviceView>> {
     #[cfg(target_os = "macos")]

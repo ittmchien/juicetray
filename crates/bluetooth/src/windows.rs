@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::mem::size_of;
 use std::time::SystemTime;
 
@@ -70,49 +70,92 @@ impl Container {
     }
 }
 
-pub fn read_devices() -> anyhow::Result<Vec<DeviceView>> {
+/// Opens the list of present device nodes of every class.
+fn open_present_devices() -> anyhow::Result<Owned<HDEVINFO>> {
     // SAFETY: no class filter, enumerator or parent window; the list is freed by `Owned`.
-    let set = unsafe {
+    Ok(unsafe {
         Owned::new(SetupDiGetClassDevsW(
             None,
             PCWSTR::null(),
             None,
             DIGCF_ALLCLASSES | DIGCF_PRESENT,
         )?)
-    };
+    })
+}
 
-    // First pass reads two cheap keys per node: the container id (one physical device shows up as
-    // several nodes) and the battery. Only containers with a stored battery are ever listed.
-    let mut nodes: Vec<(u128, SP_DEVINFO_DATA)> = Vec::new();
-    let mut batteries: BTreeMap<u128, u8> = BTreeMap::new();
+/// Calls `visit` for each node of `set`; the node is a scratch copy, valid during the call only.
+fn for_each_node(set: HDEVINFO, mut visit: impl FnMut(&SP_DEVINFO_DATA)) -> anyhow::Result<()> {
     let mut node = SP_DEVINFO_DATA {
         cbSize: size_of::<SP_DEVINFO_DATA>() as u32,
         ..Default::default()
     };
     for index in 0.. {
         // SAFETY: `node` is a valid SP_DEVINFO_DATA with `cbSize` set.
-        if let Err(error) = unsafe { SetupDiEnumDeviceInfo(*set, index, &mut node) } {
+        if let Err(error) = unsafe { SetupDiEnumDeviceInfo(set, index, &mut node) } {
             if error.code() == ERROR_NO_MORE_ITEMS.to_hresult() {
                 break;
             }
             return Err(error.into());
         }
+        visit(&node);
+    }
+    Ok(())
+}
+
+/// The container id of a node; `None` for nodes that sit in no container.
+fn container_id(set: HDEVINFO, node: &SP_DEVINFO_DATA) -> Option<u128> {
+    fixed_property::<16>(set, node, &DEVPKEY_Device_ContainerId, DEVPROP_TYPE_GUID)
+        .map(u128::from_le_bytes)
+        .filter(|&id| id != 0)
+}
+
+/// Whether the node reports a live Bluetooth connection.
+fn node_connected(set: HDEVINFO, node: &SP_DEVINFO_DATA) -> bool {
+    fixed_property::<1>(
+        set,
+        node,
+        &DEVPKEY_BLUETOOTH_IS_CONNECTED,
+        DEVPROP_TYPE_BOOLEAN,
+    )
+    .is_some_and(|[flag]| flag != 0)
+}
+
+/// Opaque ids (container ids, hex) of the devices with a connected node, only compared with each
+/// other for connect/disconnect detection.
+/// One property read per node, no battery, so it is cheap enough to poll.
+pub fn connected_ids() -> anyhow::Result<BTreeSet<String>> {
+    let set = open_present_devices()?;
+    let mut connected = BTreeSet::new();
+    for_each_node(*set, |node| {
+        if node_connected(*set, node)
+            && let Some(id) = container_id(*set, node)
+        {
+            connected.insert(format!("{id:032x}"));
+        }
+    })?;
+    Ok(connected)
+}
+
+pub fn read_devices() -> anyhow::Result<Vec<DeviceView>> {
+    let set = open_present_devices()?;
+
+    // First pass reads two cheap keys per node: the container id (one physical device shows up as
+    // several nodes) and the battery. Only containers with a stored battery are ever listed.
+    let mut nodes: Vec<(u128, SP_DEVINFO_DATA)> = Vec::new();
+    let mut batteries: BTreeMap<u128, u8> = BTreeMap::new();
+    for_each_node(*set, |node| {
         // Nodes that sit in no container are ignored.
-        let Some(id) =
-            fixed_property::<16>(*set, &node, &DEVPKEY_Device_ContainerId, DEVPROP_TYPE_GUID)
-                .map(u128::from_le_bytes)
-                .filter(|&id| id != 0)
-        else {
-            continue;
+        let Some(id) = container_id(*set, node) else {
+            return;
         };
         if let Some(percent) =
-            fixed_property::<1>(*set, &node, &DEVPKEY_BLUETOOTH_BATTERY, DEVPROP_TYPE_BYTE)
+            fixed_property::<1>(*set, node, &DEVPKEY_BLUETOOTH_BATTERY, DEVPROP_TYPE_BYTE)
                 .and_then(|[raw]| normalize(i64::from(raw)))
         {
             batteries.entry(id).or_insert(percent);
         }
-        nodes.push((id, node));
-    }
+        nodes.push((id, *node));
+    })?;
 
     // Second pass: the remaining keys, read only for nodes of listed containers.
     let mut containers: BTreeMap<u128, Container> = batteries
@@ -150,13 +193,7 @@ fn read_node_props(set: HDEVINFO, node: &SP_DEVINFO_DATA) -> NodeProps {
         .map(u32::from_le_bytes),
         name: string_property(set, node, &DEVPKEY_Device_FriendlyName)
             .or_else(|| string_property(set, node, &DEVPKEY_Device_DeviceDesc)),
-        connected: fixed_property::<1>(
-            set,
-            node,
-            &DEVPKEY_BLUETOOTH_IS_CONNECTED,
-            DEVPROP_TYPE_BOOLEAN,
-        )
-        .is_some_and(|[flag]| flag != 0),
+        connected: node_connected(set, node),
     }
 }
 

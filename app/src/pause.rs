@@ -16,7 +16,7 @@ const NO_BATTERY_FLAG: u8 = 128;
 const UNKNOWN: u8 = 255;
 
 /// Where the machine gets its power; only a laptop that is unplugged counts as `Battery`.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PowerSource {
     /// No system battery (a desktop), or the OS could not say: never pauses anything.
@@ -78,10 +78,111 @@ pub fn current_power_source() -> PowerSource {
     }
 }
 
-/// Only Windows reads the battery.
-#[cfg(not(windows))]
+/// The current power source from IOKit; a failed query or a Mac without an internal battery
+/// counts as no battery, which pauses nothing.
+#[cfg(target_os = "macos")]
+pub fn current_power_source() -> PowerSource {
+    iokit::providing_type().map_or(PowerSource::NoBattery, |kind| power_source_from_type(&kind))
+}
+
+/// No battery reading on other platforms.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn current_power_source() -> PowerSource {
     PowerSource::NoBattery
+}
+
+/// The power source from IOKit's providing-source string (`kIOPSACPowerValue` "AC Power",
+/// `kIOPSBatteryPowerValue` "Battery Power"); anything else (a UPS) counts as no battery.
+#[cfg(any(target_os = "macos", test))]
+fn power_source_from_type(providing_type: &str) -> PowerSource {
+    match providing_type {
+        "AC Power" => PowerSource::Ac,
+        "Battery Power" => PowerSource::Battery,
+        _ => PowerSource::NoBattery,
+    }
+}
+
+/// Raw IOKit power-source calls; CoreFoundation objects are toll-free bridged, so strings read
+/// through `NSString`.
+#[cfg(target_os = "macos")]
+mod iokit {
+    use std::ffi::c_void;
+
+    use objc2_foundation::NSString;
+
+    /// `kIOPSTypeKey` and its value for the built-in battery (a UPS reports another type).
+    const TYPE_KEY: &str = "Type";
+    const INTERNAL_BATTERY: &str = "InternalBattery";
+
+    #[link(name = "IOKit", kind = "framework")]
+    unsafe extern "C" {
+        fn IOPSCopyPowerSourcesInfo() -> *const c_void;
+        fn IOPSCopyPowerSourcesList(blob: *const c_void) -> *const c_void;
+        fn IOPSGetProvidingPowerSourceType(blob: *const c_void) -> *const c_void;
+        fn IOPSGetPowerSourceDescription(
+            blob: *const c_void,
+            source: *const c_void,
+        ) -> *const c_void;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRelease(object: *const c_void);
+        fn CFArrayGetCount(array: *const c_void) -> isize;
+        fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
+        fn CFDictionaryGetValue(dictionary: *const c_void, key: *const c_void) -> *const c_void;
+    }
+
+    /// Owns a CoreFoundation object from a `Copy` call and releases it on drop.
+    struct Owned(*const c_void);
+
+    impl Owned {
+        /// `None` for a null result.
+        fn new(object: *const c_void) -> Option<Self> {
+            (!object.is_null()).then_some(Self(object))
+        }
+    }
+
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            // SAFETY: the pointer is a non-null object this value owns, released exactly once.
+            unsafe { CFRelease(self.0) };
+        }
+    }
+
+    /// The text of a CFString that stays valid for the call; `None` for null.
+    ///
+    /// # Safety
+    /// `string` is null or a live CFString.
+    unsafe fn text(string: *const c_void) -> Option<String> {
+        // SAFETY: per the contract; CFString is toll-free bridged to NSString.
+        unsafe { string.cast::<NSString>().as_ref() }.map(ToString::to_string)
+    }
+
+    /// The providing source ("AC Power" / "Battery Power"), or `None` without an internal battery.
+    pub fn providing_type() -> Option<String> {
+        // SAFETY: each Copy result is owned by an `Owned` that outlives every borrowed pointer
+        // read from it (the Get results below are valid while their owner lives).
+        unsafe {
+            let info = Owned::new(IOPSCopyPowerSourcesInfo())?;
+            let list = Owned::new(IOPSCopyPowerSourcesList(info.0))?;
+            let key = NSString::from_str(TYPE_KEY);
+            let has_internal_battery = (0..CFArrayGetCount(list.0)).any(|index| {
+                let description =
+                    IOPSGetPowerSourceDescription(info.0, CFArrayGetValueAtIndex(list.0, index));
+                !description.is_null()
+                    && text(CFDictionaryGetValue(
+                        description,
+                        (&*key as *const NSString).cast(),
+                    ))
+                    .is_some_and(|kind| kind == INTERNAL_BATTERY)
+            });
+            if !has_internal_battery {
+                return None;
+            }
+            text(IOPSGetProvidingPowerSourceType(info.0))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -130,6 +231,18 @@ mod tests {
         assert_eq!(power_source(0, 128), PowerSource::NoBattery);
         assert_eq!(power_source(255, 255), PowerSource::NoBattery);
         assert_eq!(power_source(255, 1), PowerSource::Ac);
+    }
+
+    #[test]
+    fn power_source_from_iokit_providing_type() {
+        assert_eq!(power_source_from_type("AC Power"), PowerSource::Ac);
+        assert_eq!(
+            power_source_from_type("Battery Power"),
+            PowerSource::Battery
+        );
+        // A UPS or an unknown string never pauses anything.
+        assert_eq!(power_source_from_type("UPS Power"), PowerSource::NoBattery);
+        assert_eq!(power_source_from_type(""), PowerSource::NoBattery);
     }
 
     #[test]

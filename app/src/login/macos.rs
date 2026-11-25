@@ -13,7 +13,8 @@ pub fn login_state() -> LoginState {
     let status = unsafe { SMAppService::mainAppService().status() };
     match status {
         SMAppServiceStatus::Enabled => LoginState::Enabled,
-        SMAppServiceStatus::NotRegistered => LoginState::Disabled,
+        // A main app never registered reports NotFound, not NotRegistered; both can register.
+        SMAppServiceStatus::NotRegistered | SMAppServiceStatus::NotFound => LoginState::Disabled,
         SMAppServiceStatus::RequiresApproval => LoginState::RequiresApproval,
         _ => LoginState::Unavailable,
     }
