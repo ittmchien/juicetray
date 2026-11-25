@@ -1,15 +1,9 @@
-## What's new in v0.3.0
+## What's new in v0.4.0
 
 ### 🛠 Fixed
-- **Vendor apps no longer freeze.** While MCHOSE HUB, ATK HUB or VGN VHUB is open, Juicetray leaves that brand's receivers alone and shows the last level with *paused (… open)*. Close the app and Juicetray reads again.
-- Opening Juicetray while it is already running now says so, instead of quitting silently. To start a newer copy you downloaded, quit the running one first (right-click its icon → **Quit**), or use **Update now**.
+- **macOS builds again.** The "already running" message now has a macOS dialog too, so the Mac app compiles and says so when you open a second copy.
 
-### 🎨 Improved
-- Task Manager and file properties show **Juicetray** and its version instead of the file name.
-- The menu shows your version next to **Check for updates…**.
-- Device reports from **Add device** include each interface's details, so new devices can be added faster.
+### 🍎 macOS beta
+- Bluetooth devices (AirPods left/right, headsets, mice…) work on macOS. Install through Homebrew, which builds the app on your Mac so Gatekeeper does not block it; see *Install → macOS* in the README.
 
-### 🧩 For contributors
-- New data-driven **Generic** protocol: many devices can now be added with one catalogue line, no code. See *Add a device model* in the README.
-
-Download `juicetray-windows-x86_64.exe` below, or use **Update now** in the app.
+Windows: download `juicetray-windows-x86_64.exe` below, or use **Update now** in the app.
