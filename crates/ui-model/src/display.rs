@@ -8,6 +8,8 @@ pub enum IconChoice {
     Kind(DeviceKind),
     /// Path of the owner's SVG file.
     Svg(String),
+    /// Name of a system symbol (macOS SF Symbols), drawn tinted like a built-in icon.
+    Symbol(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

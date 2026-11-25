@@ -13,12 +13,14 @@ use svg::builtin_icon;
 use text::embedded_font;
 use text::{Run, digit_height, layout_text};
 use tiny_skia::{
-    Color, FillRule, Mask, MaskType, Paint, Path, Pixmap, PixmapPaint, Stroke, Transform,
+    Color, FillRule, FilterQuality, Mask, MaskType, Paint, Path, PixmapPaint, Stroke, Transform,
 };
 use ui_model::{DeviceKind, IconChoice, IconColor, Segment, SegmentStyle};
 
 pub use svg::{SvgIcon, load_svg};
 pub use text::{FontData, TextStyle};
+/// The bitmap type `IconChoice::Symbol` images are handed over in (premultiplied RGBA).
+pub use tiny_skia::Pixmap;
 
 // Proportions, all relative to the bitmap height; sized to read clearly in a 22 pt menu bar.
 const ICON_SIZE: f32 = 0.8;
@@ -75,9 +77,16 @@ struct Scene<'a> {
     height: f32,
     theme: Theme,
     svgs: &'a HashMap<String, SvgIcon>,
+    symbols: &'a HashMap<String, Option<Pixmap>>,
     /// `None` draws no text.
     font: Option<FontRef<'a>>,
     text_px: f32,
+}
+
+/// Edge in pixels of the square the icon is drawn in for a strip `height_px` tall, so callers
+/// can pre-render `IconChoice::Symbol` bitmaps at the size they are shown.
+pub fn icon_size_px(height_px: u32) -> u32 {
+    (ICON_SIZE * height_px as f32).ceil() as u32
 }
 
 /// Icon, optional caption, gauge and optional number of every segment, left to right.
@@ -89,11 +98,25 @@ pub fn render_strip(
     svgs: &HashMap<String, SvgIcon>,
     text: &TextStyle,
 ) -> Bitmap {
+    render_strip_with_symbols(segments, height_px, theme, svgs, &HashMap::new(), text)
+}
+
+/// `render_strip` plus `symbols`, alpha masks by `IconChoice::Symbol` name drawn tinted;
+/// a missing or `None` entry draws the Earbuds icon.
+pub fn render_strip_with_symbols(
+    segments: &[Segment],
+    height_px: u32,
+    theme: Theme,
+    svgs: &HashMap<String, SvgIcon>,
+    symbols: &HashMap<String, Option<Pixmap>>,
+    text: &TextStyle,
+) -> Bitmap {
     let height = height_px as f32;
     let scene = Scene {
         height,
         theme,
         svgs,
+        symbols,
         font: text.font_ref(),
         text_px: text.size_px.min(MAX_TEXT_SIZE * height),
     };
@@ -213,7 +236,7 @@ fn draw_segment(
     let top = (height - icon_size) / 2.0;
     let mut cursor = x;
 
-    let (icon, is_svg) = resolve_icon(&segment.icon, scene.svgs);
+    let (icon, is_svg) = resolve_icon(&segment.icon, scene.svgs, scene.symbols);
     // Each theme has its own icon colour, so the owner can pick one that reads on that bar.
     let color = match scene.theme {
         Theme::Light => segment.color_light,
@@ -256,19 +279,56 @@ fn draw_segment(
     }
 }
 
-/// The icon to draw and whether it is the owner's SVG; a path missing from `svgs` draws the generic icon.
+/// What an icon is drawn from: a vector file or a pre-rendered alpha image.
+#[derive(Clone, Copy)]
+enum Glyph<'a> {
+    Svg(&'a SvgIcon),
+    Bitmap(&'a Pixmap),
+}
+
+impl Glyph<'_> {
+    /// Draws the glyph scaled to fit the `size` square at (`x`, `y`), centred, aspect kept.
+    fn render(self, target: &mut Pixmap, x: f32, y: f32, size: f32) {
+        match self {
+            Glyph::Svg(icon) => icon.render(target, x, y, size),
+            Glyph::Bitmap(image) => {
+                let scale = (size / image.width() as f32).min(size / image.height() as f32);
+                let paint = PixmapPaint {
+                    quality: FilterQuality::Bilinear,
+                    ..PixmapPaint::default()
+                };
+                let transform = Transform::from_scale(scale, scale).post_translate(
+                    x + (size - image.width() as f32 * scale) / 2.0,
+                    y + (size - image.height() as f32 * scale) / 2.0,
+                );
+                target.draw_pixmap(0, 0, image.as_ref(), &paint, transform, None);
+            }
+        }
+    }
+}
+
+/// The icon to draw and whether it is the owner's SVG; a path missing from `svgs` draws the
+/// generic icon, a symbol missing from `symbols` the Earbuds icon.
 fn resolve_icon<'a>(
     choice: &IconChoice,
     svgs: &'a HashMap<String, SvgIcon>,
-) -> (&'a SvgIcon, bool) {
+    symbols: &'a HashMap<String, Option<Pixmap>>,
+) -> (Glyph<'a>, bool) {
     match choice {
-        IconChoice::Kind(kind) => (builtin_icon(*kind), false),
+        IconChoice::Kind(kind) => (Glyph::Svg(builtin_icon(*kind)), false),
         IconChoice::Svg(path) => svgs.get(path).map_or_else(
-            || (builtin_icon(DeviceKind::Other), false),
-            |icon| (icon, true),
+            || (Glyph::Svg(builtin_icon(DeviceKind::Other)), false),
+            |icon| (Glyph::Svg(icon), true),
+        ),
+        IconChoice::Symbol(name) => (
+            symbols.get(name).and_then(Option::as_ref).map_or_else(
+                || Glyph::Svg(builtin_icon(DeviceKind::Earbuds)),
+                Glyph::Bitmap,
+            ),
+            false,
         ),
         // Segments carry a resolved icon; `Auto` only reaches here from hand-built segments.
-        IconChoice::Auto => (builtin_icon(DeviceKind::Other), false),
+        IconChoice::Auto => (Glyph::Svg(builtin_icon(DeviceKind::Other)), false),
     }
 }
 
@@ -364,7 +424,7 @@ impl Canvas {
 
     /// Draws `icon` in the `size` square at (`x`, `y`); with a `tint` only its shape is kept,
     /// filled with that flat colour.
-    fn draw_icon(&mut self, icon: &SvgIcon, x: f32, y: f32, size: f32, tint: Option<Color>) {
+    fn draw_icon(&mut self, icon: Glyph, x: f32, y: f32, size: f32, tint: Option<Color>) {
         // The icon is rendered on its own box-sized pixmap, so content outside its viewBox is
         // clipped there; one extra pixel keeps the sub-pixel offset of (`x`, `y`).
         let (left, top) = (x.floor(), y.floor());
@@ -908,6 +968,53 @@ mod tests {
             }
         }
         assert!(has_pixel(&bitmap, |r, g, b| r > 200 && g < 60 && b < 60));
+    }
+
+    /// A strip with one icon-only `Symbol` segment, `symbols` as given.
+    fn symbol_strip(symbols: &HashMap<String, Option<Pixmap>>, color: IconColor) -> Bitmap {
+        let segment = Segment {
+            icon: IconChoice::Symbol("s".to_owned()),
+            color_light: color,
+            color_dark: color,
+            gauge: None,
+            text: String::new(),
+            ..segment(SegmentStyle::Normal)
+        };
+        render_strip_with_symbols(
+            &[segment],
+            TEST_HEIGHT,
+            Theme::Light,
+            &HashMap::new(),
+            symbols,
+            &test_style(TEST_HEIGHT),
+        )
+    }
+
+    #[test]
+    fn symbol_is_drawn_as_tinted_alpha_mask() {
+        // An opaque red square: only its alpha survives, painted in the chosen colour.
+        let mut image = Pixmap::new(20, 20).unwrap();
+        image.fill(Color::from_rgba8(255, 0, 0, 255));
+        let symbols = HashMap::from([("s".to_owned(), Some(image))]);
+        let bitmap = symbol_strip(&symbols, IconColor::Rgb(0x3E, 0x8E, 0xED));
+        assert!(has_pixel(&bitmap, |r, g, b| r < 100 && g > 100 && b > 200));
+        assert!(!has_pixel(&bitmap, |r, g, b| r > 200 && g < 60 && b < 60));
+    }
+
+    #[test]
+    fn symbol_missing_draws_earbuds() {
+        let bitmap = symbol_strip(&HashMap::new(), IconColor::Auto);
+        let earbuds = strip(
+            &[Segment {
+                icon: IconChoice::Kind(DeviceKind::Earbuds),
+                gauge: None,
+                text: String::new(),
+                ..segment(SegmentStyle::Normal)
+            }],
+            TEST_HEIGHT,
+            Theme::Light,
+        );
+        assert_eq!(bitmap, earbuds);
     }
 
     #[test]

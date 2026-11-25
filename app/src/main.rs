@@ -35,6 +35,10 @@ mod refresh;
 mod report;
 mod scan;
 mod svg_cache;
+// System symbols are pre-rendered through AppKit, so the cache is macOS only.
+#[cfg(target_os = "macos")]
+mod symbol_cache;
+mod symbols;
 mod taskbar;
 mod theme;
 mod ui_font;

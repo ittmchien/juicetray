@@ -77,7 +77,8 @@ pub fn build_strip(
         .collect()
 }
 
-/// Replaces `Auto` icon by the device kind and drops `Original` colours without an SVG.
+/// Replaces `Auto` icon by the device kind and drops `Original` colours without an SVG
+/// (a `Symbol` is tintable only, like a built-in icon).
 fn resolve_options(kind: DeviceKind, options: DisplayOptions) -> DisplayOptions {
     let icon = match options.icon {
         IconChoice::Auto => IconChoice::Kind(kind),
@@ -326,6 +327,12 @@ mod tests {
         let svg = one(percent("a", 40), original(IconChoice::Svg("a.svg".into())));
         assert_eq!(svg.color_light, IconColor::Original);
         assert_eq!(svg.color_dark, IconColor::Original);
+        // A system symbol is tintable only, like a built-in icon.
+        let symbol = one(
+            percent("a", 40),
+            original(IconChoice::Symbol("airpods".into())),
+        );
+        assert_eq!(symbol.color_light, IconColor::Auto);
     }
 
     #[test]

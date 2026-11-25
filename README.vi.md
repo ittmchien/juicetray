@@ -20,8 +20,8 @@ cần cài phần mềm của từng hãng.
 </div>
 
 > [!NOTE]
-> **Bản beta, hiện chỉ có Windows.** Thiết bị Bluetooth và các receiver đã xác minh bên dưới
-> chạy được trên Windows; bản macOS sẽ phát hành sau khi kiểm trên máy Mac.
+> **Bản beta.** Thiết bị Bluetooth và các receiver đã xác minh bên dưới chạy được trên Windows.
+> Trên macOS, thiết bị Bluetooth đã chạy (cài bằng Homebrew); receiver chưa được thử ở đó.
 
 ## ✨ Tính năng
 
@@ -35,6 +35,7 @@ cần cài phần mềm của từng hãng.
   ghi *disconnected*; tự ẩn thiết bị offline sau khoảng thời gian bạn chọn.
 - 🔔 **Cảnh báo pin yếu** — thông báo khi chạm ngưỡng bạn chọn (5–30 % hoặc tự nhập).
 - 🛠️ **Tuỳ chỉnh từng thiết bị** — hiện/ẩn, phần trăm, nhãn, icon, màu icon cho taskbar sáng và tối.
+  Trên macOS, AirPods và tai Beats hiện đúng biểu tượng của Apple.
 - 🪶 **Siêu nhẹ** — khoảng 10 MB RAM, ~0,05 % CPU lúc rảnh, file exe portable 2 MB; tự dừng
   auto-refresh khi laptop chạy pin, trừ khi bạn bật lại.
 - 🔄 **Cập nhật một chạm** — kiểm tra GitHub Releases mỗi ngày; **Update now** kiểm SHA-256 của
@@ -51,6 +52,22 @@ cần cài phần mềm của từng hãng.
 
 Cài đặt lưu ở `%APPDATA%\ittmchien\juicetray\config\config.toml`, nên thay file exe không mất
 cài đặt. Windows SmartScreen có thể cảnh báo app chưa ký số: bấm **More info → Run anyway**.
+
+### 🍎 macOS (beta, Homebrew)
+
+Homebrew build app từ mã nguồn ngay trên máy Mac (mất vài phút; Rust được cài để build), nên
+Gatekeeper không chặn:
+
+```sh
+brew tap ittmchien/tap
+brew trust ittmchien/tap   # Homebrew chỉ nạp formula từ tap khác sau khi được tin cậy
+brew install juicetray
+cp -R "$(brew --prefix)/opt/juicetray/Juicetray.app" /Applications/
+```
+
+Mở **Juicetray** từ Applications và cho phép Bluetooth khi được hỏi. Cập nhật:
+`brew upgrade juicetray`, thoát Juicetray rồi chạy lại dòng `cp` (sau
+`rm -rf /Applications/Juicetray.app`).
 
 ## 🎧 Thiết bị hỗ trợ
 
@@ -105,7 +122,7 @@ allow = ["391D:1A05"]
 | Nền tảng | Trạng thái |
 |---|---|
 | 🪟 Windows 10 / 11 (x86_64) | ✅ Đã phát hành |
-| 🍎 macOS (Apple silicon và Intel) | 🚧 CI có build, chưa phát hành |
+| 🍎 macOS 13+ (Apple silicon và Intel) | 🧪 Beta qua Homebrew (đã thử Bluetooth) |
 
 ## 🔄 Cập nhật
 
@@ -117,6 +134,9 @@ tối đa một lần (mở lại app cũng không kiểm thêm). Tắt bằng m
 **Update now** tải exe mới, kiểm SHA-256 với `SHA256SUMS.txt` của bản phát hành, thay file rồi
 khởi động lại; lỗi ở bất kỳ bước nào thì exe cũ được giữ nguyên. Nếu thư mục chứa exe không ghi
 được thì app mở trang tải về thay vào đó.
+
+Trên macOS app không tự kiểm tra: **Check for updates…** mở trang phát hành, còn bản cài bằng
+Homebrew thì cập nhật bằng `brew upgrade juicetray` (xem phần Cài đặt).
 
 ## ⚠️ Lỗi đã biết
 

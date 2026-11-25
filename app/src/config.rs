@@ -37,6 +37,7 @@ const SECONDS_PER_MINUTE: i64 = 60;
 
 const ICON_AUTO: &str = "auto";
 const ICON_SVG: &str = "svg";
+const ICON_SYMBOL: &str = "symbol";
 const COLOR_AUTO: &str = "auto";
 const COLOR_ORIGINAL: &str = "original";
 
@@ -675,11 +676,15 @@ fn devices(table: &Table) -> BTreeMap<String, DeviceConfig> {
         .collect()
 }
 
-/// A missing or invalid field takes its default: unknown icon or `svg` without a path → Auto.
+/// A missing or invalid field takes its default: unknown icon, `svg` without a path or `symbol`
+/// without a name → Auto.
 fn device_config(entry: &Table) -> DeviceConfig {
     let text = |key: &str| entry.get(key).and_then(Value::as_str);
     let icon = match (text("icon"), text("svg_path")) {
         (Some(ICON_SVG), Some(path)) => IconChoice::Svg(path.to_owned()),
+        (Some(ICON_SYMBOL), _) => text("symbol_name")
+            .filter(|name| !name.is_empty())
+            .map_or(IconChoice::Auto, |name| IconChoice::Symbol(name.to_owned())),
         (Some(name), _) => name.parse().map_or(IconChoice::Auto, IconChoice::Kind),
         (None, _) => IconChoice::Auto,
     };
@@ -718,6 +723,10 @@ fn device_table(device: &DeviceConfig) -> Table {
         IconChoice::Svg(path) => {
             entry.insert("svg_path".into(), Value::String(path.clone()));
             ICON_SVG
+        }
+        IconChoice::Symbol(name) => {
+            entry.insert("symbol_name".into(), Value::String(name.clone()));
+            ICON_SYMBOL
         }
     };
     entry.insert("icon".into(), Value::String(icon.to_owned()));
@@ -1386,6 +1395,23 @@ allow = [\"373B:1204\"]
             config.display_options("bt:unknown"),
             DisplayOptions::default()
         );
+    }
+
+    #[test]
+    fn symbol_icon_roundtrip() {
+        let mut config = Config::default();
+        config.update_device(MAC_ID, "AirPods Pro", |options| {
+            options.icon = IconChoice::Symbol("airpods.pro".into());
+        });
+        let loaded = Config::parse(&config.to_toml());
+        assert_eq!(loaded, config);
+        assert_eq!(
+            loaded.display_options(MAC_ID).icon,
+            IconChoice::Symbol("airpods.pro".into())
+        );
+        // A symbol entry without a name loads as Auto.
+        let nameless = Config::parse(&format!("[devices.\"{MAC_ID}\"]\nicon = \"symbol\"\n"));
+        assert_eq!(nameless.display_options(MAC_ID).icon, IconChoice::Auto);
     }
 
     #[test]

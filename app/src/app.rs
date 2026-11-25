@@ -35,6 +35,9 @@ use crate::plug::{self, Arrivals, Id, Offer, Plan, Settings};
 use crate::popup::{self, OfferQueue};
 use crate::refresh::{self, Command};
 use crate::svg_cache::SvgCache;
+#[cfg(target_os = "macos")]
+use crate::symbol_cache::SymbolCache;
+use crate::symbols::{DEFAULT_SYMBOL, symbol_for_device};
 #[cfg(windows)]
 use crate::taskbar::{self, StripContent, TaskbarHandle};
 #[cfg(target_os = "macos")]
@@ -59,10 +62,6 @@ const LOW_PROMPT: &str = "Alert when a battery drops to this percent, from 1 to 
 const HIDE_OFFLINE_PROMPT_TITLE: &str = "Custom hide offline";
 const HIDE_OFFLINE_PROMPT: &str =
     "Minutes before an offline device leaves the strip, from 1 to 1440.";
-#[cfg(not(windows))]
-const COLOR_PROMPT: &str = "Type a colour as #RRGGBB, for example #FF8800.";
-#[cfg(not(windows))]
-const COLOR_HINT: &str = "That is not a colour. Type #RRGGBB, for example #FF8800.";
 
 #[cfg(windows)]
 const BATTERY_CONFIRM_TITLE: &str = "Refresh on battery power";
@@ -275,6 +274,9 @@ struct App {
     #[cfg(target_os = "macos")]
     shown_entries: Vec<MenuEntry>,
     svgs: SvgCache,
+    /// System symbols (AirPods glyphs) rendered at the menu bar icon size.
+    #[cfg(target_os = "macos")]
+    symbols: SymbolCache,
     power_source: PowerSource,
     /// For the confirm dialog's thread, which answers with a `UserEvent`.
     #[cfg(windows)]
@@ -363,6 +365,8 @@ impl App {
             #[cfg(target_os = "macos")]
             shown_entries: Vec::new(),
             svgs: SvgCache::default(),
+            #[cfg(target_os = "macos")]
+            symbols: SymbolCache::new(strip_render::icon_size_px(MAC_STRIP_HEIGHT_PX)),
             power_source: power.source,
             #[cfg(windows)]
             proxy,
@@ -528,6 +532,7 @@ impl App {
             MenuAction::SetRefresh(seconds) => self.set_refresh(seconds),
             MenuAction::CustomRefresh => self.prompt_refresh(),
             MenuAction::PickSvg(id) => self.pick_svg(&id),
+            MenuAction::SetSymbolIcon(id) => self.set_symbol_icon(&id),
             MenuAction::CustomLow => self.prompt_low(),
             MenuAction::CustomHideOffline => self.prompt_hide_offline(),
             MenuAction::CustomColor(id, theme) => self.prompt_color(&id, theme),
@@ -839,6 +844,22 @@ impl App {
         self.update_device(id, |options| options.icon = IconChoice::Svg(path));
     }
 
+    /// Uses the symbol matching the device's model as its icon; without a match an already chosen
+    /// symbol stays, else the default one.
+    fn set_symbol_icon(&mut self, id: &str) {
+        let matched = self
+            .devices
+            .iter()
+            .find(|device| device.id == id)
+            .and_then(|device| symbol_for_device(&device.name, device.kind));
+        let symbol = match (matched, self.config.display_options(id).icon) {
+            (Some(name), _) => name.to_owned(),
+            (None, IconChoice::Symbol(current)) => current,
+            (None, _) => DEFAULT_SYMBOL.to_owned(),
+        };
+        self.update_device(id, |options| options.icon = IconChoice::Symbol(symbol));
+    }
+
     /// Makes the next `apply` render the strip even when its segments look unchanged.
     fn force_redraw(&mut self) {
         self.shown_strip = None;
@@ -914,11 +935,14 @@ impl App {
         let _span = log::span("apply_strip");
         let theme = theme::current_theme(&self.tray);
         let devices = self.visible_devices();
-        // Resolved up front: loading an SVG updates the cache, which the strip builder cannot.
+        // Resolved up front: loading an SVG or symbol updates a cache, which the strip builder cannot.
         let options: HashMap<String, DisplayOptions> = devices
             .iter()
             .map(|device| {
                 let options = self.svgs.resolve(self.config.display_options(&device.id));
+                // AirPods and Beats devices show their model's symbol on macOS.
+                #[cfg(target_os = "macos")]
+                let options = self.symbols.resolve(device, options);
                 (device.id.clone(), options)
             })
             .collect();
@@ -1263,11 +1287,12 @@ fn new_taskbar_strip(proxy: EventLoopProxy<UserEvent>) -> Option<TaskbarHandle> 
 impl App {
     /// macOS shows the whole strip in the menu bar.
     fn tray_bitmap(&self, segments: &[Segment], theme: Theme) -> Option<Bitmap> {
-        Some(strip_render::render_strip(
+        Some(strip_render::render_strip_with_symbols(
             segments,
             MAC_STRIP_HEIGHT_PX,
             theme,
             self.svgs.icons(),
+            self.symbols.images(),
             &self.text,
         ))
     }
@@ -1322,9 +1347,8 @@ fn set_theme_color(options: &mut DisplayOptions, theme: Option<Theme>, color: Ic
     }
 }
 
-/// The Windows colour dialog, opened on `current`; Auto and Original have no colour of their
+/// The system colour dialog, opened on `current`; Auto and Original have no colour of their
 /// own, so it opens on the theme ink.
-#[cfg(windows)]
 fn ask_color(current: IconColor, theme: Option<Theme>) -> Option<IconColor> {
     let seed = match (current, theme) {
         (IconColor::Rgb(red, green, blue), _) => (red, green, blue),
@@ -1332,28 +1356,4 @@ fn ask_color(current: IconColor, theme: Option<Theme>) -> Option<IconColor> {
         (_, _) => (0, 0, 0),
     };
     dialog::pick_color(seed).map(|(red, green, blue)| IconColor::Rgb(red, green, blue))
-}
-
-/// macOS has no colour dialog here: a `#RRGGBB` prompt pre-filled with the current custom colour.
-#[cfg(not(windows))]
-fn ask_color(current: IconColor, theme: Option<Theme>) -> Option<IconColor> {
-    let shown = match current {
-        IconColor::Rgb(red, green, blue) => format!("#{}", crate::config::hex(red, green, blue)),
-        IconColor::Auto | IconColor::Original => String::new(),
-    };
-    let title = match theme {
-        None => "Custom icon colour",
-        Some(Theme::Light) => "Custom icon colour (light menu bar)",
-        Some(Theme::Dark) => "Custom icon colour (dark menu bar)",
-    };
-    dialog::prompt_parsed(title, COLOR_PROMPT, &shown, parse_hex_color)
-}
-
-/// Only a `#RRGGBB` colour (the `#` is optional) counts as a custom colour.
-#[cfg(not(windows))]
-fn parse_hex_color(text: &str) -> Result<IconColor, String> {
-    match crate::config::parse_color(text.trim()) {
-        Some(color @ IconColor::Rgb(..)) => Ok(color),
-        _ => Err(COLOR_HINT.to_owned()),
-    }
 }
