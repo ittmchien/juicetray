@@ -37,8 +37,10 @@ cạnh đồng hồ, không cần cài phần mềm của từng hãng.
 - 🗂️ **Nhóm và sắp xếp** — chia nhóm theo loại, pin cao đứng trước, thiết bị offline xuống cuối và
   ghi *disconnected*; tự ẩn thiết bị offline sau khoảng thời gian bạn chọn.
 - 🔔 **Cảnh báo pin yếu** — thông báo khi chạm ngưỡng bạn chọn (5–30 % hoặc tự nhập).
-- 🛠️ **Tuỳ chỉnh từng thiết bị** — hiện/ẩn, phần trăm, nhãn, icon, màu icon cho taskbar / thanh
-  menu sáng và tối. Trên macOS, AirPods và tai Beats hiện đúng biểu tượng của Apple.
+- 🛠️ **Tuỳ chỉnh từng thiết bị** — bấm vào thiết bị trong menu: hiện/ẩn, phần trăm, tên dưới icon,
+  icon (Generic, Headset, Mouse… hoặc SVG của bạn) và màu icon, kèm mục **Custom** để chọn màu
+  chung hoặc riêng cho taskbar / thanh menu sáng và tối. Trên macOS, AirPods và tai Beats hiện đúng
+  biểu tượng của Apple.
 - 🪶 **Siêu nhẹ** — khoảng 10 MB RAM, ~0,05 % CPU lúc rảnh, file exe portable 2 MB trên Windows;
   tự dừng auto-refresh khi laptop chạy pin, trừ khi bạn bật **Refresh on battery power**.
 - 🔄 **Cập nhật một chạm** — kiểm tra GitHub Releases mỗi ngày; **Update now** kiểm SHA-256 của
@@ -153,6 +155,10 @@ cạnh đó trước, nên chép lỗi thì app cũ vẫn nguyên) rồi khởi 
 của Homebrew thì khởi động lại từ đó và hỏi chuyển vào Applications. Lỗi ở bất kỳ bước nào thì một
 hộp thoại báo lý do và bản đang chạy được giữ nguyên. Không cài bằng Homebrew thì app mở trang tải
 về thay vào đó.
+
+Trong lúc **Update now** chạy, một thông báo báo bắt đầu cập nhật và đầu menu hiện bước hiện tại
+(*Downloading…* hoặc *Updating … via Homebrew…*, rồi *Installing…*, sau đó app tự khởi động lại); mục **Check for
+updates…** bị làm mờ tới khi xong.
 
 ## ⚠️ Lỗi đã biết
 

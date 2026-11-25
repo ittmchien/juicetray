@@ -37,8 +37,10 @@ tray — right next to the clock, without each vendor's software.
 - 🗂️ **Grouped and sorted** — devices grouped by kind, highest level first, offline ones last and
   marked *disconnected*; hide offline devices after a delay you choose.
 - 🔔 **Low-battery alert** — a notification at the threshold you pick (5–30 % or custom).
-- 🛠️ **Per-device options** — show or hide, percentage, label, icon, and icon colours for a light
-  and a dark taskbar / menu bar. On macOS, AirPods and Beats earbuds show Apple's own symbol.
+- 🛠️ **Per-device options** — click a device in the menu: show or hide it, its percentage, its
+  name under the icon, the icon (Generic, Headset, Mouse… or your own SVG) and icon colours, with
+  **Custom** picks for both or for a light / dark taskbar / menu bar. On macOS, AirPods and Beats
+  earbuds show Apple's own symbol.
 - 🪶 **Featherweight** — about 10 MB of RAM, ~0.05 % CPU at idle, a 2 MB portable exe on Windows;
   it pauses auto-refresh on laptop battery unless you turn on **Refresh on battery power**.
 - 🔄 **Updates in one click** — checks GitHub Releases once a day; **Update now** verifies the
@@ -153,6 +155,10 @@ On macOS, when Juicetray was installed with Homebrew, **Update now** runs
 from Homebrew's own folder instead, it restarts from there and offers the move to Applications. If
 anything fails, a dialog says why and the running version stays. Without Homebrew it offers the
 download page instead.
+
+While **Update now** runs, a notification says it started and the top of the menu shows the
+current step (*Downloading…* or *Updating … via Homebrew…*, then *Installing…*, then the app restarts);
+**Check for updates…** is greyed out until it finishes.
 
 ## ⚠️ Known issues
 
