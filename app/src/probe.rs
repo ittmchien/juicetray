@@ -6,8 +6,8 @@
 use std::process::ExitCode;
 use std::time::SystemTime;
 
-use door::{Door, Exchange};
-use protocol::{Decoded, KNOWN, Link, Online, battery_query, is_recovery, online_query};
+use door::{Door, Exchange, first_battery_query};
+use protocol::{Decoded, KNOWN, Link, Online, is_recovery, online_query};
 
 use crate::config::Config;
 use crate::device::{Device, lookup};
@@ -16,7 +16,7 @@ use crate::query::{
     open_serial_target, parse_vid_pid, refusal, refusal_for, target_refusal,
 };
 use crate::query_log::{self, QueryLog};
-use crate::scan::bytes_line;
+use crate::scan::{ExchangeStyle, bytes_line, exchange_lines};
 
 /// Prints the exchange, or the reason nothing (more) was sent; exit 0 only for a valid reply.
 pub fn run_probe(args: Vec<String>) -> ExitCode {
@@ -48,8 +48,8 @@ fn parse_probe_args(args: &[String]) -> Result<(Option<&str>, bool), String> {
 }
 
 /// Refusals before the log or any device is touched: `--online` needs a catalogue model of a
-/// family with an online query (Compx, ATK serial), a device with no known working battery
-/// command is refused for the battery query, and a custom BITMOUSE device must be a receiver.
+/// family with an online query (Compx, ATK serial), and a device with no known working battery
+/// command is refused for the battery query.
 fn early_refusal(device: &Device, online: bool) -> Result<(), String> {
     let (vid, pid) = (device.vid, device.pid);
     if online && online_query(device.family).is_none() {
@@ -60,13 +60,6 @@ fn early_refusal(device: &Device, online: bool) -> Result<(), String> {
             vid,
             pid,
             "the online query is for catalogue models only",
-        ));
-    }
-    if device.is_custom_bitmouse_cable() {
-        return Err(refusal(
-            vid,
-            pid,
-            "BITMOUSE is queried through its receiver only",
         ));
     }
     if device.needs_capture && !online {
@@ -120,10 +113,12 @@ fn probe(arg: Option<&str>, online: bool) -> Result<(String, bool), String> {
 
     let mut door = Door::new(1);
     // A custom device is outside the catalogue, so the door checks its family on the device.
+    // The connection picks the first battery frame (a BITMOUSE cable mouse takes target 0).
+    let battery = first_battery_query(family, vid, pid, device.cable);
     let (sent, sent_result) = match online_query(family).filter(|_| online) {
         Some(frame) => (frame, door.send_online(&mut target)),
-        None if device.custom => (battery_query(family), door.send_as(&mut target, family)),
-        None => (battery_query(family), door.send(&mut target)),
+        None if device.custom => (battery, door.send_as(&mut target, family, device.cable)),
+        None => (battery, door.send(&mut target)),
     };
     let exchange =
         sent_result.map_err(|error| send_failed(&device, sent, &format!("{error:#}")))?;
@@ -181,6 +176,13 @@ fn send_failed(device: &Device, sent: &[u8], error: &str) -> String {
     .join("\n")
 }
 
+/// Probe output keeps every byte and every other report.
+const PROBE_STYLE: ExchangeStyle = ExchangeStyle {
+    capital: false,
+    max_bytes: usize::MAX,
+    max_others: usize::MAX,
+};
+
 /// Header, target, every byte sent and received, then the decoded result.
 fn exchange_text(device: &Device, target_line: &str, exchange: &Exchange) -> String {
     let mut lines = vec![
@@ -192,25 +194,13 @@ fn exchange_text(device: &Device, target_line: &str, exchange: &Exchange) -> Str
             device.family.name()
         ),
         target_line.to_owned(),
-        bytes_line("sent", exchange.sent),
     ];
-    lines.extend(
-        exchange
-            .unrelated
-            .iter()
-            .map(|report| bytes_line("other", report)),
-    );
-    if exchange.dropped > 0 {
-        lines.push(format!("+{} more not shown", exchange.dropped));
-    }
+    lines.extend(exchange_lines(exchange, PROBE_STYLE));
     let result = match &exchange.reply {
-        Some((bytes, decoded)) => {
-            lines.push(bytes_line("reply", bytes));
-            match decoded {
-                Decoded::Online(_) => decoded_text(decoded),
-                _ => format!("result: {}", decoded_text(decoded)),
-            }
-        }
+        Some((_, decoded)) => match decoded {
+            Decoded::Online(_) => decoded_text(decoded),
+            _ => format!("result: {}", decoded_text(decoded)),
+        },
         None => format!(
             "result: {}",
             match exchange.family.link() {
@@ -258,7 +248,8 @@ fn decoded_text(decoded: &Decoded) -> String {
 
 #[cfg(test)]
 mod tests {
-    use protocol::{Family, Reading, decode};
+    use door::{Connection, Fallback, Source};
+    use protocol::{Family, Reading, battery_query, battery_query_for, decode, type_query};
 
     use super::*;
     use crate::device::tests::custom;
@@ -301,6 +292,8 @@ mod tests {
             }),
             unrelated: Vec::new(),
             dropped: 0,
+            connection: None,
+            fallback: None,
         }
     }
 
@@ -357,6 +350,134 @@ mod tests {
         );
         assert_eq!(lines[4], "result: 84% · not charging · awake");
         assert_eq!(lines.len(), 5);
+    }
+
+    /// 373B:1299 on its cable (captured answers): its catalogue row's target-0 frame is answered
+    /// at once, so no type query shows.
+    #[test]
+    fn probe_text_bitmouse_cable_row_answers_the_first_frame() {
+        let family = Family::AtkBitmouse;
+        let battery = padded(&[0x08, 0x72, 0x00, 0x3B, 0x00, 0x07, 0x01, 0x3C], 127);
+        let answered = Exchange {
+            sent: battery_query_for(family, true),
+            connection: Some(Connection {
+                cable: true,
+                source: Source::Catalogue,
+            }),
+            ..exchange(family, Some(battery.clone()))
+        };
+        let text = exchange_text(catalogue(0x373B, 0x1299), "target", &answered);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[2].starts_with("sent (64 B): 08 7c 72 02 00 00 07 01 00"));
+        assert_eq!(lines[3], format!("reply (127 B): {}", hex(&battery)));
+        assert_eq!(lines[4], "result: 60% · not charging · awake");
+        assert_eq!(lines.len(), 5);
+    }
+
+    /// A silent receiver frame, the type query answered wired1K, then the cable frame re-sent.
+    #[test]
+    fn probe_text_bitmouse_type_fallback() {
+        let family = Family::AtkBitmouse;
+        // 373B:1155 is an unverified receiver row, so the door runs the fallback for it.
+        let device = catalogue(0x373B, 0x1155);
+        let type_reply = padded(&[0x08, 0x72, 0x00, 0x3B, 0x00, 0x1A, 0x01, 0x02], 127);
+        let battery = padded(&[0x08, 0x72, 0x00, 0x3B, 0x00, 0x07, 0x01, 0x3C], 127);
+        let resent = Exchange {
+            sent: battery_query_for(family, true),
+            connection: Some(Connection {
+                cable: true,
+                source: Source::Detected { name: "wired1K" },
+            }),
+            fallback: Some(Fallback {
+                silent: battery_query_for(family, false),
+                type_reply: Some(type_reply.clone()),
+                error: None,
+            }),
+            ..exchange(family, Some(battery))
+        };
+        let text = exchange_text(device, "target", &resent);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[2].starts_with("sent (64 B): 08 7d 72 02 00 01 07 01 00"));
+        let frame = type_query(family).unwrap();
+        assert_eq!(lines[3], format!("type sent (64 B): {}", hex(frame)));
+        assert_eq!(
+            lines[4],
+            format!("type reply (127 B): {}", hex(&type_reply))
+        );
+        assert_eq!(lines[5], "device type: wired1K (cable)");
+        assert!(lines[6].starts_with("sent (64 B): 08 7c 72 02 00 00 07 01 00"));
+        assert!(lines[7].starts_with("reply (127 B): 08 72 00 3b 00 07"));
+        assert_eq!(lines[8], "result: 60% · not charging · awake");
+
+        // No type answer (its read failed): no re-send, the receiver frame stays the last one sent.
+        let silent = Exchange {
+            sent: battery_query_for(family, false),
+            connection: Some(Connection {
+                cable: false,
+                source: Source::Catalogue,
+            }),
+            fallback: Some(Fallback {
+                silent: battery_query_for(family, false),
+                type_reply: None,
+                error: Some("reading the type reply failed: gone".to_owned()),
+            }),
+            ..exchange(family, None)
+        };
+        let text = exchange_text(device, "target", &silent);
+        assert!(
+            text.contains("\ntype sent (64 B): 08 8f 72 02 00 00 1a 01"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "\ndevice type: no reply\nfallback failed: reading the type reply failed: gone\n\
+                 result: no reply within 500 ms"
+            ),
+            "{text}"
+        );
+        assert_eq!(text.matches("\nsent (64 B)").count(), 1, "{text}");
+
+        // A late battery reply ended the type wait: the type was never read, not unanswered.
+        let late_reply = padded(&[0x08, 0x72, 0x00, 0x3B, 0x00, 0x07, 0x01, 0x3C], 127);
+        let late = Exchange {
+            connection: Some(Connection {
+                cable: false,
+                source: Source::Catalogue,
+            }),
+            fallback: Some(Fallback {
+                silent: battery_query_for(family, false),
+                type_reply: None,
+                error: None,
+            }),
+            ..exchange(family, Some(late_reply))
+        };
+        let text = exchange_text(device, "target", &late);
+        assert!(text.contains("\ndevice type: not read\n"), "{text}");
+
+        // A failed re-send: its own `sent` line comes before the `fallback failed` line.
+        let failed = Exchange {
+            sent: battery_query_for(family, true),
+            connection: Some(Connection {
+                cable: true,
+                source: Source::Detected { name: "wired1K" },
+            }),
+            fallback: Some(Fallback {
+                silent: battery_query_for(family, false),
+                type_reply: Some(type_reply),
+                error: Some("battery re-send write failed: gone".to_owned()),
+            }),
+            ..exchange(family, None)
+        };
+        let text = exchange_text(device, "target", &failed);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines[6].starts_with("sent (64 B): 08 7c 72 02 00 00 07 01 00"),
+            "{text}"
+        );
+        assert_eq!(
+            lines[7],
+            "fallback failed: battery re-send write failed: gone"
+        );
     }
 
     #[test]
@@ -527,16 +648,14 @@ mod tests {
         assert!(text.ends_with("nothing was sent"), "{text}");
         assert_eq!(early_refusal(&compx, false), Ok(()));
 
-        // A custom BITMOUSE device is probed only through its receiver.
+        // A custom BITMOUSE device passes on a receiver and on its cable (target 0 frame).
         let receiver = custom(0x373B, 0x2000, Family::AtkBitmouse);
         assert_eq!(early_refusal(&receiver, false), Ok(()));
         let cable = Device {
             cable: true,
             ..receiver
         };
-        let text = early_refusal(&cable, false).unwrap_err();
-        assert!(text.contains("through its receiver only"), "{text}");
-        assert!(text.ends_with("nothing was sent"), "{text}");
+        assert_eq!(early_refusal(&cable, false), Ok(()));
     }
 
     #[test]
@@ -552,6 +671,8 @@ mod tests {
                 reply: Some((bytes.clone(), decoded)),
                 unrelated: Vec::new(),
                 dropped: 0,
+                connection: None,
+                fallback: None,
             };
             let text = exchange_text(n9, "target", &exchange);
             let lines: Vec<&str> = text.lines().collect();
@@ -581,6 +702,8 @@ mod tests {
                 reply: Some((bytes.clone(), decoded)),
                 unrelated: Vec::new(),
                 dropped: 0,
+                connection: None,
+                fallback: None,
             };
             let text = exchange_text(cable, "target", &exchange);
             let lines: Vec<&str> = text.lines().collect();

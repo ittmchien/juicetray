@@ -101,6 +101,7 @@ Battery read correctly on the owner's devices; these are read automatically.
 | 🎧 | MCHOSE V9 Pro 2 | `3837:6011` | |
 | 🎧 | ATK N9 Ultra | `373B:1204` | Close ATK HUB first: it holds the receiver's port |
 | 🖱️ | ATK X1 SE | `373B:1216` | |
+| 🖱️ | ATK X1 SE Nearlink | `373B:1299` | The mouse on its USB cable, no receiver |
 
 ### 🧪 Read once, not yet checked against the vendor app
 
@@ -119,7 +120,8 @@ detects the device, sends one read-only battery query when you press **Try**, an
 you confirm the level. If it does not work, press **Send report** to send the details through a
 [Google Form](https://forms.gle/Qp5CeBGEiPg2UtkX6) (no account needed), or **Report on GitHub**
 to [open an issue](https://github.com/ittmchien/juicetray/issues) with them filled in. Only the
-device's name, USB ID and interfaces are sent — nothing personal.
+device's name, USB ID and interfaces, the bytes sent and read during the try, the names of running
+vendor apps and the USB IDs of other devices of the same brand are sent — nothing personal.
 
 📋 **[Device list](https://docs.google.com/spreadsheets/d/e/2PACX-1vRTKUOHRmpLeXhjxL93T5HwuYsJKnzMHSUhN2AWslNCB938EpQH2YkMeNubTcpvdxpHC2o7Dw4OHfS7/pubhtml)**
 — every model Juicetray knows (**Supported**) and the devices users asked for, with their status

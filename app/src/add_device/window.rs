@@ -25,7 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::HSTRING;
 
-use super::flow::{Effect, Event, Flow, Input, Inspection, KINDS, TryOutcome, View};
+use super::flow::{Effect, Event, Flow, Input, Inspection, KINDS, Tried, TryOutcome, View};
 use crate::app::UserEvent;
 use crate::config::Config;
 use crate::dialog::{
@@ -82,11 +82,8 @@ const BUTTON_HEIGHT: i16 = 14;
 const BUTTON_GAP: i16 = 4;
 const BUTTON_WIDTH: i16 = 50;
 /// Wider buttons, only for labels 50 DLU cannot hold.
-const PRIMARY_WIDE_WIDTH: i16 = 146;
 const ALT_WIDTH: i16 = 60;
 const EXTRA_WIDTH: i16 = 72;
-/// Longest primary label `BUTTON_WIDTH` holds ("Try in 10 s").
-const SHORT_LABEL: usize = 12;
 const CLOSE_RECT: [i16; 4] = [203, BUTTON_Y, BUTTON_WIDTH, BUTTON_HEIGHT];
 
 /// Posted by `open` to the running window: focus it and take the handed-over id.
@@ -166,7 +163,7 @@ pub fn open(proxy: EventLoopProxy<UserEvent>, worker: Sender<Command>, id: Optio
 /// A worker reply the window waits for.
 enum Pending {
     Inspect(Receiver<Inspection>),
-    Try(Receiver<TryOutcome>),
+    Try(Receiver<Tried>),
     /// The UI thread's config save after [Add].
     Save(Receiver<Result<(), String>>),
 }
@@ -259,7 +256,7 @@ impl Session {
                 {
                     self.pending = Some(Pending::Try(answer));
                 } else {
-                    self.handle(dialog, Event::Tried(TryOutcome::Failed(stopped())));
+                    self.handle(dialog, Event::Tried(TryOutcome::Failed(stopped()).into()));
                 }
             }
             // The UI thread answers with the save result; a closed event loop means the app is
@@ -300,9 +297,11 @@ impl Session {
             },
             // A worker gone mid-try may have died after its write, so the query may have been sent.
             Some(Pending::Try(answer)) => match answer.try_recv() {
-                Ok(outcome) => Event::Tried(outcome),
+                Ok(tried) => Event::Tried(tried),
                 Err(TryRecvError::Empty) => return false,
-                Err(TryRecvError::Disconnected) => Event::Tried(TryOutcome::Interrupted(stopped())),
+                Err(TryRecvError::Disconnected) => {
+                    Event::Tried(TryOutcome::Interrupted(stopped()).into())
+                }
             },
             Some(Pending::Save(answer)) => match answer.try_recv() {
                 Ok(saved) => Event::Saved(saved),
@@ -499,7 +498,7 @@ fn render(dialog: HWND, view: &View, shown: Option<&View>) {
     }
     if changed(&|old| old.form != view.form) {
         if let Some(form) = &view.form {
-            fill_combo(dialog, CONNECTION_ID, &form.connections, 0);
+            fill_combo(dialog, CONNECTION_ID, &form.connections, form.connection);
             send(dialog, KIND_ID, CB_SETCURSEL, 0, 0);
             set_text(dialog, NAME_ID, &form.name);
         }
@@ -517,16 +516,11 @@ fn render(dialog: HWND, view: &View, shown: Option<&View>) {
     {
         let label = view.primary.as_deref().unwrap_or_default();
         // Shown buttons line up right to left from [Close], 4 DLU apart, in tab order
-        // [Primary] [Alt] [Extra]; a long primary label (the receiver confirmation) gets a wide one.
-        let primary_width = if label.chars().count() > SHORT_LABEL {
-            PRIMARY_WIDE_WIDTH
-        } else {
-            BUTTON_WIDTH
-        };
+        // [Primary] [Alt] [Extra].
         let row = [
             (EXTRA_ID, EXTRA_WIDTH, view.extra.is_some()),
             (ALT_ID, ALT_WIDTH, view.alt.is_some()),
-            (IDOK.0 as u16, primary_width, view.primary.is_some()),
+            (IDOK.0 as u16, BUTTON_WIDTH, view.primary.is_some()),
         ];
         let mut left = CLOSE_RECT[0];
         for (id, width, shown) in row {

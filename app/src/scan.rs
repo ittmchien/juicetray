@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
-use door::{Access, HidCollection, SerialEntry};
-use protocol::{ReportKind, ReportSize};
+use door::{Access, Connection, Exchange, HidCollection, SerialEntry, Source};
+use protocol::{ReportKind, ReportSize, type_query};
 use ui_model::{DeviceView, EMPTY_MENU_TEXT, menu_line};
 
-use crate::device::{Device, lookup};
+use crate::device::{Device, connection_name, lookup};
 
 /// Plain-text device list for `juicetray scan`; device ids stay out of the output.
 pub fn scan_report(devices: &[DeviceView], now: SystemTime) -> String {
@@ -206,8 +206,86 @@ pub(crate) fn reports_text(reports: &[ReportSize], parse_error: Option<&str>) ->
 
 /// `<label> (<n> B): <bytes>`: every byte, lower-case hex, never truncated.
 pub(crate) fn bytes_line(label: &str, bytes: &[u8]) -> String {
-    let hex: String = bytes.iter().map(|byte| format!(" {byte:02x}")).collect();
-    format!("{label} ({} B):{hex}", bytes.len())
+    format!("{label} ({} B):{}", bytes.len(), hex(bytes))
+}
+
+/// `bytes_line` cut to the first `max` bytes, labelled `(<max> of <n> B)` when cut.
+pub(crate) fn bytes_line_capped(label: &str, bytes: &[u8], max: usize) -> String {
+    if bytes.len() <= max {
+        return bytes_line(label, bytes);
+    }
+    let total = bytes.len();
+    format!("{label} ({max} of {total} B):{}", hex(&bytes[..max]))
+}
+
+/// Each byte as ` <2 lower-case hex digits>`.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!(" {byte:02x}")).collect()
+}
+
+/// How `exchange_lines` prints: capitalised labels, bytes kept per report, other reports shown
+/// (`usize::MAX` keeps everything).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ExchangeStyle {
+    pub capital: bool,
+    pub max_bytes: usize,
+    pub max_others: usize,
+}
+
+impl ExchangeStyle {
+    /// `label` (lower-case ASCII) with its first letter upper-cased when `capital`.
+    fn label(self, label: &str) -> String {
+        match label.split_at_checked(1) {
+            Some((first, rest)) if self.capital => format!("{}{rest}", first.to_ascii_uppercase()),
+            _ => label.to_owned(),
+        }
+    }
+}
+
+/// The byte lines of one exchange: the battery (or online) frame, for a BITMOUSE fallback the
+/// type query, its answer and any re-send, other reports read, then the reply when one came.
+pub(crate) fn exchange_lines(exchange: &Exchange, style: ExchangeStyle) -> Vec<String> {
+    let line =
+        |label: &str, bytes: &[u8]| bytes_line_capped(&style.label(label), bytes, style.max_bytes);
+    let mut lines = Vec::new();
+    match (&exchange.fallback, type_query(exchange.family)) {
+        (Some(fallback), Some(type_frame)) => {
+            lines.push(line("sent", fallback.silent));
+            lines.push(line("type sent", type_frame));
+            if let Some(reply) = &fallback.type_reply {
+                lines.push(line("type reply", reply));
+            }
+            let device_type = match exchange.connection {
+                Some(Connection {
+                    cable,
+                    source: Source::Detected { name },
+                }) => format!("{name} ({})", connection_name(cable)),
+                // A late battery reply ended the type wait before any type answer.
+                _ if exchange.reply.is_some() => "not read".to_owned(),
+                _ => "no reply".to_owned(),
+            };
+            lines.push(format!("{}: {device_type}", style.label("device type")));
+            if exchange.sent != fallback.silent {
+                lines.push(line("sent", exchange.sent));
+            }
+            // The door keeps a fallback I/O error instead of failing the exchange; it comes last,
+            // after the re-send line it may belong to.
+            if let Some(error) = &fallback.error {
+                lines.push(format!("{}: {error}", style.label("fallback failed")));
+            }
+        }
+        _ => lines.push(line("sent", exchange.sent)),
+    }
+    let shown = exchange.unrelated.iter().take(style.max_others);
+    lines.extend(shown.map(|report| line("other", report)));
+    let hidden = exchange.unrelated.len().saturating_sub(style.max_others) + exchange.dropped;
+    if hidden > 0 {
+        lines.push(format!("+{hidden} more not shown"));
+    }
+    if let Some((bytes, _)) = &exchange.reply {
+        lines.push(line("reply", bytes));
+    }
+    lines
 }
 
 /// Windows HID paths are `#`-separated; part 2 is the machine-local device instance id, and a
@@ -449,6 +527,22 @@ mod tests {
         assert!(!report.contains("ABC123"), "{report}");
         assert!(report.contains("/dev/cu.usbmodem<serial>"));
         assert!(report.contains("serial number redacted"));
+    }
+
+    #[test]
+    fn bytes_line_capped_cuts_only_long_reports() {
+        assert_eq!(
+            bytes_line_capped("reply", &[0x08, 0x01], 16),
+            "reply (2 B): 08 01"
+        );
+        assert_eq!(
+            bytes_line_capped("sent", &[1, 2, 3], 2),
+            "sent (2 of 3 B): 01 02"
+        );
+        assert_eq!(
+            bytes_line_capped("x", &[1, 2], usize::MAX),
+            bytes_line("x", &[1, 2])
+        );
     }
 
     #[test]

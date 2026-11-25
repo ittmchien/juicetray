@@ -15,7 +15,9 @@ pub use enumerate::{
 };
 pub use shapes::{STABLE_GAP, ShapeCache};
 pub use transport::Target;
-pub use write::{Door, Exchange, MAX_KEPT_UNRELATED};
+pub use write::{
+    Connection, Door, Exchange, Fallback, MAX_KEPT_UNRELATED, Source, first_battery_query,
+};
 
 #[cfg(test)]
 mod tests {

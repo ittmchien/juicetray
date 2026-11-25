@@ -101,6 +101,7 @@ tới thiết bị.
 | 🎧 | MCHOSE V9 Pro 2 | `3837:6011` | |
 | 🎧 | ATK N9 Ultra | `373B:1204` | Đóng ATK HUB trước: nó giữ cổng của receiver |
 | 🖱️ | ATK X1 SE | `373B:1216` | |
+| 🖱️ | ATK X1 SE Nearlink | `373B:1299` | Chuột cắm dây USB, không qua receiver |
 
 ### 🧪 Đã đọc được một lần, chưa đối chiếu với app của hãng
 
@@ -119,7 +120,9 @@ thiết bị dù bạn trả lời gì): app nhận ra thiết bị, gửi một
 **Try**, và thêm thiết bị khi bạn xác nhận mức pin đúng. Nếu không được, bấm **Send report** để
 gửi thông tin qua [Google Form](https://forms.gle/Qp5CeBGEiPg2UtkX6) (không cần tài khoản),
 hoặc **Report on GitHub** để [mở issue](https://github.com/ittmchien/juicetray/issues) với thông
-tin điền sẵn. Chỉ gửi tên thiết bị, USB ID và danh sách interface — không có thông tin cá nhân.
+tin điền sẵn. Chỉ gửi tên thiết bị, USB ID và danh sách interface, các byte đã gửi và đọc được
+trong lần thử, tên app hãng đang chạy và USB ID của các thiết bị khác cùng hãng — không có thông
+tin cá nhân.
 
 📋 **[Danh sách thiết bị](https://docs.google.com/spreadsheets/d/e/2PACX-1vRTKUOHRmpLeXhjxL93T5HwuYsJKnzMHSUhN2AWslNCB938EpQH2YkMeNubTcpvdxpHC2o7Dw4OHfS7/pubhtml)**
 — mọi model Juicetray biết (**Supported**) và các thiết bị người dùng đã yêu cầu kèm trạng thái

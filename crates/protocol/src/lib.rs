@@ -70,6 +70,14 @@ pub enum Online {
     Unsupported,
 }
 
+/// A BITMOUSE device's answer to the type query: the ATK HUB type name (`wired1K`…) and whether
+/// it is the mouse on its cable rather than a receiver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceType {
+    pub name: &'static str,
+    pub cable: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decoded {
     /// A report or frame that answers some other command.
@@ -175,8 +183,17 @@ pub fn battery_query(family: Family) -> &'static [u8] {
     }
 }
 
-/// The only non-battery frame the door may send: the online status (a read-only getter in the
-/// Compx vendor apps, ATK HUB's getStatus for ATK serial). Every other family has none.
+/// The battery query for a known connection: a BITMOUSE mouse on its cable takes the target-0
+/// frame; every other family and connection gets `battery_query`.
+pub fn battery_query_for(family: Family, cable: bool) -> &'static [u8] {
+    match family {
+        Family::AtkBitmouse if cable => &bitmouse::QUERY_CABLE,
+        _ => battery_query(family),
+    }
+}
+
+/// The online-status frame (a read-only getter in the Compx apps, ATK HUB's getStatus for ATK
+/// serial), else `None`; the door's only other non-battery frame is `type_query`.
 pub fn online_query(family: Family) -> Option<&'static [u8]> {
     match family {
         Family::Compx => Some(&compx::ONLINE_QUERY),
@@ -203,6 +220,32 @@ pub fn decode_online(family: Family, bytes: &[u8]) -> Decoded {
         | Family::RongYuanF7
         | Family::Driveall
         | Family::Generic(_) => Decoded::NotTheReply,
+    }
+}
+
+/// The other non-battery frame: ATK HUB's read-only GetDeviceType, which tells a BITMOUSE
+/// receiver from a mouse on its cable. Every other family has none.
+pub fn type_query(family: Family) -> Option<&'static [u8]> {
+    match family {
+        Family::AtkBitmouse => Some(&bitmouse::TYPE_QUERY),
+        _ => None,
+    }
+}
+
+/// Decodes the reply to `type_query`; `None` for anything else.
+pub fn decode_type(family: Family, bytes: &[u8]) -> Option<DeviceType> {
+    match family {
+        Family::AtkBitmouse => bitmouse::decode_type(bytes),
+        _ => None,
+    }
+}
+
+/// True for an error frame that answers `type_query` (it carries the type command), so a wait for
+/// a battery reply keeps it as unrelated.
+pub fn is_type_error(family: Family, bytes: &[u8]) -> bool {
+    match family {
+        Family::AtkBitmouse => bitmouse::is_type_error(bytes),
+        _ => false,
     }
 }
 
@@ -376,6 +419,16 @@ mod tests {
             assert!(list.contains(&format!("\"{variant}\"")), "{variant}");
         }
         assert_eq!(list.matches('"').count(), 2 * all.len(), "{list}");
+    }
+
+    /// Only a BITMOUSE cable mouse gets a frame of its own; frame bytes are checked in `bitmouse`.
+    #[test]
+    fn only_bitmouse_cable_changes_the_query() {
+        for family in all_families() {
+            assert_eq!(battery_query_for(family, false), battery_query(family));
+            let same = battery_query_for(family, true) == battery_query(family);
+            assert_eq!(same, family != Family::AtkBitmouse, "{family:?}");
+        }
     }
 
     /// The Generic row listed here is an output row; a feature row is checked in `generic`.

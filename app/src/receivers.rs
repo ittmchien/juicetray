@@ -223,15 +223,10 @@ fn attempt(
     }
 }
 
-/// Whether a gated device may be opened at all: it must have a known working command, and a
-/// custom BITMOUSE device must be a receiver, since the frame addresses the receiver and the
-/// door checks the connection of catalogue rows only.
+/// Whether a gated device may be opened at all: it must have a known working command.
 fn gate(device: &Device) -> Result<(), Outcome> {
     if device.needs_capture {
         return Err(Outcome::NeedsCapture);
-    }
-    if device.is_custom_bitmouse_cable() {
-        return Err(Outcome::NoChannel);
     }
     Ok(())
 }
@@ -275,7 +270,7 @@ fn target_outcome(error: &TargetError) -> Outcome {
     }
 }
 
-/// Safety order: the gate (capture, custom BITMOUSE cable, open vendor app), then no channel, then the floor,
+/// Safety order: the gate (capture, open vendor app), then no channel, then the floor,
 /// then the pick's own refusal, then the budget. A future stamp (`ClockBack`) goes on to
 /// `claim_query`, which replaces it and refuses, so nothing is sent then either.
 fn plan(
@@ -357,9 +352,10 @@ fn query(
 
     let sent = {
         let _span = log::span_fmt(format_args!("device {vid:04X}:{pid:04X} send and decode"));
-        // A custom device is outside the catalogue, so the door checks its family on the device.
+        // A custom device is outside the catalogue, so the door checks its family on the device;
+        // its connection picks the first frame (a BITMOUSE cable mouse takes target 0).
         if device.custom {
-            door.send_as(&mut target, family)
+            door.send_as(&mut target, family, device.cable)
         } else {
             door.send(&mut target)
         }
@@ -773,38 +769,23 @@ mod tests {
     }
 
     #[test]
-    fn custom_bitmouse_is_queried_only_on_a_receiver() {
+    fn custom_bitmouse_is_queried_on_a_receiver_and_on_its_cable() {
+        // Both connections pass the gate and are opened; the door picks each one's frame.
         let receiver = custom(0x373B, 0x2000, Family::AtkBitmouse);
         let cable = Device {
             cable: true,
             ..receiver.clone()
         };
-        assert_eq!(gate(&receiver), Ok(()));
-        assert_eq!(plan(gate(&receiver), Ok(()), Ok(()), true), Step::Query);
-        assert_eq!(gate(&cable), Err(Outcome::NoChannel));
-        assert_eq!(
-            plan(gate(&cable), Ok(()), Ok(()), true),
-            Step::Show(Outcome::NoChannel)
-        );
-        let both = [receiver.clone(), cable.clone()];
+        for device in [&receiver, &cable] {
+            assert_eq!(gate(device), Ok(()));
+            assert_eq!(plan(gate(device), Ok(()), Ok(()), true), Step::Query);
+        }
+        let both = [receiver, cable];
         let opened: Vec<(u16, u16, bool)> = openable(&both, &[])
             .iter()
             .map(|d| (d.vid, d.pid, d.cable))
             .collect();
-        assert_eq!(opened, [(0x373B, 0x2000, false)]);
-
-        // Another custom family on a cable, and a catalogue cable row (the door refuses
-        // BITMOUSE there itself), pass the gate.
-        let compx_cable = Device {
-            family: Family::Compx,
-            ..cable.clone()
-        };
-        assert_eq!(gate(&compx_cable), Ok(()));
-        let catalogue_cable = Device {
-            custom: false,
-            ..cable
-        };
-        assert_eq!(gate(&catalogue_cable), Ok(()));
+        assert_eq!(opened, [(0x373B, 0x2000, false), (0x373B, 0x2000, true)]);
     }
 
     #[test]
