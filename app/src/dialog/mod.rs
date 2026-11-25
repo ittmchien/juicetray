@@ -1,5 +1,5 @@
-//! Native dialogs opened from a menu click: a one-line text prompt, the SVG file picker and, on
-//! Windows, the colour picker, a yes/no confirmation and a one-button notice. All run modally
+//! Native dialogs opened from a menu click: a one-line text prompt, a one-button notice, the SVG
+//! file picker and, on Windows, the colour picker and a yes/no confirmation. All run modally
 //! and return when the owner closes them; on Windows the text prompts, the confirmation and the
 //! notice run on their own threads, the pickers (and everything on macOS) on the main thread.
 
@@ -77,9 +77,8 @@ pub fn confirm_or_alt(
     platform::confirm_or_alt(title, message, ok_label, alt_label, cancel_label)
 }
 
-/// Shows `message` with an OK button; blocks the calling thread until it is closed, so it runs
-/// on its own thread, never the event loop's. Windows only.
-#[cfg(windows)]
+/// Shows `message` with an OK button and blocks until it is closed. Windows: call it from its own
+/// thread, never the event loop's. macOS: call it from the main thread.
 pub fn notice(title: &str, message: &str) {
     platform::notice(title, message);
 }

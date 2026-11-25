@@ -27,6 +27,20 @@ pub fn prompt_text(title: &str, message: &str, default: &str) -> Option<String> 
     (alert.runModal() == NSAlertFirstButtonReturn).then(|| field.stringValue().to_string())
 }
 
+/// An `NSAlert` with `title` in bold, `message` below it and one OK button; skipped (logged)
+/// off the main thread.
+pub fn notice(title: &str, message: &str) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        eprintln!("notice skipped: not on the main thread");
+        return;
+    };
+    activate(mtm);
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(message));
+    alert.runModal();
+}
+
 /// Brings the accessory app to the front so its dialogs open above other windows.
 pub fn activate_app() {
     match MainThreadMarker::new() {
