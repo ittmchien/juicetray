@@ -53,8 +53,7 @@ pub fn notify_low_battery(device: &DeviceView) {
     post(format!("{name} battery low"), format!("{percent}% left"));
 }
 
-/// Tells the owner a newer release exists; the tray menu line opens its download page.
-#[cfg(windows)]
+/// Tells the owner a newer release exists; the tray menu line offers it.
 pub fn notify_update_available(version: &str) {
     log::trace(format_args!("notification spawn update {version}"));
     post(

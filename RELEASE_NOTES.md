@@ -1,14 +1,8 @@
-## What's new in v0.4.1
+## What's new in v0.4.2
 
-### 🛠 Fixed
-- **macOS: a headset that reconnects shows its battery again.** macOS kept an old value inside the running app; Juicetray now reads Bluetooth in a short-lived helper, so the level is always current.
-- **macOS: the menu-bar strip is white on a dark menu bar from the start.** It no longer stays black until the menu is opened, and it follows menu-bar tint changes.
-- **macOS: Start at login can be turned on.** It no longer shows "(app bundle only)" for an app that was never registered.
+### ✨ New
+- **macOS: updates in one click.** Juicetray now checks GitHub Releases once a day on macOS too (turn it off with **Settings → Check for updates automatically**; on a MacBook running on battery the check waits for AC unless **Refresh on battery power** is on). When a newer version exists, the menu shows **Update available**, and **Check for updates…** answers in a dialog.
+- **Update now runs Homebrew for you.** For a Homebrew install, **Update now** runs `brew upgrade ittmchien/tap/juicetray`, replaces `/Applications/Juicetray.app` with the new copy and restarts. A failed step shows the reason and keeps the running version. Without Homebrew, the dialog opens the download page.
+- **macOS: Move to Applications.** Started from anywhere outside Applications (such as Homebrew's folder), Juicetray asks to move itself there: **Move** copies the app into Applications and restarts from the copy (the Homebrew copy stays, since updates need it); **Not now** is remembered and not asked again (copy `Juicetray.app` into Applications yourself to move later). Installing is now `brew install juicetray`, then `open "$(brew --prefix)/opt/juicetray/Juicetray.app"` and **Move**.
 
-### 🎨 Improved
-- **Refresh when a Bluetooth device connects or disconnects** (Windows and macOS), and after the Mac wakes from sleep — no waiting for the next auto-refresh.
-- **Refresh on battery power** now works on macOS too: auto-refresh pauses on a MacBook running on battery unless you allow it.
-- **Homebrew installs the prebuilt app** (about 3 MB, a few seconds, no build tools): `brew tap ittmchien/tap`, `brew trust ittmchien/tap`, `brew install juicetray`. See *Install → macOS* in the README.
-- macOS now covers Bluetooth devices only; receivers and cables stay Windows-only for now.
-
-Windows: download `juicetray-windows-x86_64.exe` below, or use **Update now** in the app. macOS: `brew upgrade juicetray` (a zip downloaded in a browser is blocked by Gatekeeper; use Homebrew).
+Windows: download `juicetray-windows-x86_64.exe` below, or use **Update now** in the app. macOS: use **Update now** in the app (v0.4.2 and later), or `brew upgrade juicetray`, then open `$(brew --prefix)/opt/juicetray/Juicetray.app` and choose **Move** (a zip downloaded in a browser is blocked by Gatekeeper; use Homebrew).

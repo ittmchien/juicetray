@@ -41,8 +41,8 @@ tray — right next to the clock, without each vendor's software.
   and a dark taskbar / menu bar. On macOS, AirPods and Beats earbuds show Apple's own symbol.
 - 🪶 **Featherweight** — about 10 MB of RAM, ~0.05 % CPU at idle, a 2 MB portable exe on Windows;
   it pauses auto-refresh on laptop battery unless you turn on **Refresh on battery power**.
-- 🔄 **Updates in one click** (Windows) — checks GitHub Releases once a day; **Update now**
-  verifies the download's SHA-256 before swapping the exe. On macOS: `brew upgrade`.
+- 🔄 **Updates in one click** — checks GitHub Releases once a day; **Update now** verifies the
+  download's SHA-256 before swapping the exe on Windows, and runs `brew upgrade` on macOS.
 - 🛡️ **Read-only and gentle** — never changes a device setting; see Safety below.
 
 ## ⬇️ Install
@@ -68,19 +68,19 @@ flag, so Gatekeeper does not block it:
 brew tap ittmchien/tap
 brew trust ittmchien/tap   # needed on Homebrew 7+
 brew install juicetray
-cp -R "$(brew --prefix)/opt/juicetray/Juicetray.app" /Applications/
+open "$(brew --prefix)/opt/juicetray/Juicetray.app"
 ```
 
-Open **Juicetray** from Applications and allow Bluetooth when asked. **Settings → Start at login**
-works too (macOS may ask you to approve it in System Settings › General › Login Items). Settings
-live in `~/Library/Application Support/io.github.ittmchien.juicetray/config.toml`.
+Juicetray asks to move itself to Applications: **Move** copies the app there and restarts from the
+copy (the Homebrew copy stays, since updates need it); **Not now** is remembered and not asked
+again. To move later, copy `Juicetray.app` into Applications yourself. Allow Bluetooth when asked.
+**Settings → Start at login** works too (macOS may ask you to approve it in System Settings ›
+General › Login Items). Settings live in
+`~/Library/Application Support/io.github.ittmchien.juicetray/config.toml`.
 
-To update, quit Juicetray, then:
-
-```sh
-brew upgrade juicetray
-rm -rf /Applications/Juicetray.app && cp -R "$(brew --prefix)/opt/juicetray/Juicetray.app" /Applications/
-```
+To update, use **Update now** when Juicetray offers a new version (see Updates). By hand: quit
+Juicetray, run `brew upgrade juicetray`, open the app again as above and choose **Move** to replace
+the copy in Applications.
 
 ## 🎧 Supported devices
 
@@ -138,8 +138,8 @@ allow = ["391D:1A05"]
 
 ## 🔄 Updates
 
-On Windows, Juicetray checks [GitHub Releases](https://github.com/ittmchien/juicetray/releases)
-for a newer version at most once a day (restarting the app does not check again). Turn it off
+Juicetray checks [GitHub Releases](https://github.com/ittmchien/juicetray/releases) for a newer
+version at most once a day (restarting the app does not check again). Turn it off
 with **Check for updates automatically** under **Settings**, or check by hand with **Check for
 updates…**. The request sends nothing but the version in the User-Agent (`juicetray/<version>`).
 
@@ -147,8 +147,12 @@ On Windows, **Update now** downloads the new exe, checks its SHA-256 against the
 `SHA256SUMS.txt`, swaps it in and restarts; if anything fails, the old exe stays in place. When
 the exe's folder is not writable it opens the download page instead.
 
-On macOS the app does not check by itself: **Check for updates…** opens the releases page, and
-Homebrew installs update with `brew upgrade juicetray` (see Install).
+On macOS, when Juicetray was installed with Homebrew, **Update now** runs
+`brew upgrade ittmchien/tap/juicetray`, replaces `/Applications/Juicetray.app` with the new copy
+(staged next to it first, so a failed copy leaves the old app in place) and restarts. When it runs
+from Homebrew's own folder instead, it restarts from there and offers the move to Applications. If
+anything fails, a dialog says why and the running version stays. Without Homebrew it offers the
+download page instead.
 
 ## ⚠️ Known issues
 
