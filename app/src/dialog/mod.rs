@@ -1,5 +1,5 @@
 //! Native dialogs opened from a menu click: a one-line text prompt, a one-button notice, the SVG
-//! file picker and, on Windows, the colour picker and a yes/no confirmation. All run modally
+//! file picker, the colour picker and, on Windows, a yes/no confirmation. All run modally
 //! and return when the owner closes them; on Windows the text prompts, the confirmation and the
 //! notice run on their own threads, the pickers (and everything on macOS) on the main thread.
 
@@ -40,8 +40,8 @@ pub fn prompt_parsed<T>(
 }
 
 /// The system colour dialog seeded with `initial` as `(red, green, blue)`; `None` when
-/// cancelled. macOS has no such dialog here and asks for a hex colour instead.
-#[cfg(windows)]
+/// cancelled. macOS opens its colour panel through `osascript` and asks for a hex colour when
+/// that cannot run.
 pub fn pick_color(initial: (u8, u8, u8)) -> Option<(u8, u8, u8)> {
     platform::pick_color(initial)
 }

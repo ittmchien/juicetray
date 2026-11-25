@@ -16,6 +16,7 @@ use ui_model::{
 use crate::config::{Config, HIDE_OFFLINE_CHOICES, LOW_CHOICES, REFRESH_CHOICES, hex, parse_color};
 use crate::interval::format_interval;
 use crate::login::LoginState;
+use crate::symbols::symbol_for_device;
 use crate::update::AUTO_CHECK_AVAILABLE;
 
 const CHECK_UPDATES_ID: &str = "check-updates";
@@ -33,6 +34,10 @@ const ADD_DEVICE_ID: &str = "add-device";
 /// Only Windows watches for new devices and has the Add device window, so only it offers them.
 const DETECT_NEW_AVAILABLE: bool = cfg!(windows);
 const ICON_AUTO: &str = "auto";
+/// Menu id value of the system-symbol entry; the symbol itself follows the device's model.
+const ICON_SYMBOL: &str = "symbol";
+/// Only macOS ships the SF Symbols the AirPods entry draws from.
+const SYMBOLS_AVAILABLE: bool = cfg!(target_os = "macos");
 const SECONDS_PER_MINUTE: u32 = 60;
 /// The submenu that holds every app option.
 const SETTINGS_LABEL: &str = "Settings";
@@ -109,6 +114,8 @@ pub enum MenuAction {
     TogglePercent(String),
     ToggleLabel(String),
     SetIcon(String, IconChoice),
+    /// The system symbol that matches the device's model becomes its icon.
+    SetSymbolIcon(String),
     PickSvg(String),
     /// The (light taskbar, dark taskbar) icon colours.
     SetColors(String, IconColor, IconColor),
@@ -221,6 +228,9 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         "ccolor-dark" => Some(MenuAction::CustomColor(device, Some(Theme::Dark))),
         "icon" => {
             let (value, device) = rest.split_once(':')?;
+            if value == ICON_SYMBOL {
+                return Some(MenuAction::SetSymbolIcon(device.to_owned()));
+            }
             let icon = if value == ICON_AUTO {
                 IconChoice::Auto
             } else {
@@ -398,6 +408,8 @@ fn device_entry(device: &DeviceView, config: &Config, now: SystemTime) -> MenuEn
     let id = &device.id;
     let options = config.display_options(id);
     let is_svg = matches!(options.icon, IconChoice::Svg(_));
+    // The AirPods entry only appears for devices whose name maps to a system symbol.
+    let has_symbol = symbol_for_device(&device.name, device.kind).is_some();
     let children = vec![
         MenuEntry::check(
             format!("hide:{id}"),
@@ -406,7 +418,7 @@ fn device_entry(device: &DeviceView, config: &Config, now: SystemTime) -> MenuEn
         ),
         MenuEntry::check(format!("pct:{id}"), "Show percentage", options.show_percent),
         MenuEntry::check(format!("label:{id}"), "Show label", options.show_label),
-        MenuEntry::submenu("Icon", icon_entries(id, &options.icon)),
+        MenuEntry::submenu("Icon", icon_entries(id, &options.icon, has_symbol)),
         MenuEntry::submenu(
             "Icon colour",
             color_entries(id, (options.color_light, options.color_dark), is_svg),
@@ -432,8 +444,9 @@ const DISCONNECTED_TEXT: &str = " · disconnected";
 /// Lead of a device line under its group header (two em spaces: menus keep them, unlike tabs).
 const GROUP_INDENT: &str = "\u{2003}\u{2003}";
 
-/// Built-in icons then `Custom SVG…`, the current choice ticked.
-fn icon_entries(id: &str, current: &IconChoice) -> Vec<MenuEntry> {
+/// Built-in icons, `AirPods` on a device with a matching system symbol (or one already using a
+/// symbol, so the tick shows), then `Custom SVG…`, the current choice ticked.
+fn icon_entries(id: &str, current: &IconChoice, has_symbol: bool) -> Vec<MenuEntry> {
     let mut entries: Vec<MenuEntry> = BUILT_IN_ICONS
         .iter()
         .map(|&(label, kind)| {
@@ -443,6 +456,14 @@ fn icon_entries(id: &str, current: &IconChoice) -> Vec<MenuEntry> {
             MenuEntry::check(format!("icon:{value}:{id}"), label, *current == choice)
         })
         .collect();
+    let is_symbol = matches!(current, IconChoice::Symbol(_));
+    if SYMBOLS_AVAILABLE && (has_symbol || is_symbol) {
+        entries.push(MenuEntry::check(
+            format!("icon:{ICON_SYMBOL}:{id}"),
+            "AirPods",
+            is_symbol,
+        ));
+    }
     entries.push(MenuEntry::check(
         format!("svg:{id}"),
         "Custom SVG…",
@@ -1020,6 +1041,10 @@ mod tests {
                 ))
             );
             assert_eq!(
+                action_for(&format!("icon:symbol:{id}")),
+                Some(MenuAction::SetSymbolIcon(owned.clone()))
+            );
+            assert_eq!(
                 action_for(&format!("icon:auto:{id}")),
                 Some(MenuAction::SetIcon(owned.clone(), IconChoice::Auto))
             );
@@ -1054,11 +1079,41 @@ mod tests {
             ids.extend(entry.id.as_deref());
             stack.extend(&entry.children);
         }
-        // Show on strip, Show percentage, Show label, 8 icon and 12 colour entries.
+        // Show on strip, Show percentage, Show label, 7 built-in icons + Custom SVG (no AirPods
+        // entry: the name maps to no symbol) and 12 colour entries.
         assert_eq!(ids.len(), 23);
         for id in ids {
             assert!(action_for(id).is_some(), "{id}");
             assert!(id.ends_with(MAC_ID), "{id}");
+        }
+    }
+
+    /// The `Icon` submenu of `name` whose icon is `icon`.
+    fn icon_menu(name: &str, icon: IconChoice) -> MenuEntry {
+        let mut device = device(name, Level::Percent(50), true);
+        device.id = HEX_ID.to_owned();
+        let mut config = Config::default();
+        config.update_device(HEX_ID, name, |options| options.icon = icon);
+        let entries = entries(&[device], &config, LoginState::Disabled);
+        child(first_device(&entries), "Icon").clone()
+    }
+
+    /// The AirPods entry shows only for a device with a matching symbol, or while a symbol is set.
+    #[test]
+    fn airpods_entry_follows_device_symbol() {
+        let has_entry = |menu: &MenuEntry| menu.children.iter().any(|e| e.text == "AirPods");
+        let on_macos = cfg!(target_os = "macos");
+
+        assert_eq!(
+            has_entry(&icon_menu("AirPods Pro", IconChoice::Auto)),
+            on_macos
+        );
+        assert!(!has_entry(&icon_menu("MX Master", IconChoice::Auto)));
+
+        let ticked = icon_menu("MX Master", IconChoice::Symbol("airpods.pro".to_owned()));
+        assert_eq!(has_entry(&ticked), on_macos);
+        if on_macos {
+            assert_eq!(ticked_ids(&ticked), [format!("icon:symbol:{HEX_ID}")]);
         }
     }
 
