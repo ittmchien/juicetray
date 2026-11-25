@@ -18,15 +18,19 @@ pub fn menu_line(d: &DeviceView, now: SystemTime) -> String {
         level.push_str(" ⚡");
     }
     let mut parts = vec![d.path.to_string(), level];
-    // Only a connected device's reading time is reliable; the OS gives no last-seen time otherwise.
-    if d.connected && d.shown_percent().is_some() {
-        let age = now.duration_since(d.updated_at).unwrap_or_default();
-        if d.stale || age > OLD_READING {
-            parts.push(age_text(age));
-        }
-    }
+    parts.extend(shown_age(d, now));
     parts.extend(d.note.clone());
     format!("{} — {}", d.name, parts.join(" · "))
+}
+
+/// The reading's age when worth showing: stale or older than `OLD_READING`. Only a connected
+/// device's reading time is reliable; the OS gives no last-seen time otherwise.
+pub fn shown_age(d: &DeviceView, now: SystemTime) -> Option<String> {
+    if !d.connected || d.shown_percent().is_none() {
+        return None;
+    }
+    let age = now.duration_since(d.updated_at).unwrap_or_default();
+    (d.stale || age > OLD_READING).then(|| age_text(age))
 }
 
 /// Devices with a number grouped under a kind header (`name 60%` indented two spaces), kinds in
@@ -96,7 +100,8 @@ fn battery_text(level: &Level) -> String {
     }
 }
 
-fn age_text(age: Duration) -> String {
+/// `5m ago`, `2h ago`, `3d ago`: a reading's age, at least one minute; shared with the app's menu.
+pub fn age_text(age: Duration) -> String {
     match age.as_secs() {
         secs @ 0..3600 => format!("{}m ago", (secs / 60).max(1)),
         secs @ 3600..86400 => format!("{}h ago", secs / 3600),

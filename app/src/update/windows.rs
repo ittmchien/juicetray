@@ -19,10 +19,12 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, PCWSTR, w};
 
+use super::UpdateStage;
 use super::apply::{self, Failure};
 use super::check::{self, UpdateInfo};
 use super::common::{API_URL, BUSY_MESSAGE, DIALOG_TITLE};
 use super::install::is_github_url;
+use crate::alerts::notify_update_started;
 use crate::app::UserEvent;
 use crate::dialog::{self, Answer};
 use crate::log;
@@ -124,12 +126,23 @@ pub(super) fn offer(info: &UpdateInfo, proxy: &EventLoopProxy<UserEvent>) {
     OFFERING.store(false, Ordering::Relaxed);
 }
 
-/// Installs the release and asks the UI thread to exit once the new exe runs; a failure is
-/// shown in a dialog and leaves the current exe in place.
+/// Installs the release, reporting each step to the menu, and asks the UI thread to exit once
+/// the new exe runs; a failure clears the step, shows a dialog and leaves the current exe in place.
 fn update_now(info: &UpdateInfo, assets: &check::UpdateAssets, proxy: &EventLoopProxy<UserEvent>) {
     let _span = log::span("update install");
-    match apply::install(assets, env!("CARGO_PKG_VERSION")) {
-        // A closed event loop means the app is exiting anyway.
+    notify_update_started(&info.version);
+    // A closed event loop means the app is exiting anyway.
+    let step = |stage| {
+        let _ = proxy.send_event(UserEvent::UpdateProgress(stage));
+    };
+    step(Some(UpdateStage::Downloading(info.version.clone())));
+    let installed = apply::install(assets, env!("CARGO_PKG_VERSION"), || {
+        step(Some(UpdateStage::Installing(info.version.clone())));
+    });
+    if installed.is_err() {
+        step(None);
+    }
+    match installed {
         Ok(()) => {
             let _ = proxy.send_event(UserEvent::UpdateRestart);
         }

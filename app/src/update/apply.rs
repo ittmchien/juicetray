@@ -40,13 +40,18 @@ fn other(reason: impl Into<String>) -> Failure {
 }
 
 /// Replaces the running exe with the release's and starts the new one with
-/// `--updated-from <from_version>`; the caller then exits this process. On any error the staged
-/// file is deleted and the exe path holds the old exe again (unless `RestoreFailed`).
-pub fn install(assets: &UpdateAssets, from_version: &str) -> Result<(), Failure> {
+/// `--updated-from <from_version>`; `installing` is told once the download checks out. The caller
+/// then exits this process. On any error the staged file is deleted and the exe path holds the
+/// old exe again (unless `RestoreFailed`).
+pub fn install(
+    assets: &UpdateAssets,
+    from_version: &str,
+    installing: impl FnOnce(),
+) -> Result<(), Failure> {
     let exe =
         running_exe().map_err(|error| other(format!("finding the running exe failed: {error}")))?;
     let staged = staged_path(&exe);
-    let result = stage_and_swap(&exe, &staged, assets, from_version);
+    let result = stage_and_swap(&exe, &staged, assets, from_version, installing);
     if result.is_err() {
         // Best effort: a leftover `.new` is replaced by the next attempt anyway.
         let _ = fs::remove_file(&staged);
@@ -59,6 +64,7 @@ fn stage_and_swap(
     staged: &Path,
     assets: &UpdateAssets,
     from_version: &str,
+    installing: impl FnOnce(),
 ) -> Result<(), Failure> {
     // Creating the staged file first is the write probe, before anything is downloaded.
     let mut file = create_staged(staged)?;
@@ -73,6 +79,7 @@ fn stage_and_swap(
             "the download does not match the SHA-256 in SHA256SUMS.txt",
         ));
     }
+    installing();
 
     file.write_all(&bytes)
         .and_then(|()| file.sync_all())
