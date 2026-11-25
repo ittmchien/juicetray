@@ -41,8 +41,8 @@ cạnh đồng hồ, không cần cài phần mềm của từng hãng.
   menu sáng và tối. Trên macOS, AirPods và tai Beats hiện đúng biểu tượng của Apple.
 - 🪶 **Siêu nhẹ** — khoảng 10 MB RAM, ~0,05 % CPU lúc rảnh, file exe portable 2 MB trên Windows;
   tự dừng auto-refresh khi laptop chạy pin, trừ khi bạn bật **Refresh on battery power**.
-- 🔄 **Cập nhật một chạm** (Windows) — kiểm tra GitHub Releases mỗi ngày; **Update now** kiểm
-  SHA-256 của file tải về rồi mới thay exe. Trên macOS: `brew upgrade`.
+- 🔄 **Cập nhật một chạm** — kiểm tra GitHub Releases mỗi ngày; **Update now** kiểm SHA-256 của
+  file tải về rồi mới thay exe trên Windows, và chạy `brew upgrade` trên macOS.
 - 🛡️ **Chỉ đọc, nhẹ nhàng** — không bao giờ đổi cài đặt thiết bị; xem phần An toàn bên dưới.
 
 ## ⬇️ Cài đặt
@@ -68,19 +68,19 @@ Gatekeeper không chặn:
 brew tap ittmchien/tap
 brew trust ittmchien/tap   # cần trên Homebrew 7+
 brew install juicetray
-cp -R "$(brew --prefix)/opt/juicetray/Juicetray.app" /Applications/
+open "$(brew --prefix)/opt/juicetray/Juicetray.app"
 ```
 
-Mở **Juicetray** từ Applications và cho phép Bluetooth khi được hỏi. **Settings → Start at login**
-cũng dùng được (macOS có thể yêu cầu bạn duyệt trong System Settings › General › Login Items).
-Cài đặt lưu ở `~/Library/Application Support/io.github.ittmchien.juicetray/config.toml`.
+Juicetray hỏi có chuyển vào Applications không: **Move** chép app vào đó và khởi động lại từ bản
+chép (bản của Homebrew vẫn còn, vì cập nhật cần đến nó); **Not now** được ghi nhớ và không hỏi lại.
+Muốn chuyển sau thì tự chép `Juicetray.app` vào Applications. Cho phép Bluetooth khi được hỏi.
+**Settings → Start at login** cũng dùng được (macOS có thể yêu cầu bạn duyệt trong System Settings
+› General › Login Items). Cài đặt lưu ở
+`~/Library/Application Support/io.github.ittmchien.juicetray/config.toml`.
 
-Cập nhật: thoát Juicetray rồi chạy:
-
-```sh
-brew upgrade juicetray
-rm -rf /Applications/Juicetray.app && cp -R "$(brew --prefix)/opt/juicetray/Juicetray.app" /Applications/
-```
+Cập nhật: bấm **Update now** khi Juicetray báo có bản mới (xem phần Cập nhật). Cập nhật tay: thoát
+Juicetray, chạy `brew upgrade juicetray`, mở lại app như trên rồi chọn **Move** để thay bản trong
+Applications.
 
 ## 🎧 Thiết bị hỗ trợ
 
@@ -138,8 +138,8 @@ allow = ["391D:1A05"]
 
 ## 🔄 Cập nhật
 
-Trên Windows, Juicetray kiểm tra [GitHub Releases](https://github.com/ittmchien/juicetray/releases)
-mỗi ngày tối đa một lần (mở lại app cũng không kiểm thêm). Tắt bằng mục **Check for updates
+Juicetray kiểm tra [GitHub Releases](https://github.com/ittmchien/juicetray/releases) mỗi ngày
+tối đa một lần (mở lại app cũng không kiểm thêm). Tắt bằng mục **Check for updates
 automatically** trong **Settings**, hoặc kiểm tay bằng **Check for updates…**. Yêu cầu chỉ gửi số
 phiên bản trong User-Agent (`juicetray/<version>`).
 
@@ -147,8 +147,12 @@ Trên Windows, **Update now** tải exe mới, kiểm SHA-256 với `SHA256SUMS.
 thay file rồi khởi động lại; lỗi ở bất kỳ bước nào thì exe cũ được giữ nguyên. Nếu thư mục chứa
 exe không ghi được thì app mở trang tải về thay vào đó.
 
-Trên macOS app không tự kiểm tra: **Check for updates…** mở trang phát hành, còn bản cài bằng
-Homebrew thì cập nhật bằng `brew upgrade juicetray` (xem phần Cài đặt).
+Trên macOS, nếu Juicetray được cài bằng Homebrew, **Update now** chạy
+`brew upgrade ittmchien/tap/juicetray`, thay `/Applications/Juicetray.app` bằng bản mới (chép ra
+cạnh đó trước, nên chép lỗi thì app cũ vẫn nguyên) rồi khởi động lại. Nếu app đang chạy từ thư mục
+của Homebrew thì khởi động lại từ đó và hỏi chuyển vào Applications. Lỗi ở bất kỳ bước nào thì một
+hộp thoại báo lý do và bản đang chạy được giữ nguyên. Không cài bằng Homebrew thì app mở trang tải
+về thay vào đó.
 
 ## ⚠️ Lỗi đã biết
 
