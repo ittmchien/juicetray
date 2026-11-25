@@ -35,6 +35,7 @@ cần cài phần mềm của từng hãng.
   ghi *disconnected*; tự ẩn thiết bị offline sau khoảng thời gian bạn chọn.
 - 🔔 **Cảnh báo pin yếu** — thông báo khi chạm ngưỡng bạn chọn (5–30 % hoặc tự nhập).
 - 🛠️ **Tuỳ chỉnh từng thiết bị** — hiện/ẩn, phần trăm, nhãn, icon, màu icon cho taskbar sáng và tối.
+  Trên macOS, AirPods và tai Beats hiện đúng biểu tượng của Apple.
 - 🪶 **Siêu nhẹ** — khoảng 10 MB RAM, ~0,05 % CPU lúc rảnh, file exe portable 2 MB; tự dừng
   auto-refresh khi laptop chạy pin, trừ khi bạn bật lại.
 - 🔄 **Cập nhật một chạm** — kiểm tra GitHub Releases mỗi ngày; **Update now** kiểm SHA-256 của
