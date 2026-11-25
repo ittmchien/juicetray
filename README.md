@@ -20,8 +20,8 @@ tray — right next to the clock, without each vendor's software.
 </div>
 
 > [!NOTE]
-> **Beta, Windows only for now.** Bluetooth devices and the verified receivers below work on
-> Windows; a macOS release follows once it has been tested on a Mac.
+> **Beta.** Bluetooth devices and the verified receivers below work on Windows. On macOS,
+> Bluetooth devices work (install with Homebrew); receivers are not tested there yet.
 
 ## ✨ Features
 
@@ -53,6 +53,22 @@ tray — right next to the clock, without each vendor's software.
 
 Settings live in `%APPDATA%\ittmchien\juicetray\config\config.toml`, so replacing the exe keeps
 them. Windows SmartScreen may warn about an unsigned app: **More info → Run anyway**.
+
+### 🍎 macOS (beta, Homebrew)
+
+Homebrew builds the app from source on your Mac (a few minutes; Rust is installed for the
+build), so Gatekeeper does not block it:
+
+```sh
+brew tap ittmchien/tap
+brew trust ittmchien/tap   # Homebrew loads formulae from other taps only once trusted
+brew install juicetray
+cp -R "$(brew --prefix)/opt/juicetray/Juicetray.app" /Applications/
+```
+
+Open **Juicetray** from Applications and allow Bluetooth when asked. To update:
+`brew upgrade juicetray`, then quit Juicetray and repeat the `cp` line (after
+`rm -rf /Applications/Juicetray.app`).
 
 ## 🎧 Supported devices
 
@@ -106,7 +122,7 @@ allow = ["391D:1A05"]
 | Platform | Status |
 |---|---|
 | 🪟 Windows 10 / 11 (x86_64) | ✅ Released |
-| 🍎 macOS (Apple silicon and Intel) | 🚧 Builds in CI, not released yet |
+| 🍎 macOS 13+ (Apple silicon and Intel) | 🧪 Beta via Homebrew (Bluetooth tested) |
 
 ## 🔄 Updates
 
@@ -118,6 +134,9 @@ nothing but the version in the User-Agent (`juicetray/<version>`).
 **Update now** downloads the new exe, checks its SHA-256 against the release's
 `SHA256SUMS.txt`, swaps it in and restarts; if anything fails, the old exe stays in place. When
 the exe's folder is not writable it opens the download page instead.
+
+On macOS the app does not check by itself: **Check for updates…** opens the releases page, and
+Homebrew installs update with `brew upgrade juicetray` (see Install).
 
 ## ⚠️ Known issues
 
