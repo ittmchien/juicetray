@@ -109,7 +109,12 @@ fn map_font(path: &FsPath) -> Result<Mmap, String> {
     let file = File::open(path).map_err(|error| error.to_string())?;
     // SAFETY: the map is read-only and system fonts are not rewritten in place while mapped.
     let map = unsafe { Mmap::map(&file) }.map_err(|error| error.to_string())?;
-    FontRef::try_from_slice(&map).map_err(|error| error.to_string())?;
+    let font = FontRef::try_from_slice(&map).map_err(|error| error.to_string())?;
+    // Some system fonts parse but give no outlines here (macOS 27's SFNS.ttf), so the
+    // number would take space and draw nothing; such a font counts as unusable.
+    if font.outline(font.glyph_id('0')).is_none() {
+        return Err("no glyph outline for digits".to_owned());
+    }
     Ok(map)
 }
 
