@@ -53,12 +53,12 @@ mod tests {
     use super::*;
     use crate::{Family, Reading, battery_query, decode as decode_family};
 
-    // Captures: sanshoku aula/decode.go (MIT)
-    const ON_BATTERY_97: [u8; 20] = [
-        0x13, 0x4a, 0x01, 0x00, 0x02, 0x61, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xc2,
+    // Hand-made replies: 90 % discharging, and on cable; the last byte is the byte sum.
+    const ON_BATTERY_90: [u8; 20] = [
+        0x13, 0x4a, 0x01, 0x00, 0x02, 0x5a, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xbb,
     ];
     const ON_CABLE: [u8; 20] = [
-        0x13, 0x4a, 0x01, 0x00, 0x02, 0x64, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xd4,
+        0x13, 0x4a, 0x01, 0x00, 0x02, 0x63, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xd3,
     ];
 
     /// Hand-made reply: 84 %, discharging, checksum 0xB2.
@@ -96,7 +96,7 @@ mod tests {
 
     #[test]
     fn report13_captured_replies() {
-        assert_eq!(decode(&ON_BATTERY_97), battery(97));
+        assert_eq!(decode(&ON_BATTERY_90), battery(90));
         assert_eq!(decode(&ON_CABLE), Decoded::Invalid(ON_CABLE_TEXT));
     }
 
@@ -118,37 +118,37 @@ mod tests {
 
     #[test]
     fn report13_bad_checksum() {
-        let mut frame = ON_BATTERY_97;
+        let mut frame = ON_BATTERY_90;
         frame[19] ^= 0x01;
         assert_eq!(decode(&frame), Decoded::Invalid("bad checksum"));
     }
 
     #[test]
     fn report13_other_report_or_cmd() {
-        let mut other_report = ON_BATTERY_97;
+        let mut other_report = ON_BATTERY_90;
         other_report[0] = 0x14;
         assert_eq!(decode(&sealed(other_report)), Decoded::NotTheReply);
-        let mut other_cmd = ON_BATTERY_97;
+        let mut other_cmd = ON_BATTERY_90;
         other_cmd[1] = 0x4B;
         assert_eq!(decode(&sealed(other_cmd)), Decoded::NotTheReply);
     }
 
     #[test]
     fn report13_high_bit_of_command_still_matches() {
-        let mut frame = ON_BATTERY_97;
+        let mut frame = ON_BATTERY_90;
         frame[1] = 0xCA;
-        assert_eq!(decode(&sealed(frame)), battery(97));
+        assert_eq!(decode(&sealed(frame)), battery(90));
     }
 
     #[test]
     fn report13_percent_out_of_range() {
-        let mut zero = ON_BATTERY_97;
+        let mut zero = ON_BATTERY_90;
         zero[5] = 0;
         assert_eq!(
             decode(&sealed(zero)),
             Decoded::Invalid("percent 0: no data")
         );
-        let mut over = ON_BATTERY_97;
+        let mut over = ON_BATTERY_90;
         over[5] = 101;
         assert_eq!(
             decode(&sealed(over)),
@@ -158,6 +158,6 @@ mod tests {
 
     #[test]
     fn report13_short() {
-        assert_eq!(decode(&ON_BATTERY_97[..19]), Decoded::NotTheReply);
+        assert_eq!(decode(&ON_BATTERY_90[..19]), Decoded::NotTheReply);
     }
 }
