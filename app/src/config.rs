@@ -92,6 +92,9 @@ pub struct Config {
     pub check_updates: bool,
     /// The newest version already announced, so one release is never announced twice.
     pub notified_update: Option<String>,
+    /// Offer to move a copy running outside Applications there (macOS); off once the owner
+    /// declined with "Not now".
+    pub ask_move_to_applications: bool,
 }
 
 impl Default for Config {
@@ -110,6 +113,7 @@ impl Default for Config {
             refresh_on_battery: false,
             check_updates: true,
             notified_update: None,
+            ask_move_to_applications: true,
         }
     }
 }
@@ -156,6 +160,10 @@ impl Config {
                 .and_then(Value::as_str)
                 .filter(|version| !version.is_empty())
                 .map(str::to_owned),
+            ask_move_to_applications: table
+                .get("ask_move_to_applications")
+                .and_then(Value::as_bool)
+                .unwrap_or(defaults.ask_move_to_applications),
         }
     }
 
@@ -175,6 +183,10 @@ impl Config {
             Value::Boolean(self.refresh_on_battery),
         );
         table.insert("check_updates".into(), Value::Boolean(self.check_updates));
+        table.insert(
+            "ask_move_to_applications".into(),
+            Value::Boolean(self.ask_move_to_applications),
+        );
         table.insert(
             "detect_new_devices".into(),
             Value::Boolean(self.detect_new_devices),
@@ -780,6 +792,7 @@ mod tests {
             refresh_on_battery: true,
             check_updates: false,
             notified_update: Some("0.2.0".into()),
+            ask_move_to_applications: false,
         };
         assert_eq!(Config::parse(&config.to_toml()), config);
     }
@@ -813,6 +826,10 @@ mod tests {
             assert_eq!(config.notified_update, None, "{text}");
         }
         assert!(!Config::parse("check_updates = false").check_updates);
+        // The move prompt defaults on and only an explicit false turns it off.
+        assert!(Config::default().ask_move_to_applications);
+        assert!(Config::parse("ask_move_to_applications = \"no\"").ask_move_to_applications);
+        assert!(!Config::parse("ask_move_to_applications = false").ask_move_to_applications);
         assert_eq!(
             Config::parse("notified_update = \"\"").notified_update,
             None

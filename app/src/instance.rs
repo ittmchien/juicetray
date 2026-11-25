@@ -17,9 +17,37 @@ pub fn is_bundled() -> bool {
     false
 }
 
-/// Another running app with this bundle id means a second copy was launched.
+/// How long a copy started by an update or move waits for its predecessor to disappear from the
+/// running-apps list.
+#[cfg(target_os = "macos")]
+const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(target_os = "macos")]
+const RESTART_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Another running app with this bundle id means a second copy was launched; a copy started by
+/// an update (`UPDATED_FLAG`) retries for `RESTART_WAIT` while the old one finishes exiting.
 #[cfg(target_os = "macos")]
 pub fn another_instance_running() -> bool {
+    use std::time::Instant;
+
+    let started_by_update = std::env::args().nth(1).as_deref() == Some(crate::update::UPDATED_FLAG);
+    let give_up_at = Instant::now()
+        + if started_by_update {
+            RESTART_WAIT
+        } else {
+            Default::default()
+        };
+    while other_copy_running() {
+        if Instant::now() >= give_up_at {
+            return true;
+        }
+        std::thread::sleep(RESTART_POLL);
+    }
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn other_copy_running() -> bool {
     use objc2_app_kit::NSRunningApplication;
 
     let Some(identifier) = bundle_identifier() else {

@@ -119,6 +119,26 @@ pub fn notice(title: &str, message: &str) {
     alert.runModal();
 }
 
+/// An `NSAlert` yes/no question: the text before the first blank line is the bold instruction,
+/// the rest the content; Escape and a call off the main thread answer no.
+pub fn confirm(_title: &str, message: &str, ok_label: &str, cancel_label: &str) -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        eprintln!("confirm skipped: not on the main thread");
+        return false;
+    };
+    activate(mtm);
+    let (instruction, content) = message.split_once("\n\n").unwrap_or((message, ""));
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(instruction));
+    alert.setInformativeText(&NSString::from_str(content));
+    alert.addButtonWithTitle(&NSString::from_str(ok_label));
+    // Only a button titled "Cancel" answers Escape by itself.
+    alert
+        .addButtonWithTitle(&NSString::from_str(cancel_label))
+        .setKeyEquivalent(&NSString::from_str("\u{1b}"));
+    alert.runModal() == NSAlertFirstButtonReturn
+}
+
 /// Brings the accessory app to the front so its dialogs open above other windows.
 pub fn activate_app() {
     match MainThreadMarker::new() {

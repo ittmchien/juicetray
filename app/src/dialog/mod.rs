@@ -1,5 +1,5 @@
 //! Native dialogs opened from a menu click: a one-line text prompt, a one-button notice, the SVG
-//! file picker, the colour picker and, on Windows, a yes/no confirmation. All run modally
+//! file picker, the colour picker and a yes/no confirmation. All run modally
 //! and return when the owner closes them; on Windows the text prompts, the confirmation and the
 //! notice run on their own threads, the pickers (and everything on macOS) on the main thread.
 
@@ -46,11 +46,8 @@ pub fn pick_color(initial: (u8, u8, u8)) -> Option<(u8, u8, u8)> {
     platform::pick_color(initial)
 }
 
-/// Asks a yes/no question with `ok_label` on the default button and `cancel_label` as the other;
-/// `message` is the bold main instruction, then the content after a blank line (`\n\n`), the
-/// same for every question dialog below. Blocks the calling thread until the owner answers, so it
-/// runs on its own thread, never the event loop's. Windows only.
-#[cfg(windows)]
+/// Asks a yes/no question (`message` = instruction, blank line, content) and blocks until the
+/// owner answers; Windows: from its own thread, macOS: from the main thread.
 pub fn confirm(title: &str, message: &str, ok_label: &str, cancel_label: &str) -> bool {
     platform::confirm(title, message, ok_label, cancel_label)
 }

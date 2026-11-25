@@ -17,7 +17,6 @@ use crate::config::{Config, HIDE_OFFLINE_CHOICES, LOW_CHOICES, REFRESH_CHOICES, 
 use crate::interval::format_interval;
 use crate::login::LoginState;
 use crate::symbols::symbol_for_device;
-use crate::update::AUTO_CHECK_AVAILABLE;
 
 const CHECK_UPDATES_ID: &str = "check-updates";
 const AUTO_UPDATE_ID: &str = "update-auto";
@@ -359,23 +358,19 @@ fn settings_entries(config: &Config, login: LoginState, has_battery: bool) -> Ve
             config.detect_new_devices,
         ));
     }
-    entries.push(login_entry(login));
-    // Only a build that can check on its own offers the switch.
-    if AUTO_CHECK_AVAILABLE {
-        entries.extend([
-            MenuEntry::separator(),
-            MenuEntry::check(
-                AUTO_UPDATE_ID.to_owned(),
-                "Check for updates automatically",
-                config.check_updates,
-            ),
-        ]);
-    }
+    entries.extend([
+        login_entry(login),
+        MenuEntry::separator(),
+        MenuEntry::check(
+            AUTO_UPDATE_ID.to_owned(),
+            "Check for updates automatically",
+            config.check_updates,
+        ),
+    ]);
     entries
 }
 
 /// The line that announces a newer release; the caller puts it above "Refresh now".
-#[cfg(any(windows, test))]
 pub fn update_available_entries(version: &str) -> [MenuEntry; 2] {
     [
         MenuEntry::item(OPEN_UPDATE_ID, format!("Update available: v{version}…")),
@@ -916,23 +911,21 @@ mod tests {
             format!("Check for updates… (v{})", env!("CARGO_PKG_VERSION"))
         );
 
-        // The automatic-check switch exists only where the build can check on its own.
+        // The automatic-check switch follows the setting, on by default.
         let auto = |config: &Config| {
             settings_of(build(config))
                 .into_iter()
                 .find(|e| e.id.as_deref() == Some("update-auto"))
+                .unwrap()
         };
-        assert_eq!(auto(&Config::default()).is_some(), cfg!(windows));
-        if cfg!(windows) {
-            let on = auto(&Config::default()).unwrap();
-            assert_eq!(on.text, "Check for updates automatically");
-            assert_eq!(on.checked, Some(true));
-            let off = Config {
-                check_updates: false,
-                ..Config::default()
-            };
-            assert_eq!(auto(&off).unwrap().checked, Some(false));
-        }
+        let on = auto(&Config::default());
+        assert_eq!(on.text, "Check for updates automatically");
+        assert_eq!(on.checked, Some(true));
+        let off = Config {
+            check_updates: false,
+            ..Config::default()
+        };
+        assert_eq!(auto(&off).checked, Some(false));
 
         assert_eq!(
             action_for("check-updates"),

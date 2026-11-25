@@ -21,9 +21,7 @@ use ui_model::{
 
 #[cfg(windows)]
 use crate::add_device;
-#[cfg(windows)]
-use crate::alerts::notify_update_available;
-use crate::alerts::{AlertState, notify_low_battery};
+use crate::alerts::{AlertState, notify_low_battery, notify_update_available};
 use crate::config::{Config, parse_hide_offline_minutes, parse_low_percent};
 #[cfg(any(target_os = "macos", windows))]
 use crate::connections;
@@ -44,7 +42,6 @@ use crate::symbols::{DEFAULT_SYMBOL, symbol_for_device};
 use crate::taskbar::{self, StripContent, TaskbarHandle};
 #[cfg(target_os = "macos")]
 use crate::ui_font;
-#[cfg(windows)]
 use crate::update::check::{UpdateCheck, UpdateInfo};
 #[cfg(target_os = "macos")]
 use crate::wake;
@@ -99,17 +96,19 @@ pub enum UserEvent {
     #[cfg(windows)]
     Action(MenuAction),
     /// The update scheduler's tick: time for an automatic check.
-    #[cfg(windows)]
     UpdateDue,
-    /// An update check finished on its own thread; `manual` ones show their own dialog there.
-    #[cfg(windows)]
+    /// An update check finished on its own thread; a `manual` one shows its answer in a dialog
+    /// (Windows: on that thread; macOS: here, on the main thread).
     UpdateChecked {
         manual: bool,
         outcome: Result<UpdateCheck, String>,
     },
-    /// The new exe is installed and running: this instance quits through the normal exit path.
-    #[cfg(windows)]
+    /// The new version is installed and starts once this one exits: this instance quits through
+    /// the normal exit path.
     UpdateRestart,
+    /// The Homebrew update failed with this reason; the running version stays.
+    #[cfg(target_os = "macos")]
+    UpdateFailed(String),
     /// A device interface of this USB id arrived; acted on once its arrivals settle.
     #[cfg(windows)]
     Plugged(Id),
@@ -161,12 +160,11 @@ impl UserEvent {
             Self::EnableRefreshOnBattery => "EnableRefreshOnBattery",
             #[cfg(windows)]
             Self::Action(_) => "Action",
-            #[cfg(windows)]
             Self::UpdateDue => "UpdateDue",
-            #[cfg(windows)]
             Self::UpdateChecked { .. } => "UpdateChecked",
-            #[cfg(windows)]
             Self::UpdateRestart => "UpdateRestart",
+            #[cfg(target_os = "macos")]
+            Self::UpdateFailed(_) => "UpdateFailed",
             #[cfg(windows)]
             Self::Plugged(_) => "Plugged",
             #[cfg(any(windows, target_os = "macos"))]
@@ -205,6 +203,12 @@ pub fn run() -> ExitCode {
     update::spawn_cleanup();
 
     let event_loop = new_event_loop();
+    // After the event loop exists (tao creates its NSApplication there); the moved copy starts
+    // once this one exits.
+    #[cfg(target_os = "macos")]
+    if update::offer_move_to_applications() {
+        return ExitCode::SUCCESS;
+    }
     let proxy = event_loop.create_proxy();
     let menu_proxy = proxy.clone();
     MenuEvent::set_event_handler(Some(move |event| {
@@ -296,8 +300,7 @@ struct App {
     #[cfg(target_os = "macos")]
     symbols: SymbolCache,
     power_source: PowerSource,
-    /// For the confirm dialog's thread, which answers with a `UserEvent`.
-    #[cfg(windows)]
+    /// For the threads (update check, confirm dialog) that answer with a `UserEvent`.
     proxy: EventLoopProxy<UserEvent>,
     /// When the last full refresh arrived; opening the menu skips its refresh while this is fresh.
     #[cfg(windows)]
@@ -315,10 +318,8 @@ struct App {
     #[cfg(windows)]
     shown_taskbar: Option<(Vec<Segment>, Theme, String)>,
     /// The newer release the last check found; the menu announces it on its first line.
-    #[cfg(windows)]
     update: Option<UpdateInfo>,
     /// An automatic check was skipped on battery power and runs when AC returns.
-    #[cfg(windows)]
     update_check_waits_for_ac: bool,
     /// Plug-ins waiting to settle, and when each id last earned a refresh.
     #[cfg(windows)]
@@ -370,7 +371,6 @@ impl App {
         };
         log::trace(format_args!("power at start {power:?}"));
         let worker = refresh::spawn_worker(proxy.clone(), config.refresh_seconds, power)?;
-        #[cfg(windows)]
         update::spawn_scheduler(proxy.clone());
         let mut app = Self {
             tray,
@@ -389,7 +389,6 @@ impl App {
             #[cfg(target_os = "macos")]
             symbols: SymbolCache::new(strip_render::icon_size_px(MAC_STRIP_HEIGHT_PX)),
             power_source: power.source,
-            #[cfg(windows)]
             proxy,
             #[cfg(windows)]
             last_refresh: None,
@@ -401,9 +400,7 @@ impl App {
             taskbar,
             #[cfg(windows)]
             shown_taskbar: None,
-            #[cfg(windows)]
             update: None,
-            #[cfg(windows)]
             update_check_waits_for_ac: false,
             #[cfg(windows)]
             arrivals: Arrivals::default(),
@@ -447,7 +444,7 @@ impl App {
             }
             #[cfg(target_os = "macos")]
             UserEvent::PowerChanged => {
-                self.refresh_power_source();
+                self.on_power_changed();
                 return ControlFlow::Wait;
             }
             // The theme changed; `apply` below re-reads it and sends the strip again.
@@ -466,21 +463,32 @@ impl App {
             #[cfg(windows)]
             UserEvent::Action(action) => self.on_action(action),
             // Nothing on screen changes, so no `apply`.
-            #[cfg(windows)]
             UserEvent::UpdateDue => {
                 self.on_update_due();
                 return ControlFlow::Wait;
             }
-            #[cfg(windows)]
+            // Windows builds its menu on each show; macOS rebuilds it in `apply` for the update line.
             UserEvent::UpdateChecked { manual, outcome } => {
                 self.on_update_checked(manual, outcome);
+                #[cfg(windows)]
                 return ControlFlow::Wait;
             }
             // Same exit as Quit, so the tray icon and strip are removed first.
-            #[cfg(windows)]
             UserEvent::UpdateRestart => {
+                #[cfg(windows)]
                 self.prepare_exit();
                 return ControlFlow::Exit;
+            }
+            #[cfg(target_os = "macos")]
+            UserEvent::UpdateFailed(reason) => {
+                dialog::notice(
+                    "Update failed",
+                    &format!(
+                        "Juicetray keeps running v{}.\n\n{reason}",
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                );
+                return ControlFlow::Wait;
             }
             // New-device events change nothing on screen, so no `apply`.
             #[cfg(windows)]
@@ -616,16 +624,9 @@ impl App {
         }
     }
 
-    /// Windows checks GitHub on its own thread, which then shows the answer.
-    #[cfg(windows)]
+    /// Checks GitHub on its own thread; the answer shows in a dialog.
     fn check_for_updates(&self) {
         update::spawn_check(self.proxy.clone(), true);
-    }
-
-    /// macOS sends nothing: the releases page is the check.
-    #[cfg(not(windows))]
-    fn check_for_updates(&self) {
-        update::open_url(update::RELEASES_URL);
     }
 
     /// The menu line offers the update in a dialog on its own thread.
@@ -636,9 +637,13 @@ impl App {
         }
     }
 
-    /// macOS never announces an update, so its menu has no such line.
-    #[cfg(not(windows))]
-    fn open_update(&self) {}
+    /// The menu line offers the update in a dialog on the main thread, as NSAlert needs.
+    #[cfg(target_os = "macos")]
+    fn open_update(&self) {
+        if let Some(info) = &self.update {
+            update::offer(info, &self.proxy);
+        }
+    }
 
     /// Opens the Add device window, or focuses it and hands `id` over; it asks the worker for
     /// device work itself.
@@ -1021,7 +1026,6 @@ impl App {
             entries.insert(at + 1, MenuEntry::label(BLUETOOTH_PERMISSION_HINT));
         }
         // The update line leads the menu, above "Refresh now".
-        #[cfg(windows)]
         if let Some(info) = &self.update {
             entries.splice(0..0, menu::update_available_entries(&info.version));
         }
@@ -1119,10 +1123,7 @@ impl App {
         self.send_power();
         true
     }
-}
 
-#[cfg(windows)]
-impl App {
     /// The power status changed; a flip may also release an update check that waited for AC.
     fn on_power_changed(&mut self) {
         if !self.refresh_power_source() {
@@ -1150,7 +1151,7 @@ impl App {
     /// Remembers the newest release for the menu line. The owner is told once per version: by a
     /// notification after an automatic check, silently after a manual one (its dialog already did).
     fn on_update_checked(&mut self, manual: bool, outcome: Result<UpdateCheck, String>) {
-        match outcome {
+        match &outcome {
             Ok(UpdateCheck::Available(info)) => {
                 let is_new = update::check::should_notify(
                     self.config.notified_update.as_deref(),
@@ -1163,14 +1164,22 @@ impl App {
                         notify_update_available(&info.version);
                     }
                 }
-                self.update = Some(info);
+                self.update = Some(info.clone());
             }
             Ok(UpdateCheck::UpToDate) => self.update = None,
             // The owner sees a manual check's error in its dialog; an automatic one retries tomorrow.
             Err(error) => log::line(&format!("update check failed: {error}")),
         }
+        // NSAlert needs the main thread, so a manual check's answer shows here on macOS.
+        #[cfg(target_os = "macos")]
+        if manual {
+            update::show_outcome(&outcome, &self.proxy);
+        }
     }
+}
 
+#[cfg(windows)]
+impl App {
     /// Hands the strip to the taskbar thread, only when strip, theme or tooltip differ from
     /// what it shows; each window renders there at its own taskbar's height and DPI.
     fn sync_taskbar(&mut self) {

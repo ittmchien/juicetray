@@ -1,30 +1,34 @@
-//! Update checks against this project's GitHub Releases. Windows asks GitHub's API once a day
-//! (and on request) from short-lived threads and can replace its own exe with the release's
-//! (checked against the release's SHA256SUMS.txt); macOS sends nothing and its menu item opens
-//! the releases page.
+//! Update checks against this project's GitHub Releases: once a day (and on request) from
+//! short-lived threads. Windows can replace its own exe with the release's (checked against the
+//! release's SHA256SUMS.txt); macOS upgrades a Homebrew install with `brew upgrade` and otherwise
+//! opens the download page.
 
 #[cfg(windows)]
 mod apply;
-#[cfg(any(windows, test))]
 pub mod check;
+mod common;
 #[cfg(any(windows, test))]
 mod install;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(windows)]
 mod windows;
 
+#[cfg(target_os = "macos")]
+pub use self::common::show_outcome;
+pub use self::common::{spawn_check, spawn_scheduler};
+#[cfg(target_os = "macos")]
+pub use self::macos::{offer, offer_move_to_applications};
 #[cfg(windows)]
-pub use self::windows::{shell_open, spawn_check, spawn_cleanup, spawn_offer, spawn_scheduler};
+pub use self::windows::{shell_open, spawn_cleanup, spawn_offer};
 
 /// Where releases are listed; also the fallback download page.
 pub const RELEASES_URL: &str = "https://github.com/ittmchien/juicetray/releases";
 
 /// First argument of the process an update starts; it waits for this one to release the
 /// single-instance lock.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub const UPDATED_FLAG: &str = "--updated-from";
-
-/// Whether this build can check on its own, which decides if the menu offers the switch.
-pub const AUTO_CHECK_AVAILABLE: bool = cfg!(windows);
 
 /// Opens `url` in the default browser from a short-lived thread, so a slow shell never stalls
 /// the caller.
