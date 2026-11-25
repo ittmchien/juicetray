@@ -13,9 +13,10 @@ use std::time::{Duration, Instant};
 
 use tao::event_loop::EventLoopProxy;
 
-use super::UPDATED_FLAG;
 use super::check::UpdateInfo;
 use super::common::{API_URL, BUSY_MESSAGE, DIALOG_TITLE};
+use super::{UPDATED_FLAG, UpdateStage};
+use crate::alerts::notify_update_started;
 use crate::app::UserEvent;
 use crate::config::Config;
 use crate::{dialog, instance, log};
@@ -100,7 +101,7 @@ pub fn offer(info: &UpdateInfo, proxy: &EventLoopProxy<UserEvent>) {
                 info.version
             );
             if dialog::confirm(DIALOG_TITLE, &message, "Update now", "Later") {
-                spawn_install(homebrew, proxy.clone());
+                spawn_install(homebrew, info.version.clone(), proxy.clone());
             }
         }
         None => {
@@ -163,9 +164,10 @@ fn bundle_to_move(running: Option<PathBuf>, home: Option<&Path>) -> Option<PathB
     })
 }
 
-/// Upgrades on its own thread and answers with `UserEvent::UpdateRestart` once the new copy is
-/// waiting to start, or `UserEvent::UpdateFailed` with the reason; this copy keeps running then.
-fn spawn_install(homebrew: Homebrew, proxy: EventLoopProxy<UserEvent>) {
+/// Upgrades on its own thread, reporting each step as `UserEvent::UpdateProgress`, and answers
+/// with `UserEvent::UpdateRestart` once the new copy is waiting to start, or
+/// `UserEvent::UpdateFailed` with the reason; this copy keeps running then.
+fn spawn_install(homebrew: Homebrew, version: String, proxy: EventLoopProxy<UserEvent>) {
     if INSTALLING.swap(true, Ordering::Relaxed) {
         busy_notice();
         return;
@@ -175,7 +177,15 @@ fn spawn_install(homebrew: Homebrew, proxy: EventLoopProxy<UserEvent>) {
         .name("update-install".into())
         .spawn(move || {
             let _span = log::span("update install");
-            let event = match install(&homebrew, running.as_deref()) {
+            notify_update_started(&version);
+            // A closed event loop means the app is exiting, so a lost step changes nothing.
+            let step = |stage| {
+                let _ = proxy.send_event(UserEvent::UpdateProgress(Some(stage)));
+            };
+            step(UpdateStage::Homebrew(version.clone()));
+            let event = match install(&homebrew, running.as_deref(), || {
+                step(UpdateStage::Installing(version.clone()));
+            }) {
                 Ok(()) => UserEvent::UpdateRestart,
                 Err(reason) => {
                     log::line(&format!("update failed: {reason}"));
@@ -192,10 +202,15 @@ fn spawn_install(homebrew: Homebrew, proxy: EventLoopProxy<UserEvent>) {
     }
 }
 
-/// `brew upgrade`, then the copy the owner runs is replaced (unless it is Homebrew's own) and
-/// the new one is started once this process exits.
-fn install(homebrew: &Homebrew, running: Option<&Path>) -> Result<(), String> {
+/// `brew upgrade`, then (after `installing` is told) the copy the owner runs is replaced unless
+/// it is Homebrew's own, and the new one is started once this process exits.
+fn install(
+    homebrew: &Homebrew,
+    running: Option<&Path>,
+    installing: impl FnOnce(),
+) -> Result<(), String> {
     brew_upgrade(&homebrew.brew)?;
+    installing();
     let app = homebrew.app();
     let plist = fs::read_to_string(app.join("Contents/Info.plist"))
         .map_err(|error| format!("reading the installed app's version failed: {error}"))?;

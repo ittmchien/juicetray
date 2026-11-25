@@ -13,4 +13,4 @@ pub use device::{
 };
 pub use display::{DisplayOptions, IconChoice, IconColor};
 pub use strip::{Segment, SegmentStyle, build_strip, needs_charge};
-pub use text::{EMPTY_MENU_TEXT, menu_line, tooltip_compact};
+pub use text::{EMPTY_MENU_TEXT, menu_line, shown_age, tooltip_compact};

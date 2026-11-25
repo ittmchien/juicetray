@@ -9,14 +9,15 @@ use tray_icon::menu::CheckMenuItem;
 use tray_icon::menu::{Icon, IconMenuItem};
 use tray_icon::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use ui_model::{
-    DeviceKind, DeviceView, EMPTY_MENU_TEXT, IconChoice, IconColor, group_label, menu_line,
-    needs_charge,
+    DeviceKind, DeviceView, EMPTY_MENU_TEXT, IconChoice, IconColor, Path, group_label, menu_line,
+    needs_charge, shown_age,
 };
 
 use crate::config::{Config, HIDE_OFFLINE_CHOICES, LOW_CHOICES, REFRESH_CHOICES, hex, parse_color};
 use crate::interval::format_interval;
 use crate::login::LoginState;
 use crate::symbols::symbol_for_device;
+use crate::update::UpdateStage;
 
 const CHECK_UPDATES_ID: &str = "check-updates";
 const AUTO_UPDATE_ID: &str = "update-auto";
@@ -42,13 +43,17 @@ const SECONDS_PER_MINUTE: u32 = 60;
 const SETTINGS_LABEL: &str = "Settings";
 /// The icon sits on the taskbar on Windows and in the menu bar on macOS.
 #[cfg(windows)]
-const CUSTOM_LIGHT_LABEL: &str = "Custom (light taskbar)…";
+const CUSTOM_LIGHT_LABEL: &str = "Light taskbar…";
 #[cfg(windows)]
-const CUSTOM_DARK_LABEL: &str = "Custom (dark taskbar)…";
+const CUSTOM_DARK_LABEL: &str = "Dark taskbar…";
 #[cfg(not(windows))]
-const CUSTOM_LIGHT_LABEL: &str = "Custom (light menu bar)…";
+const CUSTOM_LIGHT_LABEL: &str = "Light menu bar…";
 #[cfg(not(windows))]
-const CUSTOM_DARK_LABEL: &str = "Custom (dark menu bar)…";
+const CUSTOM_DARK_LABEL: &str = "Dark menu bar…";
+/// The `Custom` submenu's entry that sets one colour for both themes.
+const CUSTOM_BOTH_LABEL: &str = "Both…";
+/// The submenu in `Icon colour` that groups the custom colour pickers.
+const CUSTOM_COLOR_LABEL: &str = "Custom";
 
 /// Built-in icon choices in menu order; `None` is Auto (from the device kind).
 const BUILT_IN_ICONS: [(&str, Option<DeviceKind>); 7] = [
@@ -58,7 +63,7 @@ const BUILT_IN_ICONS: [(&str, Option<DeviceKind>); 7] = [
     ("Mouse", Some(DeviceKind::Mouse)),
     ("Keyboard", Some(DeviceKind::Keyboard)),
     ("Gamepad", Some(DeviceKind::Gamepad)),
-    ("Bluetooth", Some(DeviceKind::Other)),
+    ("Generic", Some(DeviceKind::Other)),
 ];
 
 /// Icon colour palette in menu order: (name, deeper shade for the light taskbar, lighter shade
@@ -276,44 +281,51 @@ pub fn listed_devices(devices: &[DeviceView]) -> impl Iterator<Item = &DeviceVie
         .filter(|device| device.connected || device.shown_percent().is_some())
 }
 
-/// The whole menu as plain data, rebuilt after every result or action. `has_battery` shows the
-/// battery-refresh check, which means nothing on a machine without a battery.
+/// The whole menu as plain data, rebuilt after every result or action: devices first, then the
+/// actions. `has_battery` shows the battery-refresh check, which means nothing on a machine
+/// without a battery; `update_stage` (an install under way) leads the menu and greys the check.
 pub fn menu_entries(
     devices: &[DeviceView],
     config: &Config,
     login: LoginState,
     has_battery: bool,
+    update_stage: Option<&UpdateStage>,
     now: SystemTime,
 ) -> Vec<MenuEntry> {
-    // "Refresh now" leads the menu, above the devices it refreshes.
-    let mut entries = vec![
-        MenuEntry::item("refresh", "Refresh now"),
-        MenuEntry::separator(),
-    ];
+    let mut entries = Vec::new();
+    if let Some(stage) = update_stage {
+        entries.extend([MenuEntry::label(stage.text()), MenuEntry::separator()]);
+    }
     let devices = device_entries(devices, config, now);
     if devices.is_empty() {
         entries.push(MenuEntry::label(EMPTY_MENU_TEXT));
     }
     entries.extend(devices);
-    entries.push(MenuEntry::separator());
+    entries.extend([
+        MenuEntry::separator(),
+        MenuEntry::item("refresh", "Refresh now"),
+    ]);
     if DETECT_NEW_AVAILABLE {
         entries.push(MenuEntry::item(ADD_DEVICE_ID, "Add device…"));
     }
     // The main menu keeps the devices and everyday commands; every option lives under Settings.
     entries.extend([
         MenuEntry::submenu(SETTINGS_LABEL, settings_entries(config, login, has_battery)),
-        // The running version sits on the update line, so the menu shows it without a new row.
-        MenuEntry::item(
-            CHECK_UPDATES_ID,
-            format!("Check for updates… (v{})", env!("CARGO_PKG_VERSION")),
-        ),
         MenuEntry::separator(),
+        // The running version sits on the update line; a second check waits for the install.
+        MenuEntry {
+            enabled: update_stage.is_none(),
+            ..MenuEntry::item(
+                CHECK_UPDATES_ID,
+                format!("Check for updates… (v{})", env!("CARGO_PKG_VERSION")),
+            )
+        },
         MenuEntry::item("quit", "Quit"),
     ]);
     entries
 }
 
-/// The Settings submenu: refreshing and alerts, then detection and start-up, then updates.
+/// The Settings submenu: refreshing, alerts, detection and start-up, then updates.
 fn settings_entries(config: &Config, login: LoginState, has_battery: bool) -> Vec<MenuEntry> {
     let mut entries = vec![MenuEntry::submenu(
         "Auto-refresh",
@@ -327,6 +339,7 @@ fn settings_entries(config: &Config, login: LoginState, has_battery: bool) -> Ve
         ));
     }
     entries.extend([
+        MenuEntry::separator(),
         MenuEntry::submenu(
             "Low-battery alert",
             choice_entries_with_custom(
@@ -370,7 +383,7 @@ fn settings_entries(config: &Config, login: LoginState, has_battery: bool) -> Ve
     entries
 }
 
-/// The line that announces a newer release; the caller puts it above "Refresh now".
+/// The line that announces a newer release; the caller puts it at the top of the menu.
 pub fn update_available_entries(version: &str) -> [MenuEntry; 2] {
     [
         MenuEntry::item(OPEN_UPDATE_ID, format!("Update available: v{version}…")),
@@ -398,26 +411,42 @@ fn device_entries(devices: &[DeviceView], config: &Config, now: SystemTime) -> V
     entries
 }
 
-/// The device line opens a submenu holding all of that device's settings.
+/// The device line opens a submenu: an info line, the strip switches, then icon and colour;
+/// all but "Show on strip" grey out while the device is hidden from the strip.
 fn device_entry(device: &DeviceView, config: &Config, now: SystemTime) -> MenuEntry {
     let id = &device.id;
     let options = config.display_options(id);
     let is_svg = matches!(options.icon, IconChoice::Svg(_));
     // The AirPods entry only appears for devices whose name maps to a system symbol.
     let has_symbol = symbol_for_device(&device.name, device.kind).is_some();
+    let shown = !config.is_hidden(id, &device.name);
+    let when_shown = |entry: MenuEntry| MenuEntry {
+        enabled: shown,
+        ..entry
+    };
     let children = vec![
-        MenuEntry::check(
-            format!("hide:{id}"),
-            "Show on strip",
-            !config.is_hidden(id, &device.name),
-        ),
-        MenuEntry::check(format!("pct:{id}"), "Show percentage", options.show_percent),
-        MenuEntry::check(format!("label:{id}"), "Show label", options.show_label),
-        MenuEntry::submenu("Icon", icon_entries(id, &options.icon, has_symbol)),
-        MenuEntry::submenu(
+        MenuEntry::label(device_info(device, now)),
+        MenuEntry::separator(),
+        MenuEntry::check(format!("hide:{id}"), "Show on strip", shown),
+        when_shown(MenuEntry::check(
+            format!("pct:{id}"),
+            "Show percentage",
+            options.show_percent,
+        )),
+        when_shown(MenuEntry::check(
+            format!("label:{id}"),
+            "Show name under icon",
+            options.show_label,
+        )),
+        MenuEntry::separator(),
+        when_shown(MenuEntry::submenu(
+            "Icon",
+            icon_entries(id, &options.icon, has_symbol),
+        )),
+        when_shown(MenuEntry::submenu(
             "Icon colour",
             color_entries(id, (options.color_light, options.color_dark), is_svg),
-        ),
+        )),
     ];
     // A native menu cannot colour or grey a clickable line, so states are said in words.
     let mut line = menu_line(device, now);
@@ -428,6 +457,18 @@ fn device_entry(device: &DeviceView, config: &Config, now: SystemTime) -> MenuEn
         line.push_str(DISCONNECTED_TEXT);
     }
     MenuEntry::submenu(line, children)
+}
+
+/// `Bluetooth · read 5m ago`: how the device connects and, when known, its reading's age; only a
+/// connected device's reading time is reliable, as on the device line.
+fn device_info(device: &DeviceView, now: SystemTime) -> String {
+    let path = match device.path {
+        Path::Bluetooth => "Bluetooth",
+        Path::Dongle => "2.4 GHz receiver",
+        Path::Cable => "USB cable",
+    };
+    // The same age rule as the device line, so the menu only changes when the age is worth saying.
+    shown_age(device, now).map_or_else(|| path.to_owned(), |age| format!("{path} · read {age}"))
 }
 
 /// Tail of a device line at or below the low-battery threshold.
@@ -477,7 +518,7 @@ fn color_value(color: IconColor) -> String {
 }
 
 /// `Icon colour` entries for the (light, dark) pair: Auto, Original (SVG icons only), the
-/// palette, then the custom pickers; a custom colour shows its hex and is ticked.
+/// palette, then the `Custom` submenu of pickers; a custom colour shows its hex and is ticked.
 fn color_entries(id: &str, current: (IconColor, IconColor), is_svg: bool) -> Vec<MenuEntry> {
     let (light, dark) = current;
     let pair_entry = |label: &str, pair: (IconColor, IconColor)| {
@@ -514,21 +555,24 @@ fn color_entries(id: &str, current: (IconColor, IconColor), is_svg: bool) -> Vec
     let same_rgb = light == dark && matches!(light, IconColor::Rgb(..));
     let split = light != dark && !is_pair;
     let is_rgb = |color| matches!(color, IconColor::Rgb(..));
-    entries.extend([
-        custom("ccolor", "Custom…", light, same_rgb),
-        custom(
-            "ccolor-light",
-            CUSTOM_LIGHT_LABEL,
-            light,
-            split && is_rgb(light),
-        ),
-        custom(
-            "ccolor-dark",
-            CUSTOM_DARK_LABEL,
-            dark,
-            split && is_rgb(dark),
-        ),
-    ]);
+    entries.push(MenuEntry::submenu(
+        CUSTOM_COLOR_LABEL,
+        vec![
+            custom("ccolor", CUSTOM_BOTH_LABEL, light, same_rgb),
+            custom(
+                "ccolor-light",
+                CUSTOM_LIGHT_LABEL,
+                light,
+                split && is_rgb(light),
+            ),
+            custom(
+                "ccolor-dark",
+                CUSTOM_DARK_LABEL,
+                dark,
+                split && is_rgb(dark),
+            ),
+        ],
+    ));
     entries
 }
 
@@ -754,10 +798,9 @@ mod tests {
         }
     }
 
-    /// The menu below its leading "Refresh now" and separator, so tests index from the devices.
+    /// The menu with no install under way, so tests index from the devices that lead it.
     fn entries(devices: &[DeviceView], config: &Config, login: LoginState) -> Vec<MenuEntry> {
-        let mut all = menu_entries(devices, config, login, false, SystemTime::UNIX_EPOCH);
-        all.drain(..2);
+        let all = menu_entries(devices, config, login, false, None, SystemTime::UNIX_EPOCH);
         // Settings items inline, so lookups find them beside the devices.
         all.into_iter()
             .flat_map(|e| {
@@ -778,24 +821,116 @@ mod tests {
             .children
     }
 
+    /// (id, text) of each main-menu entry; a separator reads `(None, "")`.
+    fn shape(all: &[MenuEntry]) -> Vec<(Option<&str>, &str)> {
+        all.iter()
+            .map(|e| (e.id.as_deref(), e.text.trim_start()))
+            .collect()
+    }
+
+    /// Devices lead the menu; Refresh now, Add device (Windows) and Settings follow, then the
+    /// update check and Quit.
     #[test]
-    fn refresh_now_leads_the_menu() {
+    fn devices_lead_and_actions_follow() {
+        let devices = [kinded("N9", DeviceKind::Headset)];
+        let all = menu_entries(
+            &devices,
+            &Config::default(),
+            LoginState::Disabled,
+            false,
+            None,
+            SystemTime::UNIX_EPOCH,
+        );
+        let check = format!("Check for updates… (v{})", env!("CARGO_PKG_VERSION"));
+        let mut expected = vec![
+            (None, "Headset"),
+            (None, "N9 — BT · 50%"),
+            (None, ""),
+            (Some("refresh"), "Refresh now"),
+        ];
+        if cfg!(windows) {
+            expected.push((Some(ADD_DEVICE_ID), "Add device…"));
+        }
+        expected.extend([
+            (None, SETTINGS_LABEL),
+            (None, ""),
+            (Some(CHECK_UPDATES_ID), check.as_str()),
+            (Some("quit"), "Quit"),
+        ]);
+        assert_eq!(shape(&all), expected);
+        assert!(all.iter().all(|e| e.enabled || e.id.is_none()));
+
+        // With no device the empty label takes the devices' place.
+        let empty = menu_entries(
+            &[],
+            &Config::default(),
+            LoginState::Disabled,
+            false,
+            None,
+            SystemTime::UNIX_EPOCH,
+        );
+        assert_eq!(empty[0].text, EMPTY_MENU_TEXT);
+        assert!(empty[1].is_separator());
+        assert_eq!(empty[2].id.as_deref(), Some("refresh"));
+    }
+
+    /// An install under way leads the menu with its step and greys "Check for updates…".
+    #[test]
+    fn update_progress_leads_and_disables_the_check() {
+        let stage = UpdateStage::Installing("0.5.0".into());
         let all = menu_entries(
             &[],
             &Config::default(),
             LoginState::Disabled,
             false,
+            Some(&stage),
             SystemTime::UNIX_EPOCH,
         );
-        assert_eq!(all[0].id.as_deref(), Some("refresh"));
-        assert_eq!(all[0].text, "Refresh now");
+        assert_eq!(all[0].text, "Installing v0.5.0…");
+        assert!(!all[0].enabled && all[0].id.is_none());
         assert!(all[1].is_separator());
+        assert_eq!(all[2].text, EMPTY_MENU_TEXT);
+        let check = all
+            .iter()
+            .find(|e| e.id.as_deref() == Some(CHECK_UPDATES_ID))
+            .unwrap();
+        assert!(!check.enabled);
+        #[cfg(target_os = "macos")]
         assert_eq!(
-            all.iter()
-                .filter(|e| e.id.as_deref() == Some("refresh"))
-                .count(),
-            1
+            UpdateStage::Homebrew("0.5.0".into()).text(),
+            "Updating to v0.5.0 via Homebrew…"
         );
+        #[cfg(windows)]
+        assert_eq!(
+            UpdateStage::Downloading("0.5.0".into()).text(),
+            "Downloading v0.5.0…"
+        );
+    }
+
+    #[test]
+    fn settings_groups_are_separated() {
+        let settings = settings_of(menu_entries(
+            &[],
+            &Config::default(),
+            LoginState::Disabled,
+            true,
+            None,
+            SystemTime::UNIX_EPOCH,
+        ));
+        let texts: Vec<&str> = settings.iter().map(|e| e.text.as_str()).collect();
+        let mut expected = vec![
+            "Auto-refresh",
+            "Refresh on battery power",
+            "",
+            "Low-battery alert",
+            "Hide offline after",
+            "",
+        ];
+        if cfg!(windows) {
+            expected.push("Detect new devices");
+        }
+        expected.extend(["Start at login", "", "Check for updates automatically"]);
+        assert_eq!(texts, expected);
     }
 
     #[test]
@@ -810,6 +945,7 @@ mod tests {
                 config,
                 LoginState::Disabled,
                 has_battery,
+                None,
                 SystemTime::UNIX_EPOCH,
             ))
             .into_iter()
@@ -833,6 +969,7 @@ mod tests {
             &Config::default(),
             LoginState::Disabled,
             true,
+            None,
             SystemTime::UNIX_EPOCH,
         ));
         let auto = entries
@@ -850,12 +987,13 @@ mod tests {
                 config,
                 LoginState::Disabled,
                 false,
+                None,
                 SystemTime::UNIX_EPOCH,
             )
         };
         let all = build(&Config::default());
         let settings = all.iter().position(|e| e.text == SETTINGS_LABEL).unwrap();
-        // The Add device window sits right above Settings, on Windows only.
+        // The Add device window sits between Refresh now and Settings, on Windows only.
         let add = all
             .iter()
             .position(|e| e.id.as_deref() == Some(ADD_DEVICE_ID));
@@ -863,7 +1001,7 @@ mod tests {
         if let Some(add) = add {
             assert_eq!(add + 1, settings);
             assert_eq!(all[add].text, "Add device…");
-            assert!(all[add - 1].is_separator());
+            assert_eq!(all[add - 1].id.as_deref(), Some("refresh"));
         }
 
         let entries = settings_of(all);
@@ -896,6 +1034,7 @@ mod tests {
                 config,
                 LoginState::Disabled,
                 false,
+                None,
                 SystemTime::UNIX_EPOCH,
             )
         };
@@ -903,11 +1042,12 @@ mod tests {
         let ids: Vec<Option<&str>> = entries.iter().map(|e| e.id.as_deref()).collect();
         let check = ids.iter().position(|id| *id == Some("check-updates"));
         let quit = ids.iter().position(|id| *id == Some("quit")).unwrap();
-        // "Check for updates…" is the last item before the separator and Quit.
-        assert_eq!(check, Some(quit - 2));
-        assert!(entries[quit - 1].is_separator());
+        // A separator, "Check for updates…" (enabled with no install under way), then Quit.
+        assert_eq!(check, Some(quit - 1));
+        assert!(entries[quit - 2].is_separator());
+        assert!(entries[quit - 1].enabled);
         assert_eq!(
-            entries[quit - 2].text,
+            entries[quit - 1].text,
             format!("Check for updates… (v{})", env!("CARGO_PKG_VERSION"))
         );
 
@@ -1072,8 +1212,8 @@ mod tests {
             ids.extend(entry.id.as_deref());
             stack.extend(&entry.children);
         }
-        // Show on strip, Show percentage, Show label, 7 built-in icons + Custom SVG (no AirPods
-        // entry: the name maps to no symbol) and 12 colour entries.
+        // Show on strip, Show percentage, Show name under icon, 7 built-in icons + Custom SVG (no
+        // AirPods entry: the name maps to no symbol) and 12 colour entries (3 under Custom).
         assert_eq!(ids.len(), 23);
         for id in ids {
             assert!(action_for(id).is_some(), "{id}");
@@ -1153,6 +1293,11 @@ mod tests {
         child(first_device(&entries), "Icon colour").clone()
     }
 
+    /// The `Custom` submenu of an `Icon colour` submenu.
+    fn custom_of(colour: &MenuEntry) -> &MenuEntry {
+        child(colour, CUSTOM_COLOR_LABEL)
+    }
+
     fn ticked_labels(entry: &MenuEntry) -> Vec<&str> {
         let ticked = entry.children.iter().filter(|e| e.checked == Some(true));
         ticked.map(|e| e.text.as_str()).collect()
@@ -1181,7 +1326,7 @@ mod tests {
             ticked_ids(child(submenu, "Icon")),
             [format!("icon:mouse:{HEX_ID}")]
         );
-        assert_eq!(child(submenu, "Show label").checked, Some(false));
+        assert_eq!(child(submenu, "Show name under icon").checked, Some(false));
         let colour = child(submenu, "Icon colour");
         assert_eq!(
             ticked_ids(colour),
@@ -1189,6 +1334,80 @@ mod tests {
         );
         assert_eq!(ticked_labels(colour), ["Blue"]);
         assert!(!child(colour, "Original").enabled);
+    }
+
+    /// Info line, strip switches, then icon and colour; all but "Show on strip" grey out while
+    /// the device is hidden.
+    #[test]
+    fn device_submenu_layout_and_hidden_state() {
+        let mut device = device("MX Master", Level::Percent(50), true);
+        device.id = HEX_ID.to_owned();
+        let submenu = |config: &Config| {
+            first_device(&entries(
+                std::slice::from_ref(&device),
+                config,
+                LoginState::Disabled,
+            ))
+            .clone()
+        };
+        let shown = submenu(&Config::default());
+        let texts: Vec<&str> = shown.children.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "Bluetooth",
+                "",
+                "Show on strip",
+                "Show percentage",
+                "Show name under icon",
+                "",
+                "Icon",
+                "Icon colour",
+            ]
+        );
+        assert!(!shown.children[0].enabled && shown.children[0].id.is_none());
+        assert!(shown.children[2..].iter().all(|e| e.enabled));
+
+        let mut config = Config::default();
+        config.toggle_hidden(HEX_ID, "MX Master");
+        let hidden = submenu(&config);
+        assert_eq!(child(&hidden, "Show on strip").checked, Some(false));
+        assert!(child(&hidden, "Show on strip").enabled);
+        for text in [
+            "Show percentage",
+            "Show name under icon",
+            "Icon",
+            "Icon colour",
+        ] {
+            assert!(!child(&hidden, text).enabled, "{text}");
+        }
+    }
+
+    /// The info line names the path in full and omits the age when it is not known.
+    #[test]
+    fn device_info_line() {
+        let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(3 * 3600);
+        let mut mouse = device("Mouse", Level::Percent(40), true);
+        mouse.path = Path::Dongle;
+        mouse.updated_at = SystemTime::UNIX_EPOCH;
+        assert_eq!(device_info(&mouse, now), "2.4 GHz receiver · read 3h ago");
+        mouse.connected = false;
+        assert_eq!(device_info(&mouse, now), "2.4 GHz receiver");
+        let mut cable = device("Pad", Level::NoData("x".into()), true);
+        cable.path = Path::Cable;
+        assert_eq!(device_info(&cable, now), "USB cable");
+    }
+
+    #[test]
+    fn generic_icon_keeps_the_other_kind_id() {
+        let menu = icon_menu("MX Master", IconChoice::Kind(DeviceKind::Other));
+        let generic = child(&menu, "Generic");
+        assert_eq!(generic.checked, Some(true));
+        assert_eq!(
+            generic.id.as_deref(),
+            Some(format!("icon:{}:{HEX_ID}", DeviceKind::Other.as_str()).as_str())
+        );
+        assert!(!menu.children.iter().any(|e| e.text == "Bluetooth"));
     }
 
     #[test]
@@ -1208,13 +1427,15 @@ mod tests {
                 "Purple",
                 "Pink",
                 "",
-                "Custom…",
-                CUSTOM_LIGHT_LABEL,
-                CUSTOM_DARK_LABEL,
+                CUSTOM_COLOR_LABEL,
             ]
         );
         assert!(colour.children[9].is_separator());
         assert_eq!(ticked_labels(&colour), ["Auto"]);
+        let custom = custom_of(&colour);
+        let labels: Vec<&str> = custom.children.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(labels, ["Both…", CUSTOM_LIGHT_LABEL, CUSTOM_DARK_LABEL]);
+        assert!(ticked_labels(custom).is_empty());
     }
 
     #[test]
@@ -1237,8 +1458,10 @@ mod tests {
     fn colour_menu_ticks_custom_both() {
         let orange = IconColor::Rgb(0xFF, 0x88, 0x00);
         let colour = colour_menu((orange, orange), IconChoice::Auto);
-        assert_eq!(ticked_ids(&colour), [format!("ccolor:{HEX_ID}")]);
-        assert_eq!(ticked_labels(&colour), ["Custom… (#FF8800)"]);
+        assert!(ticked_ids(&colour).is_empty());
+        let custom = custom_of(&colour);
+        assert_eq!(ticked_ids(custom), [format!("ccolor:{HEX_ID}")]);
+        assert_eq!(ticked_labels(custom), ["Both… (#FF8800)"]);
     }
 
     #[test]
@@ -1246,21 +1469,25 @@ mod tests {
         let orange = IconColor::Rgb(0xFF, 0x88, 0x00);
         let teal = IconColor::Rgb(0x00, 0x88, 0x88);
         let light_only = colour_menu((orange, IconColor::Auto), IconChoice::Auto);
+        let light_only = custom_of(&light_only);
         assert_eq!(
-            ticked_labels(&light_only),
+            ticked_labels(light_only),
             [format!("{CUSTOM_LIGHT_LABEL} (#FF8800)")]
         );
-        assert_eq!(ticked_ids(&light_only), [format!("ccolor-light:{HEX_ID}")]);
+        assert_eq!(ticked_ids(light_only), [format!("ccolor-light:{HEX_ID}")]);
         let both = colour_menu((orange, teal), IconChoice::Auto);
         assert_eq!(
-            ticked_labels(&both),
+            ticked_labels(custom_of(&both)),
             [
                 format!("{CUSTOM_LIGHT_LABEL} (#FF8800)"),
                 format!("{CUSTOM_DARK_LABEL} (#008888)")
             ]
         );
         let dark_only = colour_menu((IconColor::Auto, teal), IconChoice::Auto);
-        assert_eq!(ticked_ids(&dark_only), [format!("ccolor-dark:{HEX_ID}")]);
+        assert_eq!(
+            ticked_ids(custom_of(&dark_only)),
+            [format!("ccolor-dark:{HEX_ID}")]
+        );
     }
 
     /// WCAG 2.x relative luminance of an sRGB colour.
@@ -1319,6 +1546,7 @@ mod tests {
             &quick,
             LoginState::Disabled,
             false,
+            None,
             SystemTime::UNIX_EPOCH,
         ));
         let auto = quick_entries
@@ -1524,13 +1752,14 @@ mod tests {
                 (false, false, "Pad — BT · 50%"),
             ]
         );
-        // A separator ends the devices; Add device (Windows) then the Settings items follow.
+        // A separator ends the devices; Refresh now, Add device (Windows), then Settings items.
         assert!(entries[9].is_separator());
+        assert_eq!(entries[10].id.as_deref(), Some("refresh"));
         let next = if cfg!(windows) {
-            assert_eq!(entries[10].id.as_deref(), Some(ADD_DEVICE_ID));
-            11
+            assert_eq!(entries[11].id.as_deref(), Some(ADD_DEVICE_ID));
+            12
         } else {
-            10
+            11
         };
         assert_eq!(entries[next].text, "Auto-refresh");
     }

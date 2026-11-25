@@ -24,12 +24,6 @@ impl Device {
     pub fn is_queried(&self, allow: &[(u16, u16)]) -> bool {
         self.verified || self.custom || allow.contains(&(self.vid, self.pid))
     }
-
-    /// A custom BITMOUSE device on a cable, which is never sent to: the frame addresses the
-    /// receiver, and the door checks the connection of catalogue rows only.
-    pub fn is_custom_bitmouse_cable(&self) -> bool {
-        self.custom && self.family == Family::AtkBitmouse && self.cable
-    }
 }
 
 impl From<&KnownDevice> for Device {
@@ -46,6 +40,11 @@ impl From<&KnownDevice> for Device {
             custom: false,
         }
     }
+}
+
+/// The config word of a connection, also used in probe and report text.
+pub fn connection_name(cable: bool) -> &'static str {
+    if cable { "cable" } else { "receiver" }
 }
 
 /// The catalogue model of `vid:pid`, else the first custom device with that id.

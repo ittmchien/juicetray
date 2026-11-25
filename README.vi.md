@@ -37,8 +37,10 @@ cạnh đồng hồ, không cần cài phần mềm của từng hãng.
 - 🗂️ **Nhóm và sắp xếp** — chia nhóm theo loại, pin cao đứng trước, thiết bị offline xuống cuối và
   ghi *disconnected*; tự ẩn thiết bị offline sau khoảng thời gian bạn chọn.
 - 🔔 **Cảnh báo pin yếu** — thông báo khi chạm ngưỡng bạn chọn (5–30 % hoặc tự nhập).
-- 🛠️ **Tuỳ chỉnh từng thiết bị** — hiện/ẩn, phần trăm, nhãn, icon, màu icon cho taskbar / thanh
-  menu sáng và tối. Trên macOS, AirPods và tai Beats hiện đúng biểu tượng của Apple.
+- 🛠️ **Tuỳ chỉnh từng thiết bị** — bấm vào thiết bị trong menu: hiện/ẩn, phần trăm, tên dưới icon,
+  icon (Generic, Headset, Mouse… hoặc SVG của bạn) và màu icon, kèm mục **Custom** để chọn màu
+  chung hoặc riêng cho taskbar / thanh menu sáng và tối. Trên macOS, AirPods và tai Beats hiện đúng
+  biểu tượng của Apple.
 - 🪶 **Siêu nhẹ** — khoảng 10 MB RAM, ~0,05 % CPU lúc rảnh, file exe portable 2 MB trên Windows;
   tự dừng auto-refresh khi laptop chạy pin, trừ khi bạn bật **Refresh on battery power**.
 - 🔄 **Cập nhật một chạm** — kiểm tra GitHub Releases mỗi ngày; **Update now** kiểm SHA-256 của
@@ -99,6 +101,7 @@ tới thiết bị.
 | 🎧 | MCHOSE V9 Pro 2 | `3837:6011` | |
 | 🎧 | ATK N9 Ultra | `373B:1204` | Đóng ATK HUB trước: nó giữ cổng của receiver |
 | 🖱️ | ATK X1 SE | `373B:1216` | |
+| 🖱️ | ATK X1 SE Nearlink | `373B:1299` | Chuột cắm dây USB, không qua receiver |
 
 ### 🧪 Đã đọc được một lần, chưa đối chiếu với app của hãng
 
@@ -117,7 +120,9 @@ thiết bị dù bạn trả lời gì): app nhận ra thiết bị, gửi một
 **Try**, và thêm thiết bị khi bạn xác nhận mức pin đúng. Nếu không được, bấm **Send report** để
 gửi thông tin qua [Google Form](https://forms.gle/Qp5CeBGEiPg2UtkX6) (không cần tài khoản),
 hoặc **Report on GitHub** để [mở issue](https://github.com/ittmchien/juicetray/issues) với thông
-tin điền sẵn. Chỉ gửi tên thiết bị, USB ID và danh sách interface — không có thông tin cá nhân.
+tin điền sẵn. Chỉ gửi tên thiết bị, USB ID và danh sách interface, các byte đã gửi và đọc được
+trong lần thử, tên app hãng đang chạy và USB ID của các thiết bị khác cùng hãng — không có thông
+tin cá nhân.
 
 📋 **[Danh sách thiết bị](https://docs.google.com/spreadsheets/d/e/2PACX-1vRTKUOHRmpLeXhjxL93T5HwuYsJKnzMHSUhN2AWslNCB938EpQH2YkMeNubTcpvdxpHC2o7Dw4OHfS7/pubhtml)**
 — mọi model Juicetray biết (**Supported**) và các thiết bị người dùng đã yêu cầu kèm trạng thái
@@ -153,6 +158,10 @@ cạnh đó trước, nên chép lỗi thì app cũ vẫn nguyên) rồi khởi 
 của Homebrew thì khởi động lại từ đó và hỏi chuyển vào Applications. Lỗi ở bất kỳ bước nào thì một
 hộp thoại báo lý do và bản đang chạy được giữ nguyên. Không cài bằng Homebrew thì app mở trang tải
 về thay vào đó.
+
+Trong lúc **Update now** chạy, một thông báo báo bắt đầu cập nhật và đầu menu hiện bước hiện tại
+(*Downloading…* hoặc *Updating … via Homebrew…*, rồi *Installing…*, sau đó app tự khởi động lại); mục **Check for
+updates…** bị làm mờ tới khi xong.
 
 ## ⚠️ Lỗi đã biết
 

@@ -91,17 +91,27 @@ mod tests {
     fn verified_and_cable_flags() {
         assert_eq!(
             ids(|d| d.verified),
-            [(0x373B, 0x1204), (0x373B, 0x1216), (0x3837, 0x6011)]
+            [
+                (0x373B, 0x1204),
+                (0x373B, 0x1216),
+                (0x373B, 0x1299),
+                (0x3837, 0x6011)
+            ]
         );
         let cable = ids(|d| d.cable);
-        for id in [(0x3837, 0x6010), (0x373B, 0x11CA)] {
+        // 1299 and 130E are BITMOUSE mice on their cable (no HUB receiver flag).
+        let cables = [
+            (0x3837, 0x6010),
+            (0x373B, 0x11CA),
+            (0x373B, 0x1299),
+            (0x373B, 0x130E),
+        ];
+        for id in cables {
             assert!(cable.contains(&id), "{id:04X?}");
         }
         let receivers = [
             (0x3837, 0x6011),
             (0x373B, 0x1107),
-            (0x373B, 0x1299),
-            (0x373B, 0x130E),
             (0x373B, 0x1216),
             (0x3554, 0xFA09),
             (0x391D, 0x1A05),

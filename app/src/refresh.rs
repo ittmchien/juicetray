@@ -42,7 +42,7 @@ pub enum Command {
     TryAs {
         id: crate::plug::Id,
         family: protocol::Family,
-        reply: Sender<crate::add_device::TryOutcome>,
+        reply: Sender<crate::add_device::Tried>,
     },
 }
 

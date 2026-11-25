@@ -62,6 +62,15 @@ pub fn notify_update_available(version: &str) {
     );
 }
 
+/// Tells the owner "Update now" started; the tray menu shows each step until the restart.
+pub fn notify_update_started(version: &str) {
+    log::trace(format_args!("notification spawn updating {version}"));
+    post(
+        format!("Updating Juicetray to v{version}…"),
+        "Juicetray restarts when the update is installed.".to_owned(),
+    );
+}
+
 /// Posts the notification from a short-lived thread so the event loop never waits on the OS.
 fn post(summary: String, body: String) {
     let spawned = std::thread::Builder::new()

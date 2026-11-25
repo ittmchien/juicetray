@@ -42,6 +42,7 @@ use crate::symbols::{DEFAULT_SYMBOL, symbol_for_device};
 use crate::taskbar::{self, StripContent, TaskbarHandle};
 #[cfg(target_os = "macos")]
 use crate::ui_font;
+use crate::update::UpdateStage;
 use crate::update::check::{UpdateCheck, UpdateInfo};
 #[cfg(target_os = "macos")]
 use crate::wake;
@@ -106,6 +107,8 @@ pub enum UserEvent {
     /// The new version is installed and starts once this one exits: this instance quits through
     /// the normal exit path.
     UpdateRestart,
+    /// "Update now" reached this step on its install thread; `None` once it failed.
+    UpdateProgress(Option<UpdateStage>),
     /// The Homebrew update failed with this reason; the running version stays.
     #[cfg(target_os = "macos")]
     UpdateFailed(String),
@@ -163,6 +166,7 @@ impl UserEvent {
             Self::UpdateDue => "UpdateDue",
             Self::UpdateChecked { .. } => "UpdateChecked",
             Self::UpdateRestart => "UpdateRestart",
+            Self::UpdateProgress(_) => "UpdateProgress",
             #[cfg(target_os = "macos")]
             Self::UpdateFailed(_) => "UpdateFailed",
             #[cfg(windows)]
@@ -319,6 +323,8 @@ struct App {
     shown_taskbar: Option<(Vec<Segment>, Theme, String)>,
     /// The newer release the last check found; the menu announces it on its first line.
     update: Option<UpdateInfo>,
+    /// The step "Update now" is on; the menu shows it in place of the update line.
+    update_stage: Option<UpdateStage>,
     /// An automatic check was skipped on battery power and runs when AC returns.
     update_check_waits_for_ac: bool,
     /// Plug-ins waiting to settle, and when each id last earned a refresh.
@@ -401,6 +407,7 @@ impl App {
             #[cfg(windows)]
             shown_taskbar: None,
             update: None,
+            update_stage: None,
             update_check_waits_for_ac: false,
             #[cfg(windows)]
             arrivals: Arrivals::default(),
@@ -479,8 +486,17 @@ impl App {
                 self.prepare_exit();
                 return ControlFlow::Exit;
             }
+            // Windows builds its menu on each show; macOS rebuilds it in `apply` for the new step.
+            UserEvent::UpdateProgress(stage) => {
+                self.update_stage = stage;
+                #[cfg(windows)]
+                return ControlFlow::Wait;
+            }
+            // The step line goes before the dialog, so the menu is right once it closes.
             #[cfg(target_os = "macos")]
             UserEvent::UpdateFailed(reason) => {
+                self.update_stage = None;
+                self.apply();
                 dialog::notice(
                     "Update failed",
                     &format!(
@@ -1018,6 +1034,7 @@ impl App {
             &self.config,
             login::login_state(),
             has_battery,
+            self.update_stage.as_ref(),
             now,
         );
         // The hint sits right under the "no devices" line.
@@ -1025,8 +1042,8 @@ impl App {
         if let Some(at) = empty_line.filter(|_| self.has_read && instance::is_bundled()) {
             entries.insert(at + 1, MenuEntry::label(BLUETOOTH_PERMISSION_HINT));
         }
-        // The update line leads the menu, above "Refresh now".
-        if let Some(info) = &self.update {
+        // The update line leads the menu, unless an install's step line already does.
+        if let Some(info) = self.update.as_ref().filter(|_| self.update_stage.is_none()) {
             entries.splice(0..0, menu::update_available_entries(&info.version));
         }
         entries

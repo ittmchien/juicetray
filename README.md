@@ -37,8 +37,10 @@ tray — right next to the clock, without each vendor's software.
 - 🗂️ **Grouped and sorted** — devices grouped by kind, highest level first, offline ones last and
   marked *disconnected*; hide offline devices after a delay you choose.
 - 🔔 **Low-battery alert** — a notification at the threshold you pick (5–30 % or custom).
-- 🛠️ **Per-device options** — show or hide, percentage, label, icon, and icon colours for a light
-  and a dark taskbar / menu bar. On macOS, AirPods and Beats earbuds show Apple's own symbol.
+- 🛠️ **Per-device options** — click a device in the menu: show or hide it, its percentage, its
+  name under the icon, the icon (Generic, Headset, Mouse… or your own SVG) and icon colours, with
+  **Custom** picks for both or for a light / dark taskbar / menu bar. On macOS, AirPods and Beats
+  earbuds show Apple's own symbol.
 - 🪶 **Featherweight** — about 10 MB of RAM, ~0.05 % CPU at idle, a 2 MB portable exe on Windows;
   it pauses auto-refresh on laptop battery unless you turn on **Refresh on battery power**.
 - 🔄 **Updates in one click** — checks GitHub Releases once a day; **Update now** verifies the
@@ -99,6 +101,7 @@ Battery read correctly on the owner's devices; these are read automatically.
 | 🎧 | MCHOSE V9 Pro 2 | `3837:6011` | |
 | 🎧 | ATK N9 Ultra | `373B:1204` | Close ATK HUB first: it holds the receiver's port |
 | 🖱️ | ATK X1 SE | `373B:1216` | |
+| 🖱️ | ATK X1 SE Nearlink | `373B:1299` | The mouse on its USB cable, no receiver |
 
 ### 🧪 Read once, not yet checked against the vendor app
 
@@ -117,7 +120,8 @@ detects the device, sends one read-only battery query when you press **Try**, an
 you confirm the level. If it does not work, press **Send report** to send the details through a
 [Google Form](https://forms.gle/Qp5CeBGEiPg2UtkX6) (no account needed), or **Report on GitHub**
 to [open an issue](https://github.com/ittmchien/juicetray/issues) with them filled in. Only the
-device's name, USB ID and interfaces are sent — nothing personal.
+device's name, USB ID and interfaces, the bytes sent and read during the try, the names of running
+vendor apps and the USB IDs of other devices of the same brand are sent — nothing personal.
 
 📋 **[Device list](https://docs.google.com/spreadsheets/d/e/2PACX-1vRTKUOHRmpLeXhjxL93T5HwuYsJKnzMHSUhN2AWslNCB938EpQH2YkMeNubTcpvdxpHC2o7Dw4OHfS7/pubhtml)**
 — every model Juicetray knows (**Supported**) and the devices users asked for, with their status
@@ -153,6 +157,10 @@ On macOS, when Juicetray was installed with Homebrew, **Update now** runs
 from Homebrew's own folder instead, it restarts from there and offers the move to Applications. If
 anything fails, a dialog says why and the running version stays. Without Homebrew it offers the
 download page instead.
+
+While **Update now** runs, a notification says it started and the top of the menu shows the
+current step (*Downloading…* or *Updating … via Homebrew…*, then *Installing…*, then the app restarts);
+**Check for updates…** is greyed out until it finishes.
 
 ## ⚠️ Known issues
 

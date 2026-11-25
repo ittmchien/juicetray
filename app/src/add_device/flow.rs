@@ -4,13 +4,15 @@
 
 use std::time::{Duration, Instant};
 
+use door::{Connection, Source};
 use protocol::{Family, HidShape, Reading, is_recovery, known};
 
 use crate::config::CustomEntry;
-use crate::device::{Device, lookup};
+use crate::device::{Device, connection_name, lookup};
 use crate::plug::{Arrivals, Id};
 use crate::report::{self, Identity};
 use crate::scan::reports_text;
+use crate::vendor_apps::shown_name;
 
 /// Detection gives up after this long without a new device.
 pub const DETECT_LIMIT: Duration = Duration::from_secs(120);
@@ -35,9 +37,6 @@ const RECOVERY: &str = "The device is in recovery or update mode; Juicetray neve
 const NO_FAMILY: &str = "None of its interfaces matches a battery protocol Juicetray knows.";
 const NEEDS_CAPTURE: &str = "Its catalogue model needs a capture of its own app's traffic before \
                              Juicetray may query it.";
-const BITMOUSE_CABLE: &str = "It is a BITMOUSE cable model; a BITMOUSE cable is never queried.";
-/// The [Try] label of an off-catalogue BITMOUSE id: pressing it confirms a USB receiver.
-const RECEIVER_TRY: &str = "It is a USB receiver — Try";
 const UNSTABLE: &str = "Its interfaces kept changing, so they could not be read.";
 
 /// The kind choices of a custom device: label and config value.
@@ -50,6 +49,9 @@ pub const KINDS: [(&str, &str); 5] = [
 ];
 /// The connection choices of a custom device: label and config value.
 const CONNECTIONS: [(&str, &str); 2] = [("Receiver (USB dongle)", "receiver"), ("Cable", "cable")];
+/// The rows of `CONNECTIONS`.
+const RECEIVER: usize = 0;
+const CABLE: usize = 1;
 
 /// What the refresh worker found on a device's interfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +75,10 @@ pub struct Interfaces {
     /// The device's collections and serial ports as `juicetray scan` prints them (report sizes,
     /// descriptor hex, manufacturer / product); empty when they were not listed.
     pub scan_lines: Vec<String>,
+    /// The vendor apps of this VID running at inspection (exe names); they can hold the device.
+    pub vendor_apps: Vec<&'static str>,
+    /// Other ids of the same VID plugged in, to tell a mouse on its cable from its receiver.
+    pub siblings: Vec<Id>,
 }
 
 /// The result of one try.
@@ -89,6 +95,27 @@ pub enum TryOutcome {
     Failed(String),
     /// The write was attempted, so the query went out (or may have), then the exchange failed.
     Interrupted(String),
+}
+
+/// The worker's answer to one try.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tried {
+    pub outcome: TryOutcome,
+    /// BITMOUSE only: the connection its battery frame was sent for.
+    pub connection: Option<Connection>,
+    /// Report lines: target, bytes sent and read, the BITMOUSE device type.
+    pub trace: Vec<String>,
+}
+
+/// An outcome with no trace, for answers that never reached the device's exchange.
+impl From<TryOutcome> for Tried {
+    fn from(outcome: TryOutcome) -> Self {
+        Self {
+            outcome,
+            connection: None,
+            trace: Vec::new(),
+        }
+    }
 }
 
 /// What the owner adds, sent to the UI thread, which writes the config.
@@ -139,7 +166,7 @@ pub enum Event {
     /// A popup's [OK] or the window's start with a preselected id.
     Handover(Id),
     Inspected(Inspection),
-    Tried(TryOutcome),
+    Tried(Tried),
     /// The UI thread's answer to `Effect::Add`: the config was written, or why not.
     Saved(Result<(), String>),
     Tick,
@@ -149,6 +176,8 @@ pub enum Event {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Form {
     pub connections: Vec<&'static str>,
+    /// The connection row picked at first; the owner may change it.
+    pub connection: usize,
     pub name: String,
 }
 
@@ -200,6 +229,8 @@ enum Step {
         id: Id,
         family: Family,
         reading: Reading,
+        /// BITMOUSE only: the connection whose battery frame read the level.
+        connection: Option<Connection>,
         /// When the reading came in; [Add] sits where [Try] was, so it waits `ADD_GUARD`.
         since: Instant,
     },
@@ -215,7 +246,10 @@ enum Step {
 #[derive(Debug, Default)]
 struct Facts {
     interfaces: Option<Interfaces>,
-    tried: Option<(Family, String)>,
+    /// The `Tried:` label (family, and the BITMOUSE connection) and the result text.
+    tried: Option<(String, String)>,
+    /// The worker's trace of the try, printed under the `Tried:` line.
+    trace: Vec<String>,
     reason: String,
 }
 
@@ -274,8 +308,8 @@ impl Flow {
             }
             Event::Tick => self.tick(now),
             Event::Inspected(inspection) => self.inspected(inspection, now),
-            Event::Tried(outcome) => {
-                self.tried(outcome, now);
+            Event::Tried(tried) => {
+                self.tried(tried, now);
                 None
             }
             // Only the window that pressed [Add] waits for the save; the result is shown as is.
@@ -392,8 +426,8 @@ impl Flow {
             }
             Step::Found {
                 id,
-                family,
                 reading,
+                connection,
                 ..
             } => {
                 let mut state = String::new();
@@ -410,11 +444,11 @@ impl Flow {
                 if known(id.0, id.1).is_none() {
                     view.text
                         .push_str("\n\nPick its kind and connection, name it, then press Add.");
+                    // A BITMOUSE read on its cable frame starts as cable; the owner may change it.
+                    let cable = connection.is_some_and(|connection| connection.cable);
                     view.form = Some(Form {
-                        connections: connections(*family)
-                            .iter()
-                            .map(|(label, _)| *label)
-                            .collect(),
+                        connections: CONNECTIONS.iter().map(|(label, _)| *label).collect(),
+                        connection: if cable { CABLE } else { RECEIVER },
                         name: self.name(*id),
                     });
                 }
@@ -486,21 +520,12 @@ impl Flow {
             "\n\nClose the device's own app, then press Try: Juicetray sends that one \
              read-only query, once.",
         );
-        // Off the catalogue, nothing tells a BITMOUSE receiver from a cable mouse: the button's
-        // own label is the owner's confirmation that it is a receiver.
-        let label = if family == Family::AtkBitmouse && known(id.0, id.1).is_none() {
-            view.text
-                .push_str(" Never try a mouse on its cable: BITMOUSE goes to USB receivers only.");
-            RECEIVER_TRY
-        } else {
-            "Try"
-        };
         let wait = ready.map_or(Duration::ZERO, |at| at.saturating_duration_since(now));
         view.primary = Some(if wait.is_zero() {
-            label.to_owned()
+            "Try".to_owned()
         } else {
             // Whole seconds, rounded up, so it never shows 0 while waiting.
-            format!("{label} in {} s", wait.as_millis().div_ceil(1000))
+            format!("Try in {} s", wait.as_millis().div_ceil(1000))
         });
         view.close = "Cancel";
     }
@@ -621,13 +646,15 @@ impl Flow {
         None
     }
 
-    fn tried(&mut self, outcome: TryOutcome, now: Instant) {
+    fn tried(&mut self, tried: Tried, now: Instant) {
         let Step::Trying { id, family } = self.step else {
             return;
         };
         let name = family.name();
+        let label = tried_label(family, tried.connection);
+        self.facts.trace = tried.trace;
         // Unplugged and floor answers leave no report line; every other answer is recorded.
-        let (result, reason) = match outcome {
+        let (result, reason) = match tried.outcome {
             TryOutcome::Gone => {
                 self.step = Step::Unplugged(id);
                 return;
@@ -656,15 +683,24 @@ impl Flow {
                 return;
             }
             TryOutcome::Reading(reading) => {
-                self.facts.tried = Some((family, format!("read {} %", reading.percent)));
+                self.facts.tried = Some((label, format!("read {} %", reading.percent)));
                 self.step = Step::Found {
                     id,
                     family,
                     reading,
+                    connection: tried.connection,
                     since: now,
                 };
                 return;
             }
+            // A BITMOUSE receiver forwards the query, so its silence may mean no linked mouse.
+            TryOutcome::NoReply if tried.connection.is_some_and(|c| !c.cable) => (
+                "no reply".to_owned(),
+                format!(
+                    "It did not answer the {name} battery query. The receiver may have no mouse \
+                     linked: switch the mouse on and move it."
+                ),
+            ),
             TryOutcome::NoReply => (
                 "no reply".to_owned(),
                 format!("It did not answer the {name} battery query."),
@@ -685,7 +721,7 @@ impl Flow {
                 ),
             ),
         };
-        self.facts.tried = Some((family, result));
+        self.facts.tried = Some((label, result));
         self.unsupported(id, reason);
     }
 
@@ -728,7 +764,8 @@ impl Flow {
 
     fn alt(&mut self, now: Instant) -> Option<Effect> {
         match self.step {
-            // A wide [Try] overlaps [Not right], so a double-click on it must not dismiss the reading.
+            // [Not right] sits right beside the spot [Try] had, so it waits out the same guard as
+            // [Add]: a repeated press meant for [Try] must not dismiss the reading.
             Step::Found { since, .. } if now < since + ADD_GUARD => None,
             Step::Found { id, reading, .. } => {
                 self.unsupported(
@@ -809,8 +846,15 @@ impl Flow {
             format!("Device: {}", self.labelled(id)),
         ];
         lines.push(match known(vid, pid) {
-            Some(device) if device.verified => format!("Catalogue: {}, verified", device.name),
-            Some(device) => format!("Catalogue: {}, not verified", device.name),
+            Some(device) => {
+                let verified = if device.verified {
+                    "verified"
+                } else {
+                    "not verified"
+                };
+                let connection = connection_name(device.cable);
+                format!("Catalogue: {} ({connection}), {verified}", device.name)
+            }
             None => "Catalogue: not listed".to_owned(),
         });
         let interfaces = self.facts.interfaces.as_ref();
@@ -823,21 +867,21 @@ impl Flow {
                     .collect()
             })
             .unwrap_or_default();
-        lines.push(format!(
-            "Matching protocols: {}",
-            if families.is_empty() {
-                "none".to_owned()
-            } else {
-                families.join(", ")
-            }
-        ));
+        lines.push(format!("Matching protocols: {}", list_or_none(&families)));
         lines.push(match &self.facts.tried {
-            Some((family, result)) => format!("Tried: {}: {result}", family.name()),
+            Some((label, result)) => format!("Tried: {label}: {result}"),
             None => "Tried: nothing".to_owned(),
         });
+        lines.extend(self.facts.trace.iter().cloned());
         lines.push(format!("Result: {}", self.facts.reason));
         // The scan listing carries every fact a catalogue row needs; bare shapes are the fallback.
+        // Apps and same-brand ids come first, since a long issue URL loses the last lines.
         if let Some(found) = interfaces {
+            lines.push(format!("Vendor apps: {}", apps_text(&found.vendor_apps)));
+            lines.push(format!(
+                "Same vendor plugged in: {}",
+                siblings_text(&found.siblings)
+            ));
             lines.push("Interfaces:".to_owned());
             if found.scan_lines.is_empty() {
                 lines.extend(found.shapes.iter().map(shape_line));
@@ -856,21 +900,65 @@ impl Flow {
 fn no_choice_reason((vid, pid): Id) -> &'static str {
     match known(vid, pid) {
         Some(device) if device.needs_capture => NEEDS_CAPTURE,
-        Some(device) if device.family == Family::AtkBitmouse && device.cable => BITMOUSE_CABLE,
         _ => NO_FAMILY,
     }
 }
 
+/// The `Tried:` label: the family, plus for BITMOUSE the connection its battery frame used and
+/// where that came from (the device's type answer, the catalogue row, else assumed).
+fn tried_label(family: Family, connection: Option<Connection>) -> String {
+    let Some(Connection { cable, source }) = connection else {
+        return family.name().to_owned();
+    };
+    let source = match source {
+        Source::Detected { .. } => "detected",
+        Source::Catalogue => "catalogue",
+        Source::Caller => "assumed",
+    };
+    format!("{} ({source} {})", family.name(), connection_name(cable))
+}
+
+/// `items` joined with `, `, or `none`.
+fn list_or_none<S: std::borrow::Borrow<str>>(items: &[S]) -> String {
+    if items.is_empty() {
+        return "none".to_owned();
+    }
+    items.join(", ")
+}
+
+/// The running vendor apps by shown name (`ATK HUB open`), or `none`.
+fn apps_text(apps: &[&str]) -> String {
+    let open: Vec<String> = apps
+        .iter()
+        .map(|exe| format!("{} open", shown_name(exe)))
+        .collect();
+    list_or_none(&open)
+}
+
+/// Same-brand ids with their catalogue name and connection only: another device's USB product
+/// string or custom name may be personal, so it is never printed.
+fn siblings_text(siblings: &[Id]) -> String {
+    let texts: Vec<String> = siblings
+        .iter()
+        .map(|&id| match known(id.0, id.1) {
+            Some(device) => format!(
+                "{} {} ({})",
+                id_text(id),
+                device.name,
+                connection_name(device.cable)
+            ),
+            None => format!("{} not listed", id_text(id)),
+        })
+        .collect();
+    list_or_none(&texts)
+}
+
 /// The families offered for `id`: a catalogue model only as its own family (the worker queries
-/// it that way once allowed) and never when it needs a capture or is a BITMOUSE cable; ATK serial,
-/// RongYuan F7, Driveall and Generic only exist for catalogue models, so other ids never get them.
+/// it that way once allowed) and never when it needs a capture; ATK serial, RongYuan F7,
+/// Driveall and Generic only exist for catalogue models, so other ids never get them.
 pub fn choices(id: Id, families: &[(Family, Option<Duration>)]) -> Vec<(Family, Option<Duration>)> {
     let keep = |family: Family| match known(id.0, id.1) {
-        Some(device) => {
-            family == device.family
-                && !device.needs_capture
-                && !(device.family == Family::AtkBitmouse && device.cable)
-        }
+        Some(device) => family == device.family && !device.needs_capture,
         None => !matches!(
             family,
             Family::AtkSerial | Family::RongYuanF7 | Family::Driveall | Family::Generic(_)
@@ -883,23 +971,15 @@ pub fn choices(id: Id, families: &[(Family, Option<Duration>)]) -> Vec<(Family, 
         .collect()
 }
 
-/// The connection choices for `family`; BITMOUSE is read through a receiver only.
-pub fn connections(family: Family) -> &'static [(&'static str, &'static str)] {
-    if family == Family::AtkBitmouse {
-        &CONNECTIONS[..1]
-    } else {
-        &CONNECTIONS
-    }
-}
-
 /// What [Add] saves: a catalogue id joins `allow`; any other id becomes a custom device with the
 /// picked kind and connection and the typed name (`default_name` when blank).
 pub fn add_request(id: Id, family: Family, input: &Input, default_name: &str) -> AddRequest {
     if known(id.0, id.1).is_some() {
         return AddRequest::Allow(id);
     }
-    let offered = connections(family);
-    let (_, connection) = offered.get(input.connection).unwrap_or(&offered[0]);
+    let (_, connection) = CONNECTIONS
+        .get(input.connection)
+        .unwrap_or(&CONNECTIONS[RECEIVER]);
     let (_, kind) = KINDS.get(input.kind).unwrap_or(&KINDS[0]);
     let typed = input.name.trim();
     AddRequest::Custom(CustomEntry {
@@ -955,6 +1035,8 @@ mod tests {
     const VERIFIED: Id = (0x3837, 0x6011);
     const UNKNOWN: Id = (0x3554, 0x7777);
     const OTHER: Id = (0x373B, 0x8888);
+    /// ATK X1 SE NK, an unverified catalogue BITMOUSE mouse on its cable.
+    const X1_SE_NK: Id = (0x373B, 0x130E);
 
     fn new_flow() -> Flow {
         Flow::new(
@@ -968,15 +1050,12 @@ mod tests {
         )
     }
 
-    /// An unverified catalogue row that needs no capture and is not a BITMOUSE cable.
+    /// An unverified catalogue row that needs no capture.
     fn unverified() -> (Id, Family) {
         protocol::KNOWN
             .iter()
             .find(|device| {
-                !device.verified
-                    && !device.needs_capture
-                    && !is_recovery(device.vid, device.pid)
-                    && !(device.family == Family::AtkBitmouse && device.cable)
+                !device.verified && !device.needs_capture && !is_recovery(device.vid, device.pid)
             })
             .map(|device| ((device.vid, device.pid), device.family))
             .expect("an unverified catalogue row")
@@ -1005,6 +1084,8 @@ mod tests {
             shapes: vec![compx_shape()],
             serial: false,
             scan_lines: Vec::new(),
+            vendor_apps: Vec::new(),
+            siblings: Vec::new(),
         })
     }
 
@@ -1237,16 +1318,11 @@ mod tests {
             [(family, None)]
         );
         assert!(choices(row, &[(other, None)]).is_empty());
+        // Every catalogue row is offered as its own family unless it needs a capture.
         for device in protocol::KNOWN {
-            let blocked =
-                device.needs_capture || (device.family == Family::AtkBitmouse && device.cable);
-            if blocked {
-                let id = (device.vid, device.pid);
-                assert!(
-                    choices(id, &[(device.family, None)]).is_empty(),
-                    "{id:04X?}"
-                );
-            }
+            let id = (device.vid, device.pid);
+            let offered = choices(id, &[(device.family, None)]);
+            assert_eq!(offered.is_empty(), device.needs_capture, "{id:04X?}");
         }
     }
 
@@ -1284,7 +1360,7 @@ mod tests {
 
         // A floor the worker found meanwhile goes back to the countdown.
         flow.on(
-            Event::Tried(TryOutcome::Waiting(Duration::from_secs(3))),
+            Event::Tried(TryOutcome::Waiting(Duration::from_secs(3)).into()),
             late,
         );
         let view = flow.view(late);
@@ -1311,7 +1387,7 @@ mod tests {
         let tried = |outcome: TryOutcome| {
             let mut flow = choosing(UNKNOWN, &[(Family::Compx, None)], now);
             press(&mut flow, now);
-            flow.on(Event::Tried(outcome), now);
+            flow.on(Event::Tried(outcome.into()), now);
             flow
         };
         let flow = tried(TryOutcome::Reading(reading(52)));
@@ -1325,6 +1401,8 @@ mod tests {
         let form = view.form.unwrap();
         assert_eq!(form.name, "Gaming Mouse");
         assert_eq!(form.connections.len(), 2);
+        // A non-BITMOUSE custom device has no detected connection: the form preselects RECEIVER.
+        assert_eq!(form.connection, RECEIVER);
 
         // A refusal before the write says "not sent"; a failure after it never does.
         for (outcome, text, tried_line) in [
@@ -1365,7 +1443,7 @@ mod tests {
         assert!(flow.awaits_worker());
         flow.on(Event::Removed(UNKNOWN), now);
         assert!(!flow.awaits_worker());
-        flow.on(Event::Tried(TryOutcome::Reading(reading(52))), now);
+        flow.on(Event::Tried(TryOutcome::Reading(reading(52)).into()), now);
         assert!(flow.view(now).text.contains("was unplugged"));
     }
 
@@ -1374,7 +1452,7 @@ mod tests {
         let now = Instant::now();
         let mut flow = choosing(UNKNOWN, &[(Family::Compx, None)], now);
         press(&mut flow, now);
-        flow.on(Event::Tried(TryOutcome::Reading(reading(52))), now);
+        flow.on(Event::Tried(TryOutcome::Reading(reading(52)).into()), now);
         let input = Input {
             list: 0,
             kind: 2,
@@ -1407,7 +1485,7 @@ mod tests {
         let (row, family) = unverified();
         let mut flow = choosing(row, &[(family, None)], now);
         press(&mut flow, now);
-        flow.on(Event::Tried(TryOutcome::Reading(reading(80))), now);
+        flow.on(Event::Tried(TryOutcome::Reading(reading(80)).into()), now);
         assert_eq!(flow.view(now).form, None);
         assert_eq!(
             press(&mut flow, checked),
@@ -1422,13 +1500,12 @@ mod tests {
         assert!(text.contains("was not added"), "{text}");
         assert!(text.contains("config.toml is not valid TOML"), "{text}");
 
-        // BITMOUSE: receiver only, and a blank name takes the default.
+        // BITMOUSE keeps the picked connection, and a blank name takes the default.
         let blank = Input {
-            connection: 1,
+            connection: CABLE,
             name: " ".into(),
             ..Input::default()
         };
-        assert_eq!(connections(Family::AtkBitmouse).len(), 1);
         assert_eq!(
             add_request(OTHER, Family::AtkBitmouse, &blank, "373B:8888"),
             AddRequest::Custom(CustomEntry {
@@ -1436,7 +1513,7 @@ mod tests {
                 name: "373B:8888".into(),
                 family: "AtkBitmouse".into(),
                 kind: "mouse".into(),
-                connection: "receiver".into(),
+                connection: "cable".into(),
             })
         );
         // Every custom family it writes is one the config accepts.
@@ -1463,7 +1540,7 @@ mod tests {
         let now = Instant::now();
         let mut flow = choosing(UNKNOWN, &[(Family::Compx, None)], now);
         press(&mut flow, now);
-        flow.on(Event::Tried(TryOutcome::Reading(reading(52))), now);
+        flow.on(Event::Tried(TryOutcome::Reading(reading(52)).into()), now);
         // Only an unsupported device has a third button.
         assert_eq!(flow.view(now).extra, None);
         assert_eq!(flow.on(Event::Extra, now + ADD_GUARD), None);
@@ -1572,7 +1649,7 @@ mod tests {
             press(&mut flow, now),
             Some(Effect::TryAs(UNKNOWN, Family::Compx))
         );
-        flow.on(Event::Tried(TryOutcome::Reading(reading(52))), now);
+        flow.on(Event::Tried(TryOutcome::Reading(reading(52)).into()), now);
         // A double-click or held Enter on [Try] lands on [Add] at the same spot.
         assert_eq!(press(&mut flow, now), None);
         assert_eq!(press(&mut flow, now + ADD_GUARD / 2), None);
@@ -1588,53 +1665,186 @@ mod tests {
     }
 
     #[test]
-    fn off_catalogue_bitmouse_try_confirms_a_receiver() {
+    fn off_catalogue_bitmouse_gets_a_plain_try() {
         let now = Instant::now();
         let flow = choosing(UNKNOWN, &[(Family::AtkBitmouse, None)], now);
         let view = flow.view(now);
-        assert_eq!(view.primary.as_deref(), Some("It is a USB receiver — Try"));
-        assert!(
-            view.text.contains("Never try a mouse on its cable"),
-            "{}",
-            view.text
-        );
-        // The floor countdown keeps the confirmation.
+        assert_eq!(view.primary.as_deref(), Some("Try"));
+        assert!(!view.text.contains("receiver"), "{}", view.text);
         let mut flow = choosing(
             UNKNOWN,
             &[(Family::AtkBitmouse, Some(Duration::from_secs(3)))],
             now,
         );
-        assert_eq!(
-            flow.view(now).primary.as_deref(),
-            Some("It is a USB receiver — Try in 3 s")
-        );
+        assert_eq!(flow.view(now).primary.as_deref(), Some("Try in 3 s"));
         let late = now + Duration::from_secs(3);
         assert_eq!(
             press(&mut flow, late),
             Some(Effect::TryAs(UNKNOWN, Family::AtkBitmouse))
         );
-        // Any other family is plain Try.
-        let view = choosing(UNKNOWN, &[(Family::Compx, None)], now).view(now);
-        assert_eq!(view.primary.as_deref(), Some("Try"));
-        assert!(!view.text.contains("cable"), "{}", view.text);
+    }
+
+    #[test]
+    fn off_catalogue_bitmouse_detected_as_cable_is_saved_as_cable() {
+        let now = Instant::now();
+        let read_as = |connection| {
+            let mut flow = choosing(OTHER, &[(Family::AtkBitmouse, None)], now);
+            assert_eq!(
+                press(&mut flow, now),
+                Some(Effect::TryAs(OTHER, Family::AtkBitmouse))
+            );
+            let tried = Tried {
+                outcome: TryOutcome::Reading(reading(60)),
+                connection: Some(connection),
+                trace: Vec::new(),
+            };
+            flow.on(Event::Tried(tried), now);
+            flow
+        };
+        // Tried as a receiver, the type query said wired1K and the cable frame read the level.
+        let mut flow = read_as(Connection {
+            cable: true,
+            source: Source::Detected { name: "wired1K" },
+        });
+        let form = flow.view(now).form.expect("form");
+        assert_eq!(form.connections, ["Receiver (USB dongle)", "Cable"]);
+        assert_eq!(form.connection, CABLE);
+        // The window reads the preselected row back as the input.
+        let input = Input {
+            connection: form.connection,
+            ..Input::default()
+        };
+        let Some(Effect::Add(AddRequest::Custom(entry))) =
+            flow.on(Event::Primary(input), now + ADD_GUARD)
+        else {
+            panic!("a custom entry");
+        };
+        assert_eq!(entry.connection, "cable");
+        assert_eq!(entry.family, "AtkBitmouse");
+
+        // Read on the receiver frame: the receiver row stays the first pick.
+        let flow = read_as(Connection {
+            cable: false,
+            source: Source::Caller,
+        });
+        assert_eq!(flow.view(now).form.unwrap().connection, RECEIVER);
+    }
+
+    #[test]
+    fn bitmouse_cable_report_names_the_connection_and_the_trace() {
+        let now = Instant::now();
+        let tried = |outcome| Tried {
+            outcome,
+            connection: Some(Connection {
+                cable: true,
+                source: Source::Detected { name: "wired1K" },
+            }),
+            trace: vec![
+                "Target: HID if 1 FF05:0001 · path P".to_owned(),
+                "Device type: wired1K (cable)".to_owned(),
+                "Reply: none".to_owned(),
+            ],
+        };
+        // A catalogue cable mouse gets a plain [Try].
+        let mut flow = choosing(X1_SE_NK, &[(Family::AtkBitmouse, None)], now);
+        assert_eq!(flow.view(now).primary.as_deref(), Some("Try"));
+        assert_eq!(
+            press(&mut flow, now),
+            Some(Effect::TryAs(X1_SE_NK, Family::AtkBitmouse))
+        );
+        flow.on(Event::Tried(tried(TryOutcome::NoReply)), now);
+        let view = flow.view(now);
+        assert!(!view.text.contains("no mouse linked"), "{}", view.text);
+        let details = view.details.unwrap();
+        for line in [
+            "\nCatalogue: ATK X1 SE NK (cable), not verified\n",
+            "\nTried: ATK BITMOUSE (detected cable): no reply\n",
+            "\nDevice type: wired1K (cable)\n",
+            "\nReply: none\n",
+            "\nVendor apps: none\n",
+            "\nSame vendor plugged in: none\n",
+        ] {
+            assert!(details.contains(line), "{line:?} in {details}");
+        }
+        // The trace sits under `Tried:`; vendor-app and same-vendor lines precede the interfaces.
+        let at = |line: &str| details.find(line).expect(line);
+        assert!(at("Tried:") < at("Target:") && at("Reply:") < at("Result:"));
+        assert!(at("Result:") < at("Vendor apps:"));
+        assert!(at("Same vendor plugged in:") < at("Interfaces:"));
+
+        let mut flow = choosing(X1_SE_NK, &[(Family::AtkBitmouse, None)], now);
+        press(&mut flow, now);
+        flow.on(Event::Tried(tried(TryOutcome::Reading(reading(60)))), now);
+        assert!(flow.view(now).text.starts_with("Read 60 %."));
+        flow.on(Event::Alt, now + ADD_GUARD);
+        let details = flow.view(now).details.unwrap();
+        assert!(
+            details.contains("\nTried: ATK BITMOUSE (detected cable): read 60 %\n"),
+            "{details}"
+        );
+        assert!(
+            details.contains("\nTarget: HID if 1 FF05:0001"),
+            "{details}"
+        );
+    }
+
+    #[test]
+    fn bitmouse_receiver_silence_and_same_vendor_ids_are_reported() {
+        let now = Instant::now();
+        let mut flow = new_flow();
+        flow.on(Event::Handover(OTHER), now);
+        flow.on(
+            Event::Inspected(Inspection::Ready(Interfaces {
+                families: vec![(Family::AtkBitmouse, None)],
+                vendor_apps: vec!["ATK HUB.exe"],
+                siblings: vec![(0x373B, 0x1216), (0x373B, 0x2000)],
+                ..Interfaces::default()
+            })),
+            now,
+        );
+        assert_eq!(flow.view(now).primary.as_deref(), Some("Try"));
+        press(&mut flow, now);
+        let silent = Tried {
+            outcome: TryOutcome::NoReply,
+            connection: Some(Connection {
+                cable: false,
+                source: Source::Caller,
+            }),
+            trace: Vec::new(),
+        };
+        flow.on(Event::Tried(silent), now);
+        let view = flow.view(now);
+        assert!(
+            view.text.contains("may have no mouse linked"),
+            "{}",
+            view.text
+        );
+        let details = view.details.unwrap();
+        for line in [
+            "\nCatalogue: not listed\n",
+            "\nTried: ATK BITMOUSE (assumed receiver): no reply\n",
+            "\nVendor apps: ATK HUB open\n",
+            "\nSame vendor plugged in: 373B:1216 ATK X1 SE (receiver), 373B:2000 not listed\n",
+        ] {
+            assert!(details.contains(line), "{line:?} in {details}");
+        }
+        // A catalogue source is labelled `catalogue`; other families carry no connection.
+        let catalogue = Some(Connection {
+            cable: false,
+            source: Source::Catalogue,
+        });
+        assert_eq!(
+            tried_label(Family::AtkBitmouse, catalogue),
+            "ATK BITMOUSE (catalogue receiver)"
+        );
+        assert_eq!(tried_label(Family::Compx, None), "Compx report 8");
     }
 
     #[test]
     fn blocked_catalogue_rows_say_why() {
-        let now = Instant::now();
-        let cable = protocol::KNOWN
-            .iter()
-            .find(|device| {
-                device.family == Family::AtkBitmouse
-                    && device.cable
-                    && !device.verified
-                    && !is_recovery(device.vid, device.pid)
-            })
-            .expect("an unverified BITMOUSE cable row");
-        let id = (cable.vid, cable.pid);
-        let view = choosing(id, &[(Family::AtkBitmouse, None)], now).view(now);
-        assert!(view.text.contains(BITMOUSE_CABLE), "{}", view.text);
         assert_eq!(no_choice_reason(UNKNOWN), NO_FAMILY);
+        // A catalogue BITMOUSE cable mouse that offers nothing gets the plain no-family reason.
+        assert_eq!(no_choice_reason(X1_SE_NK), NO_FAMILY);
         // No catalogue row needs a capture today; any that does gets its own reason.
         for device in protocol::KNOWN.iter().filter(|device| device.needs_capture) {
             assert_eq!(no_choice_reason((device.vid, device.pid)), NEEDS_CAPTURE);
@@ -1654,7 +1864,7 @@ mod tests {
         press(&mut flow, now);
         assert_eq!(flow.on(Event::Handover(OTHER), now), None);
         assert!(flow.awaits_worker());
-        flow.on(Event::Tried(TryOutcome::NoReply), now);
+        flow.on(Event::Tried(TryOutcome::NoReply.into()), now);
         assert_eq!(
             flow.on(Event::Handover(OTHER), now),
             Some(Effect::Inspect(OTHER))

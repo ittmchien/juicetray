@@ -22,6 +22,33 @@ pub use self::macos::{offer, offer_move_to_applications};
 #[cfg(windows)]
 pub use self::windows::{shell_open, spawn_cleanup, spawn_offer};
 
+/// The step an "Update now" install is on, carrying the version it installs; the menu shows it
+/// as a disabled top line. Steps only: neither brew nor the download reports a percentage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateStage {
+    /// `brew upgrade` is running.
+    #[cfg(target_os = "macos")]
+    Homebrew(String),
+    /// The release's exe and checksum list are downloading.
+    #[cfg(windows)]
+    Downloading(String),
+    /// The new copy replaces the running one; the app then exits and restarts at once.
+    Installing(String),
+}
+
+impl UpdateStage {
+    /// The menu line for this step.
+    pub fn text(&self) -> String {
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::Homebrew(version) => format!("Updating to v{version} via Homebrew…"),
+            #[cfg(windows)]
+            Self::Downloading(version) => format!("Downloading v{version}…"),
+            Self::Installing(version) => format!("Installing v{version}…"),
+        }
+    }
+}
+
 /// Where releases are listed; also the fallback download page.
 pub const RELEASES_URL: &str = "https://github.com/ittmchien/juicetray/releases";
 

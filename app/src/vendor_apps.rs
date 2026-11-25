@@ -17,7 +17,12 @@ pub fn paused_by(vid: u16, running: &[&str]) -> Option<&'static str> {
     VENDOR_APPS
         .iter()
         .find(|&&(id, exe)| id == vid && running.contains(&exe))
-        .map(|&(_, exe)| exe.trim_end_matches(".exe"))
+        .map(|&(_, exe)| shown_name(exe))
+}
+
+/// A vendor app's name as shown to the owner: its exe name without `.exe`.
+pub fn shown_name(exe: &str) -> &str {
+    exe.trim_end_matches(".exe")
 }
 
 /// The vendor apps of `vids` that are running now; the process list is read only when one of

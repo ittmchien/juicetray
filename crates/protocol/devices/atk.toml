@@ -211,7 +211,8 @@ devices = [
   { vid = "373B", pid = "128F", name = "ATK A9 Ultra Max 2.0 +", family = "AtkBitmouse", kind = "mouse", connection = "cable", verified = false },
   { vid = "373B", pid = "1290", name = "Wireless mouse 8k dongle-M1", family = "AtkBitmouse", kind = "mouse", connection = "receiver", verified = false },
   { vid = "373B", pid = "1291", name = "Wireless mouse 8k NANO dongle-M1", family = "AtkBitmouse", kind = "mouse", connection = "receiver", verified = false },
-  { vid = "373B", pid = "1299", name = "ATK X1 SE Nearlink", family = "AtkBitmouse", kind = "mouse", connection = "receiver", verified = false },
+  # 1299 and 130E have no HUB receiver flag: HUB queries them as the mouse on its cable.
+  { vid = "373B", pid = "1299", name = "ATK X1 SE Nearlink", family = "AtkBitmouse", kind = "mouse", connection = "cable", verified = true },
   { vid = "373B", pid = "129A", name = "VXE R1 PRO MAX 2.0 NK", family = "AtkBitmouse", kind = "mouse", connection = "cable", verified = false },
   { vid = "373B", pid = "129E", name = "ATK ZERO +", family = "AtkBitmouse", kind = "mouse", connection = "cable", verified = false },
   { vid = "373B", pid = "12A3", name = "Mouse", family = "AtkBitmouse", kind = "mouse", connection = "cable", verified = false },
@@ -243,7 +244,7 @@ devices = [
   { vid = "373B", pid = "1307", name = "ATK F1 V3 ULTRA MAX", family = "AtkBitmouse", kind = "mouse", connection = "cable", verified = false },
   { vid = "373B", pid = "1308", name = "ATK F1 V3 ULTIMATE+", family = "AtkBitmouse", kind = "mouse", connection = "cable", verified = false },
   { vid = "373B", pid = "130B", name = "Mouse", family = "AtkBitmouse", kind = "mouse", connection = "cable", verified = false },
-  { vid = "373B", pid = "130E", name = "ATK X1 SE NK", family = "AtkBitmouse", kind = "mouse", connection = "receiver", verified = false },
+  { vid = "373B", pid = "130E", name = "ATK X1 SE NK", family = "AtkBitmouse", kind = "mouse", connection = "cable", verified = false },
   { vid = "373B", pid = "130F", name = "ATK A9 SE 3.0 NK", family = "AtkBitmouse", kind = "mouse", connection = "cable", verified = false },
   { vid = "373B", pid = "1310", name = "VXE R1 S NK", family = "AtkBitmouse", kind = "mouse", connection = "cable", verified = false },
   { vid = "373B", pid = "1311", name = "VXE R1 NK", family = "AtkBitmouse", kind = "mouse", connection = "cable", verified = false },
