@@ -1,7 +1,7 @@
 //! `juicetray.log`: one `<unix ms> <thread> <event>` line per call, written unbuffered so the
 //! last line survives a stuck thread. `line` always writes (panics, errors, hang dumps);
-//! `trace` and `span` write only in debug builds or with `JUICETRAY_TRACE=1`, so a release
-//! build writes nothing during normal operation.
+//! `trace` and `span` write in dev and beta builds; an official release (built with
+//! `JUICETRAY_CHANNEL=stable`) writes them only with `JUICETRAY_TRACE=1`.
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -46,9 +46,14 @@ static TRACE: OnceLock<bool> = OnceLock::new();
 /// `JUICETRAY_TRACE=1`; read once.
 fn tracing() -> bool {
     *TRACE.get_or_init(|| {
-        cfg!(debug_assertions)
-            || std::env::var_os("JUICETRAY_TRACE").is_some_and(|value| value == "1")
+        !is_stable_build() || std::env::var_os("JUICETRAY_TRACE").is_some_and(|value| value == "1")
     })
+}
+
+/// Only official releases (CI sets `JUICETRAY_CHANNEL=stable`) trace off by default; dev and
+/// beta builds keep the trace so testers can send a log.
+fn is_stable_build() -> bool {
+    !cfg!(debug_assertions) && option_env!("JUICETRAY_CHANNEL") == Some("stable")
 }
 
 /// `juicetray.log` next to `query-log.toml`.

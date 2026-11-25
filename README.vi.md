@@ -6,12 +6,12 @@
 
 **Đừng để chuột, tai nghe cạn pin giữa trận.** 🧃
 
-Juicetray hiện mức pin chuột, tai nghe, bàn phím không dây ngay cạnh đồng hồ trên taskbar — không
-cần cài phần mềm của từng hãng.
+Juicetray hiện mức pin chuột, tai nghe, bàn phím không dây trên khay hệ thống / thanh menu — ngay
+cạnh đồng hồ, không cần cài phần mềm của từng hãng.
 
 [![Release](https://img.shields.io/github/v/release/ittmchien/juicetray?include_prereleases&label=release)](https://github.com/ittmchien/juicetray/releases)
 [![CI](https://github.com/ittmchien/juicetray/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/ittmchien/juicetray/actions/workflows/ci.yml)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6?logo=windows)](#-nền-tảng)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20%7C%20macOS%2013%2B-0078D6?logo=windows)](#-nền-tảng)
 [![Made with Rust](https://img.shields.io/badge/made%20with-Rust-B7410E?logo=rust)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
 
@@ -21,28 +21,33 @@ cần cài phần mềm của từng hãng.
 
 > [!NOTE]
 > **Bản beta.** Thiết bị Bluetooth và các receiver đã xác minh bên dưới chạy được trên Windows.
-> Trên macOS, thiết bị Bluetooth đã chạy (cài bằng Homebrew); receiver chưa được thử ở đó.
+> **macOS hiện chỉ hỗ trợ thiết bị Bluetooth** (cài bằng Homebrew); receiver và cáp chỉ có trên
+> Windows.
 
 ## ✨ Tính năng
 
-- 🔋 **Pin ngay trên taskbar** — mỗi thiết bị một icon nhỏ kèm thanh pin và %, hiện trên
-  taskbar của mọi màn hình; rê chuột để xem tóm tắt, chuột phải để mở menu.
+- 🔋 **Pin ngay trên taskbar / thanh menu** — (Windows) mỗi thiết bị một icon nhỏ kèm thanh pin
+  và %, hiện trên taskbar của mọi màn hình; rê chuột để xem tóm tắt, chuột phải để mở menu. Trên
+  macOS, một mục trên thanh menu vẽ tất cả thiết bị; bấm vào để mở menu.
 - 🎨 **Màu theo trạng thái** — thanh pin xanh lá khi đang sạc, vàng khi dưới 50 %, đỏ khi tới
   ngưỡng pin yếu bạn đặt; thiết bị pin yếu còn hiện chữ *needs charge* trong menu.
-- 🖱️ **Receiver 2.4 GHz và cáp** — đọc thẳng từ receiver; không cần chạy app của hãng.
-- 📶 **Mọi thiết bị Bluetooth** — tai nghe, chuột, bàn phím, tay cầm… miễn Windows đã biết mức pin.
+- 🖱️ **Receiver 2.4 GHz và cáp** (Windows) — đọc thẳng từ receiver; không cần chạy app của hãng.
+- 📶 **Mọi thiết bị Bluetooth** — tai nghe, chuột, bàn phím, tay cầm… miễn Windows hoặc macOS báo
+  được mức pin.
 - 🗂️ **Nhóm và sắp xếp** — chia nhóm theo loại, pin cao đứng trước, thiết bị offline xuống cuối và
   ghi *disconnected*; tự ẩn thiết bị offline sau khoảng thời gian bạn chọn.
 - 🔔 **Cảnh báo pin yếu** — thông báo khi chạm ngưỡng bạn chọn (5–30 % hoặc tự nhập).
-- 🛠️ **Tuỳ chỉnh từng thiết bị** — hiện/ẩn, phần trăm, nhãn, icon, màu icon cho taskbar sáng và tối.
-  Trên macOS, AirPods và tai Beats hiện đúng biểu tượng của Apple.
-- 🪶 **Siêu nhẹ** — khoảng 10 MB RAM, ~0,05 % CPU lúc rảnh, file exe portable 2 MB; tự dừng
-  auto-refresh khi laptop chạy pin, trừ khi bạn bật lại.
-- 🔄 **Cập nhật một chạm** — kiểm tra GitHub Releases mỗi ngày; **Update now** kiểm SHA-256 của
-  file tải về rồi mới thay exe.
+- 🛠️ **Tuỳ chỉnh từng thiết bị** — hiện/ẩn, phần trăm, nhãn, icon, màu icon cho taskbar / thanh
+  menu sáng và tối. Trên macOS, AirPods và tai Beats hiện đúng biểu tượng của Apple.
+- 🪶 **Siêu nhẹ** — khoảng 10 MB RAM, ~0,05 % CPU lúc rảnh, file exe portable 2 MB trên Windows;
+  tự dừng auto-refresh khi laptop chạy pin, trừ khi bạn bật **Refresh on battery power**.
+- 🔄 **Cập nhật một chạm** (Windows) — kiểm tra GitHub Releases mỗi ngày; **Update now** kiểm
+  SHA-256 của file tải về rồi mới thay exe. Trên macOS: `brew upgrade`.
 - 🛡️ **Chỉ đọc, nhẹ nhàng** — không bao giờ đổi cài đặt thiết bị; xem phần An toàn bên dưới.
 
 ## ⬇️ Cài đặt
+
+### 🪟 Windows
 
 1. Tải `juicetray-windows-x86_64.exe` từ
    [bản phát hành mới nhất](https://github.com/ittmchien/juicetray/releases/latest).
@@ -53,29 +58,37 @@ cần cài phần mềm của từng hãng.
 Cài đặt lưu ở `%APPDATA%\ittmchien\juicetray\config\config.toml`, nên thay file exe không mất
 cài đặt. Windows SmartScreen có thể cảnh báo app chưa ký số: bấm **More info → Run anyway**.
 
-### 🍎 macOS (beta, Homebrew)
+### <img src="https://cdn.simpleicons.org/apple/8b949e" height="16" alt=""> macOS (beta, Homebrew)
 
-Homebrew build app từ mã nguồn ngay trên máy Mac (mất vài phút; Rust được cài để build), nên
+Homebrew cài app universal dựng sẵn từ bản phát hành trên GitHub: tải khoảng 3 MB, không cần bộ
+công cụ Rust, xong trong vài giây. Homebrew tải bằng curl và không gắn cờ quarantine, nên
 Gatekeeper không chặn:
 
 ```sh
 brew tap ittmchien/tap
-brew trust ittmchien/tap   # Homebrew chỉ nạp formula từ tap khác sau khi được tin cậy
+brew trust ittmchien/tap   # cần trên Homebrew 7+
 brew install juicetray
 cp -R "$(brew --prefix)/opt/juicetray/Juicetray.app" /Applications/
 ```
 
-Mở **Juicetray** từ Applications và cho phép Bluetooth khi được hỏi. Cập nhật:
-`brew upgrade juicetray`, thoát Juicetray rồi chạy lại dòng `cp` (sau
-`rm -rf /Applications/Juicetray.app`).
+Mở **Juicetray** từ Applications và cho phép Bluetooth khi được hỏi. **Settings → Start at login**
+cũng dùng được (macOS có thể yêu cầu bạn duyệt trong System Settings › General › Login Items).
+Cài đặt lưu ở `~/Library/Application Support/io.github.ittmchien.juicetray/config.toml`.
+
+Cập nhật: thoát Juicetray rồi chạy:
+
+```sh
+brew upgrade juicetray
+rm -rf /Applications/Juicetray.app && cp -R "$(brew --prefix)/opt/juicetray/Juicetray.app" /Applications/
+```
 
 ## 🎧 Thiết bị hỗ trợ
 
-**📶 Bluetooth — mọi thiết bị.** Bất kỳ thiết bị Bluetooth đang kết nối nào mà Windows đã đọc
-được mức pin, hãng nào cũng được. Juicetray chỉ đọc giá trị Windows đã lưu, không gửi gì tới
-thiết bị.
+**📶 Bluetooth — mọi thiết bị.** Bất kỳ thiết bị Bluetooth đang kết nối nào mà Windows hoặc macOS
+báo được mức pin, hãng nào cũng được. Juicetray chỉ đọc giá trị hệ điều hành báo, không gửi gì
+tới thiết bị.
 
-**🔌 Receiver 2.4 GHz / cáp USB** — đọc thẳng từ receiver.
+**🔌 Receiver 2.4 GHz / cáp USB** (chỉ Windows) — đọc thẳng từ receiver.
 
 ### ✅ Đã kiểm trên thiết bị thật
 
@@ -96,16 +109,15 @@ thiết bị.
 
 ### ➕ Thiết bị khác
 
-Nhiều chuột ATK, VXE và VGN dùng chung giao thức. Khi một model chưa được xác minh, Juicetray
-không bao giờ tự hỏi pin nó. Muốn thử, dùng **Add device…** trong menu (Windows),
-hoặc bấm **OK** trên popup "New device found" (hiện khi bạn cắm một hãng được hỗ trợ hoặc
-receiver không dây bất kỳ lúc Juicetray đang chạy, không bao giờ hiện lúc khởi động, và chỉ
-một lần cho mỗi thiết bị dù bạn trả lời gì): app nhận ra thiết bị, gửi một
-lệnh hỏi pin chỉ-đọc khi bạn bấm **Try**, và thêm thiết bị khi bạn xác nhận mức pin đúng. Nếu
-không được, bấm **Send report** để gửi thông tin qua
-[Google Form](https://forms.gle/Qp5CeBGEiPg2UtkX6) (không cần tài khoản), hoặc **Report on
-GitHub** để [mở issue](https://github.com/ittmchien/juicetray/issues) với thông tin điền sẵn. Chỉ
-gửi tên thiết bị, USB ID và danh sách interface — không có thông tin cá nhân.
+**Chỉ Windows.** Nhiều chuột ATK, VXE và VGN dùng chung giao thức. Khi một model chưa được xác
+minh, Juicetray không bao giờ tự hỏi pin nó. Muốn thử, dùng **Add device…** trong menu, hoặc bấm
+**OK** trên popup "New device found" (hiện khi bạn cắm một hãng được hỗ trợ hoặc receiver không
+dây bất kỳ lúc Juicetray đang chạy, không bao giờ hiện lúc khởi động, và chỉ một lần cho mỗi
+thiết bị dù bạn trả lời gì): app nhận ra thiết bị, gửi một lệnh hỏi pin chỉ-đọc khi bạn bấm
+**Try**, và thêm thiết bị khi bạn xác nhận mức pin đúng. Nếu không được, bấm **Send report** để
+gửi thông tin qua [Google Form](https://forms.gle/Qp5CeBGEiPg2UtkX6) (không cần tài khoản),
+hoặc **Report on GitHub** để [mở issue](https://github.com/ittmchien/juicetray/issues) với thông
+tin điền sẵn. Chỉ gửi tên thiết bị, USB ID và danh sách interface — không có thông tin cá nhân.
 
 📋 **[Danh sách thiết bị](https://docs.google.com/spreadsheets/d/e/2PACX-1vRTKUOHRmpLeXhjxL93T5HwuYsJKnzMHSUhN2AWslNCB938EpQH2YkMeNubTcpvdxpHC2o7Dw4OHfS7/pubhtml)**
 — mọi model Juicetray biết (**Supported**) và các thiết bị người dùng đã yêu cầu kèm trạng thái
@@ -122,26 +134,26 @@ allow = ["391D:1A05"]
 | Nền tảng | Trạng thái |
 |---|---|
 | 🪟 Windows 10 / 11 (x86_64) | ✅ Đã phát hành |
-| 🍎 macOS 13+ (Apple silicon và Intel) | 🧪 Beta qua Homebrew (đã thử Bluetooth) |
+| <img src="https://cdn.simpleicons.org/apple/8b949e" height="16" alt=""> macOS 13+ (Apple silicon và Intel) | 🧪 Beta qua Homebrew — chỉ Bluetooth, chưa có receiver/cáp |
 
 ## 🔄 Cập nhật
 
-Juicetray kiểm tra [GitHub Releases](https://github.com/ittmchien/juicetray/releases) mỗi ngày
-tối đa một lần (mở lại app cũng không kiểm thêm). Tắt bằng mục **Check for updates automatically** trong
-**Settings**, hoặc kiểm tay bằng **Check for updates…**. Yêu cầu chỉ gửi số phiên bản trong User-Agent
-(`juicetray/<version>`).
+Trên Windows, Juicetray kiểm tra [GitHub Releases](https://github.com/ittmchien/juicetray/releases)
+mỗi ngày tối đa một lần (mở lại app cũng không kiểm thêm). Tắt bằng mục **Check for updates
+automatically** trong **Settings**, hoặc kiểm tay bằng **Check for updates…**. Yêu cầu chỉ gửi số
+phiên bản trong User-Agent (`juicetray/<version>`).
 
-**Update now** tải exe mới, kiểm SHA-256 với `SHA256SUMS.txt` của bản phát hành, thay file rồi
-khởi động lại; lỗi ở bất kỳ bước nào thì exe cũ được giữ nguyên. Nếu thư mục chứa exe không ghi
-được thì app mở trang tải về thay vào đó.
+Trên Windows, **Update now** tải exe mới, kiểm SHA-256 với `SHA256SUMS.txt` của bản phát hành,
+thay file rồi khởi động lại; lỗi ở bất kỳ bước nào thì exe cũ được giữ nguyên. Nếu thư mục chứa
+exe không ghi được thì app mở trang tải về thay vào đó.
 
 Trên macOS app không tự kiểm tra: **Check for updates…** mở trang phát hành, còn bản cài bằng
 Homebrew thì cập nhật bằng `brew upgrade juicetray` (xem phần Cài đặt).
 
 ## ⚠️ Lỗi đã biết
 
-- **"Windows protected your PC"** — exe chưa được ký số: bấm **More info → Run anyway**. Cài bằng
-  winget (gói đang chờ duyệt) sẽ không bị cảnh báo này.
+- **"Windows protected your PC"** — exe chưa được ký số (xem phần Cài đặt). Cài bằng winget (gói
+  đang chờ duyệt) sẽ không bị cảnh báo này.
 - Một số receiver chỉ trả lời khi thiết bị đang thức (VGN Dragonfly 3 Master+), và một số bàn phím
   không báo mức pin khi cắm cáp (AULA F75).
 
@@ -150,7 +162,8 @@ Homebrew thì cập nhật bằng `brew upgrade juicetray` (xem phần Cài đ�
 - Chỉ gửi lệnh hỏi pin và hỏi trạng thái kết nối dạng chỉ-đọc, mỗi lần một lệnh, không lặp lại
   khi lỗi.
 - Không bao giờ đổi cài đặt của thiết bị.
-- Mức pin Bluetooth lấy từ dữ liệu Windows đã lưu, nên không có lệnh nào tới các thiết bị đó.
+- Mức pin Bluetooth lấy từ giá trị Windows hoặc macOS báo, nên không có lệnh nào tới các thiết
+  bị đó.
 - Thiết bị qua receiver hoặc cáp được hỏi tối đa 10 giây một lần (chuột) hoặc 5 phút một lần
   (tai nghe), bất kể cài đặt auto-refresh.
 - Khi app của một hãng đang mở (MCHOSE HUB, ATK HUB, VGN VHUB), Juicetray tạm dừng receiver và
@@ -162,13 +175,18 @@ Homebrew thì cập nhật bằng `brew upgrade juicetray` (xem phần Cài đ�
 | Lệnh | Tác dụng |
 |---|---|
 | `juicetray scan` | Liệt kê thiết bị Bluetooth, HID và cổng serial; không ghi gì; che số serial. |
-| `juicetray probe <VID:PID>` | Gửi một lệnh hỏi pin chỉ-đọc tới thiết bị được hỗ trợ và in phản hồi thô. Đóng app của hãng trước; từ chối nếu chưa hết khoảng chờ của thiết bị. Không bắt buộc: mục **Add device…** trong menu thử thiết bị mà không cần lệnh này. |
-| `juicetray probe --online <VID:PID>` | Gửi lệnh hỏi trạng thái kết nối chỉ-đọc (Compx và ATK N9 Ultra, cùng khoảng chờ) và in `online: yes/no/unsupported`. |
-| `juicetray listen <VID:PID> [seconds]` | Chỉ đọc (1–60 giây, mặc định 10) và in từng report kèm thời điểm tính bằng ms; không gửi gì. |
+| `juicetray probe <VID:PID>` | Gửi một lệnh hỏi pin chỉ-đọc tới thiết bị được hỗ trợ và in phản hồi thô. Đóng app của hãng trước; từ chối nếu chưa hết khoảng chờ của thiết bị. Không bắt buộc: mục **Add device…** trong menu thử thiết bị mà không cần lệnh này. Công cụ cho receiver (Windows). |
+| `juicetray probe --online <VID:PID>` | Gửi lệnh hỏi trạng thái kết nối chỉ-đọc (Compx và ATK N9 Ultra, cùng khoảng chờ) và in `online: yes/no/unsupported`. Công cụ cho receiver (Windows). |
+| `juicetray listen <VID:PID> [seconds]` | Chỉ đọc (1–60 giây, mặc định 10) và in từng report kèm thời điểm tính bằng ms; không gửi gì. Công cụ cho receiver (Windows). |
 
-`juicetray.log` nằm cạnh `query-log.toml` trong `%LOCALAPPDATA%\ittmchien\juicetray\data`. Bản
-release chỉ ghi khi có sự cố (panic, treo, lỗi); đặt `JUICETRAY_TRACE=1` để ghi từng bước (bản
-debug luôn ghi).
+Trên macOS không có `juicetray` trong PATH: chạy
+`/Applications/Juicetray.app/Contents/MacOS/juicetray scan` (hoặc `… licenses`).
+
+`juicetray.log` nằm cạnh `query-log.toml` trong `%LOCALAPPDATA%\ittmchien\juicetray\data`
+(macOS: `~/Library/Application Support/io.github.ittmchien.juicetray/`). Bản dev và beta ghi từng
+bước; bản phát hành chính thức chỉ ghi khi có sự cố (panic, hang dump
+trên Windows, lỗi), trừ khi chạy với
+`JUICETRAY_TRACE=1`.
 
 ## 🤝 Đóng góp
 
@@ -236,11 +254,7 @@ của hãng chỉ gửi để đọc trạng thái, không bao giờ là lệnh 
 
 ## 🙏 Ghi công
 
-Ghi chú giao thức từ M-HUB-linux-port (MCHOSE V9 Pro 2), danh mục thiết bị OpenMouse (ATK),
-driver Linux `hid-kysona`, [Joule](https://github.com/DillanCidral/Joule) và
-[sanshoku](https://github.com/ushineko/sanshoku). Chỉ dùng thông tin giao thức; không chép code.
-
 Icon thiết bị: [Material Symbols](https://github.com/google/material-design-icons) của Google
-([Apache-2.0](crates/strip-render/assets/icons/LICENSE)). Chữ số trên macOS (font dự phòng;
-Windows dùng font hệ thống): [Inter](https://rsms.me/inter/)
+([Apache-2.0](crates/strip-render/assets/icons/LICENSE)). Font dự phòng cho chữ số khi không
+dùng được font hệ thống: [Inter](https://rsms.me/inter/)
 ([OFL-1.1](crates/strip-render/assets/OFL.txt)).

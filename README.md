@@ -11,7 +11,7 @@ tray — right next to the clock, without each vendor's software.
 
 [![Release](https://img.shields.io/github/v/release/ittmchien/juicetray?include_prereleases&label=release)](https://github.com/ittmchien/juicetray/releases)
 [![CI](https://github.com/ittmchien/juicetray/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/ittmchien/juicetray/actions/workflows/ci.yml)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6?logo=windows)](#-platforms)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20%7C%20macOS%2013%2B-0078D6?logo=windows)](#-platforms)
 [![Made with Rust](https://img.shields.io/badge/made%20with-Rust-B7410E?logo=rust)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
 
@@ -20,30 +20,34 @@ tray — right next to the clock, without each vendor's software.
 </div>
 
 > [!NOTE]
-> **Beta.** Bluetooth devices and the verified receivers below work on Windows. On macOS,
-> Bluetooth devices work (install with Homebrew); receivers are not tested there yet.
+> **Beta.** Bluetooth devices and the verified receivers below work on Windows. **macOS supports
+> Bluetooth devices only** for now (install with Homebrew); receivers and cables are Windows-only.
 
 ## ✨ Features
 
-- 🔋 **Battery on the taskbar** — one small icon per device with a gauge and its level, on every
-  monitor's taskbar; hover for a summary, right-click for the menu.
+- 🔋 **Battery on the taskbar / menu bar** — (Windows) one small icon per device with a gauge and
+  its level, on every monitor's taskbar; hover for a summary, right-click for the menu. On macOS,
+  one menu-bar item draws all devices; click it to open the menu.
 - 🎨 **Status colours** — the gauge turns green while charging, yellow below 50 % and red at your
   low-battery threshold; low devices also say *needs charge* in the menu.
-- 🖱️ **2.4 GHz receivers and cables** — read straight from the receiver; no vendor app has to run.
-- 📶 **Every Bluetooth device** — headsets, mice, keyboards, controllers… whatever Windows already
-  knows the battery of.
+- 🖱️ **2.4 GHz receivers and cables** (Windows) — read straight from the receiver; no vendor app
+  has to run.
+- 📶 **Every Bluetooth device** — headsets, mice, keyboards, controllers… whatever Windows or macOS
+  reports the battery of.
 - 🗂️ **Grouped and sorted** — devices grouped by kind, highest level first, offline ones last and
   marked *disconnected*; hide offline devices after a delay you choose.
 - 🔔 **Low-battery alert** — a notification at the threshold you pick (5–30 % or custom).
 - 🛠️ **Per-device options** — show or hide, percentage, label, icon, and icon colours for a light
-  and a dark taskbar. On macOS, AirPods and Beats earbuds show Apple's own symbol.
-- 🪶 **Featherweight** — about 10 MB of RAM, ~0.05 % CPU at idle, a 2 MB portable exe; it
-  pauses auto-refresh on laptop battery unless you ask otherwise.
-- 🔄 **Updates in one click** — checks GitHub Releases once a day; **Update now** verifies the
-  download's SHA-256 before swapping the exe.
+  and a dark taskbar / menu bar. On macOS, AirPods and Beats earbuds show Apple's own symbol.
+- 🪶 **Featherweight** — about 10 MB of RAM, ~0.05 % CPU at idle, a 2 MB portable exe on Windows;
+  it pauses auto-refresh on laptop battery unless you turn on **Refresh on battery power**.
+- 🔄 **Updates in one click** (Windows) — checks GitHub Releases once a day; **Update now**
+  verifies the download's SHA-256 before swapping the exe. On macOS: `brew upgrade`.
 - 🛡️ **Read-only and gentle** — never changes a device setting; see Safety below.
 
 ## ⬇️ Install
+
+### 🪟 Windows
 
 1. Download `juicetray-windows-x86_64.exe` from the
    [latest release](https://github.com/ittmchien/juicetray/releases/latest).
@@ -54,28 +58,37 @@ tray — right next to the clock, without each vendor's software.
 Settings live in `%APPDATA%\ittmchien\juicetray\config\config.toml`, so replacing the exe keeps
 them. Windows SmartScreen may warn about an unsigned app: **More info → Run anyway**.
 
-### 🍎 macOS (beta, Homebrew)
+### <img src="https://cdn.simpleicons.org/apple/8b949e" height="16" alt=""> macOS (beta, Homebrew)
 
-Homebrew builds the app from source on your Mac (a few minutes; Rust is installed for the
-build), so Gatekeeper does not block it:
+Homebrew installs the prebuilt universal app from the GitHub release: about a 3 MB download, no
+Rust toolchain, done in a few seconds. Homebrew downloads it with curl and adds no quarantine
+flag, so Gatekeeper does not block it:
 
 ```sh
 brew tap ittmchien/tap
-brew trust ittmchien/tap   # Homebrew loads formulae from other taps only once trusted
+brew trust ittmchien/tap   # needed on Homebrew 7+
 brew install juicetray
 cp -R "$(brew --prefix)/opt/juicetray/Juicetray.app" /Applications/
 ```
 
-Open **Juicetray** from Applications and allow Bluetooth when asked. To update:
-`brew upgrade juicetray`, then quit Juicetray and repeat the `cp` line (after
-`rm -rf /Applications/Juicetray.app`).
+Open **Juicetray** from Applications and allow Bluetooth when asked. **Settings → Start at login**
+works too (macOS may ask you to approve it in System Settings › General › Login Items). Settings
+live in `~/Library/Application Support/io.github.ittmchien.juicetray/config.toml`.
+
+To update, quit Juicetray, then:
+
+```sh
+brew upgrade juicetray
+rm -rf /Applications/Juicetray.app && cp -R "$(brew --prefix)/opt/juicetray/Juicetray.app" /Applications/
+```
 
 ## 🎧 Supported devices
 
-**📶 Bluetooth — all devices.** Any connected Bluetooth device whose battery level Windows already
-reads, any brand. Juicetray only reads the value Windows stores; it sends nothing to the device.
+**📶 Bluetooth — all devices.** Any connected Bluetooth device whose battery level Windows or
+macOS reports, any brand. Juicetray only reads the value the OS reports; it sends nothing to the
+device.
 
-**🔌 2.4 GHz receiver / USB cable** — read straight from the receiver.
+**🔌 2.4 GHz receiver / USB cable** (Windows only) — read straight from the receiver.
 
 ### ✅ Verified on real hardware
 
@@ -96,13 +109,12 @@ Battery read correctly on the owner's devices; these are read automatically.
 
 ### ➕ Other devices
 
-Many ATK, VXE and VGN mice use the same protocols. Until a model is verified, Juicetray never
-queries it on its own. To try one, use **Add device…** in the menu (Windows), or
-**OK** on the "New device found" popup (shown when you plug in a supported brand or any
-wireless receiver while Juicetray runs, never at start-up, and only once per device whatever
-you answer): it detects the device, sends one read-only battery query when you press **Try**,
-and adds it once you confirm the level. If it does
-not work, press **Send report** to send the details through a
+**Windows only.** Many ATK, VXE and VGN mice use the same protocols. Until a model is verified,
+Juicetray never queries it on its own. To try one, use **Add device…** in the menu, or **OK** on
+the "New device found" popup (shown when you plug in a supported brand or any wireless receiver
+while Juicetray runs, never at start-up, and only once per device whatever you answer): it
+detects the device, sends one read-only battery query when you press **Try**, and adds it once
+you confirm the level. If it does not work, press **Send report** to send the details through a
 [Google Form](https://forms.gle/Qp5CeBGEiPg2UtkX6) (no account needed), or **Report on GitHub**
 to [open an issue](https://github.com/ittmchien/juicetray/issues) with them filled in. Only the
 device's name, USB ID and interfaces are sent — nothing personal.
@@ -122,16 +134,16 @@ allow = ["391D:1A05"]
 | Platform | Status |
 |---|---|
 | 🪟 Windows 10 / 11 (x86_64) | ✅ Released |
-| 🍎 macOS 13+ (Apple silicon and Intel) | 🧪 Beta via Homebrew (Bluetooth tested) |
+| <img src="https://cdn.simpleicons.org/apple/8b949e" height="16" alt=""> macOS 13+ (Apple silicon and Intel) | 🧪 Beta via Homebrew — Bluetooth only, no receivers/cables yet |
 
 ## 🔄 Updates
 
-Juicetray checks [GitHub Releases](https://github.com/ittmchien/juicetray/releases) for a newer
-version at most once a day (restarting the app does not check again). Turn it off with **Check for updates
-automatically** under **Settings**, or check by hand with **Check for updates…**. The request sends
-nothing but the version in the User-Agent (`juicetray/<version>`).
+On Windows, Juicetray checks [GitHub Releases](https://github.com/ittmchien/juicetray/releases)
+for a newer version at most once a day (restarting the app does not check again). Turn it off
+with **Check for updates automatically** under **Settings**, or check by hand with **Check for
+updates…**. The request sends nothing but the version in the User-Agent (`juicetray/<version>`).
 
-**Update now** downloads the new exe, checks its SHA-256 against the release's
+On Windows, **Update now** downloads the new exe, checks its SHA-256 against the release's
 `SHA256SUMS.txt`, swaps it in and restarts; if anything fails, the old exe stays in place. When
 the exe's folder is not writable it opens the download page instead.
 
@@ -140,8 +152,8 @@ Homebrew installs update with `brew upgrade juicetray` (see Install).
 
 ## ⚠️ Known issues
 
-- **"Windows protected your PC"** — the exe is not code-signed yet: **More info → Run anyway**.
-  Installing with winget (package under review) will avoid the warning.
+- **"Windows protected your PC"** — the exe is not code-signed yet (see Install). Installing with
+  winget (package under review) will avoid the warning.
 - Some receivers answer only while the device is awake (VGN Dragonfly 3 Master+), and some
   keyboards report no level over a cable (AULA F75).
 
@@ -149,7 +161,7 @@ Homebrew installs update with `brew upgrade juicetray` (see Install).
 
 - Only read-only battery and online-status queries, one at a time, with no retry loops.
 - Never changes a device setting.
-- Bluetooth levels come from what Windows already stores, so no query reaches those devices.
+- Bluetooth levels come from what Windows or macOS reports, so no query reaches those devices.
 - A receiver or cable device is queried at most once per 10 s (mice) or 5 min (headsets),
   whatever the auto-refresh setting.
 - While a brand's app is open (MCHOSE HUB, ATK HUB, VGN VHUB), Juicetray pauses that brand's
@@ -161,13 +173,17 @@ Homebrew installs update with `brew upgrade juicetray` (see Install).
 | Command | What it does |
 |---|---|
 | `juicetray scan` | Lists Bluetooth, HID and serial devices; writes nothing; redacts serial numbers. |
-| `juicetray probe <VID:PID>` | Sends one read-only battery query to a supported device and prints the raw reply. Close the vendor app first; refuses within the device's floor. Optional: **Add device…** in the menu tries a device without it. |
-| `juicetray probe --online <VID:PID>` | Sends the read-only online-status query instead (Compx and ATK N9 Ultra, same floor) and prints `online: yes/no/unsupported`. |
-| `juicetray listen <VID:PID> [seconds]` | Only reads (1–60 s, default 10) and prints each report with its time in ms; nothing is sent. |
+| `juicetray probe <VID:PID>` | Sends one read-only battery query to a supported device and prints the raw reply. Close the vendor app first; refuses within the device's floor. Optional: **Add device…** in the menu tries a device without it. Receiver tool (Windows). |
+| `juicetray probe --online <VID:PID>` | Sends the read-only online-status query instead (Compx and ATK N9 Ultra, same floor) and prints `online: yes/no/unsupported`. Receiver tool (Windows). |
+| `juicetray listen <VID:PID> [seconds]` | Only reads (1–60 s, default 10) and prints each report with its time in ms; nothing is sent. Receiver tool (Windows). |
 
-`juicetray.log` sits next to `query-log.toml` in `%LOCALAPPDATA%\ittmchien\juicetray\data`. A
-release build writes it only when something goes wrong (panic, hang dump, error); set
-`JUICETRAY_TRACE=1` to trace every step (debug builds always do).
+On macOS there is no `juicetray` on PATH: run
+`/Applications/Juicetray.app/Contents/MacOS/juicetray scan` (or `… licenses`).
+
+`juicetray.log` sits next to `query-log.toml` in `%LOCALAPPDATA%\ittmchien\juicetray\data`
+(macOS: `~/Library/Application Support/io.github.ittmchien.juicetray/`). Dev and beta builds
+trace every step; an official release writes only when something goes wrong (panic, hang dump
+on Windows, error) unless started with `JUICETRAY_TRACE=1`.
 
 ## 🤝 Contributing
 
@@ -233,11 +249,7 @@ Pick a request the brand's app sends only to read status, never a setter.
 
 ## 🙏 Credits
 
-Protocol notes from M-HUB-linux-port (MCHOSE V9 Pro 2), the OpenMouse device catalogue (ATK),
-the Linux `hid-kysona` driver, [Joule](https://github.com/DillanCidral/Joule) and
-[sanshoku](https://github.com/ushineko/sanshoku). Only protocol facts are used; no code is copied.
-
 Device icons: [Material Symbols](https://github.com/google/material-design-icons) by Google
-([Apache-2.0](crates/strip-render/assets/icons/LICENSE)). Numbers on macOS (fallback font;
-Windows uses its own system fonts): [Inter](https://rsms.me/inter/)
+([Apache-2.0](crates/strip-render/assets/icons/LICENSE)). Fallback font for the numbers when the
+system font cannot be used: [Inter](https://rsms.me/inter/)
 ([OFL-1.1](crates/strip-render/assets/OFL.txt)).

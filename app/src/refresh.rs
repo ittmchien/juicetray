@@ -12,9 +12,17 @@ use crate::log;
 use crate::pause::{self, PowerState};
 use crate::receivers::read_receivers;
 
+/// How long after the last connect or disconnect notice the first read waits.
+const SETTLE_FIRST: Duration = Duration::from_secs(3);
+/// The follow-up read after the first, for battery values that arrive later still.
+const SETTLE_AGAIN: Duration = Duration::from_secs(5);
+
 pub enum Command {
     RefreshNow,
     SetInterval(Option<u32>),
+    /// A Bluetooth device connected or disconnected; the worker reads after a settle delay and
+    /// again later for late battery values.
+    RefreshSoon,
     /// The power source or the battery option changed; a pause ending earns one read.
     SetPower(PowerState),
     /// Looks for devices to offer in the new-device popup among these plugged-in ids, from the
@@ -68,6 +76,9 @@ fn run(
     let mut bluetooth_devices = Vec::new();
     // The timer counts from here, so commands that read nothing never push the next read back.
     let mut timer_from = Instant::now();
+    // When the settle read after a Bluetooth connect or disconnect is due, and whether a second follows.
+    let mut settle_at: Option<Instant> = None;
+    let mut settle_again = false;
     // Shapes the Add window read, kept until their device leaves.
     #[cfg(windows)]
     let mut shapes = door::ShapeCache::default();
@@ -77,7 +88,7 @@ fn run(
             let _read = log::span("read cycle");
             {
                 let _span = log::span("bluetooth read");
-                match bluetooth::read_devices() {
+                match read_bluetooth() {
                     Ok(devices) => bluetooth_devices = devices,
                     Err(error) => {
                         eprintln!("bluetooth read failed: {error:#}");
@@ -88,9 +99,12 @@ fn run(
             // The file is read once per cycle, so hand edits to the device keys apply without a
             // restart; the app takes them from this read.
             let config = Config::load();
-            let receivers = {
+            // Receivers are Windows-only for now; elsewhere the read is skipped.
+            let receivers = if cfg!(windows) {
                 let _span = log::span("receivers read");
                 read_receivers(&config.allowed(), &config.custom(), SystemTime::now())
+            } else {
+                Vec::new()
             };
             if !send_devices(proxy, &bluetooth_devices, &receivers, config) {
                 log::trace(format_args!("worker exit: event loop gone"));
@@ -101,11 +115,24 @@ fn run(
         read_now = true;
         // While the timer may not read, the wait has no timeout and only a command wakes it.
         let timer = interval.filter(|_| pause::timer_may_read(power));
-        let command = wait(commands, timer, timer_from);
+        let timer_due = timer.map(|seconds| timer_from + Duration::from_secs(u64::from(seconds)));
+        let deadline = timer_due.into_iter().chain(settle_at).min();
+        let command = wait(commands, deadline);
         log::trace(format_args!("worker woke: {}", wake_reason(&command)));
         match command {
-            Ok(Command::RefreshNow) => {}
-            Err(RecvTimeoutError::Timeout) => {}
+            // Any read consumes an overdue settle read, so it never runs twice back to back.
+            Ok(Command::RefreshNow) | Err(RecvTimeoutError::Timeout) => {
+                if settle_at.is_some_and(|due| due <= Instant::now()) {
+                    settle_at = settle_again.then(|| Instant::now() + SETTLE_AGAIN);
+                    settle_again = false;
+                }
+            }
+            // Each notice pushes the settle read back, so a burst reads twice at most.
+            Ok(Command::RefreshSoon) => {
+                read_now = false;
+                settle_at = Some(Instant::now() + SETTLE_FIRST);
+                settle_again = true;
+            }
             // A new interval or power state restarts the timer.
             Ok(Command::SetInterval(seconds)) => {
                 interval = seconds;
@@ -150,6 +177,7 @@ fn wake_reason(command: &Result<Command, RecvTimeoutError>) -> &'static str {
     match command {
         Ok(Command::RefreshNow) => "RefreshNow",
         Ok(Command::SetInterval(_)) => "SetInterval",
+        Ok(Command::RefreshSoon) => "RefreshSoon",
         Ok(Command::SetPower(_)) => "SetPower",
         #[cfg(windows)]
         Ok(Command::FindOffers(_)) => "FindOffers",
@@ -176,16 +204,23 @@ fn send_devices(
         .is_ok()
 }
 
-/// Waits until `interval` after `from` (a fixed deadline, whatever wakes it meanwhile); auto-refresh
-/// Off waits for a command forever.
+/// Waits until `deadline` (fixed, whatever wakes it meanwhile); no deadline waits for a command
+/// forever.
 fn wait(
     commands: &Receiver<Command>,
-    interval: Option<u32>,
-    from: Instant,
+    deadline: Option<Instant>,
 ) -> Result<Command, RecvTimeoutError> {
-    match interval {
-        Some(seconds) => commands
-            .recv_timeout(Duration::from_secs(u64::from(seconds)).saturating_sub(from.elapsed())),
+    match deadline {
+        Some(at) => commands.recv_timeout(at.saturating_duration_since(Instant::now())),
         None => commands.recv().map_err(|_| RecvTimeoutError::Disconnected),
     }
+}
+
+/// macOS reads in a short-lived child process; Windows reads on this thread (WinRT / SetupAPI
+/// do not depend on a run loop).
+fn read_bluetooth() -> Result<Vec<DeviceView>> {
+    #[cfg(target_os = "macos")]
+    return crate::bluetooth_child::read_devices();
+    #[cfg(not(target_os = "macos"))]
+    bluetooth::read_devices()
 }

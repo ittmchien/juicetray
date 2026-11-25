@@ -56,6 +56,90 @@ pub fn watch_changes(proxy: tao::event_loop::EventLoopProxy<crate::app::UserEven
     std::mem::forget(observer);
 }
 
+#[cfg(target_os = "macos")]
+mod appearance_observer {
+    use std::ffi::c_void;
+
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyObject, NSObjectProtocol};
+    use objc2::{AnyThread, DefinedClass, define_class, msg_send};
+    use objc2_foundation::{NSObject, NSString};
+    use tao::event_loop::EventLoopProxy;
+
+    use crate::app::UserEvent;
+
+    pub struct Ivars {
+        pub proxy: EventLoopProxy<UserEvent>,
+    }
+
+    define_class!(
+        // SAFETY: NSObject has no subclassing requirements and `AppearanceObserver` has no `Drop`.
+        #[unsafe(super(NSObject))]
+        #[ivars = Ivars]
+        pub struct AppearanceObserver;
+
+        impl AppearanceObserver {
+            // Fires on every `effectiveAppearance` change of the observed button.
+            #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
+            fn observe_value(
+                &self,
+                _key_path: Option<&NSString>,
+                _object: Option<&AnyObject>,
+                _change: Option<&AnyObject>,
+                _context: *mut c_void,
+            ) {
+                // A closed event loop means the app is exiting.
+                let _ = self.ivars().proxy.send_event(UserEvent::ThemeChanged);
+            }
+        }
+
+        unsafe impl NSObjectProtocol for AppearanceObserver {}
+    );
+
+    impl AppearanceObserver {
+        pub fn new(proxy: EventLoopProxy<UserEvent>) -> Retained<Self> {
+            let this = Self::alloc().set_ivars(Ivars { proxy });
+            // SAFETY: `init` on an NSObject subclass with its ivars set.
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+}
+
+/// The status-item button's appearance resolves after launch and follows the menu-bar tint
+/// (wallpaper too), which no system notification announces, so its changes are observed directly.
+#[cfg(target_os = "macos")]
+pub fn watch_button_appearance(
+    tray: &TrayIcon,
+    proxy: tao::event_loop::EventLoopProxy<crate::app::UserEvent>,
+) {
+    use objc2_foundation::{
+        MainThreadMarker, NSKeyValueObservingOptions, NSObjectNSKeyValueObserverRegistration,
+        ns_string,
+    };
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let Some(button) = tray.ns_status_item().and_then(|item| item.button(mtm)) else {
+        return;
+    };
+    let observer = appearance_observer::AppearanceObserver::new(proxy);
+    // SAFETY: the observer implements `observeValueForKeyPath:ofObject:change:context:`, is
+    // kept alive below, and the context is null.
+    unsafe {
+        button.addObserver_forKeyPath_options_context(
+            &observer,
+            ns_string!("effectiveAppearance"),
+            // The observer only needs the nudge, not the change dictionary.
+            NSKeyValueObservingOptions::empty(),
+            std::ptr::null_mut(),
+        );
+    }
+    // Observer and button stay alive for the whole process, so KVO never messages a freed object.
+    std::mem::forget(observer);
+    std::mem::forget(button);
+}
+
 /// `SystemUsesLightTheme = 0` means dark (taskbar); a missing value means light.
 #[cfg(windows)]
 pub fn system_theme() -> Theme {

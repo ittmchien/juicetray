@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::time::SystemTime;
 
 use objc2::rc::Retained;
@@ -81,4 +82,21 @@ fn battery(device: &IOBluetoothDevice, key: Sel) -> Option<u8> {
     let value: Option<Retained<AnyObject>> = unsafe { msg_send![device, valueForKey: &*key] };
     let number = value?.downcast::<NSNumber>().ok()?;
     normalize(number.as_i64())
+}
+
+/// Opaque ids (addresses here) of the connected paired devices, only compared with each other;
+/// no battery reads, so it stays cheap.
+/// Call it on the main thread, like `read_devices`.
+pub fn connected_ids() -> BTreeSet<String> {
+    // SAFETY: class method without arguments; nil means nothing is paired.
+    let Some(paired) = (unsafe { IOBluetoothDevice::pairedDevices() }) else {
+        return BTreeSet::new();
+    };
+    paired
+        .iter()
+        .filter_map(|object| object.downcast::<IOBluetoothDevice>().ok())
+        // SAFETY: plain getters on a live IOBluetoothDevice; a nil address is skipped.
+        .filter(|device| unsafe { device.isConnected() })
+        .filter_map(|device| unsafe { device.addressString() }.map(|address| address.to_string()))
+        .collect()
 }

@@ -5,7 +5,13 @@
 mod add_device;
 mod alerts;
 mod app;
+// macOS reads Bluetooth in a child process.
+#[cfg(target_os = "macos")]
+mod bluetooth_child;
 mod config;
+// macOS and Windows connect/disconnect detection by polling.
+#[cfg(any(target_os = "macos", windows))]
+mod connections;
 // Windows only: the context menu runs on its own thread, so a stuck menu never stops the app.
 #[cfg(windows)]
 mod context_menu;
@@ -43,6 +49,9 @@ mod taskbar;
 mod theme;
 mod ui_font;
 mod update;
+// macOS wake-from-sleep notice.
+#[cfg(target_os = "macos")]
+mod wake;
 // Vendor apps that pause their brand's devices while open.
 mod vendor_apps;
 // Windows-only hang dump; the stall bookkeeping is also tested on other hosts.
@@ -55,6 +64,9 @@ use std::time::SystemTime;
 fn main() -> ExitCode {
     match std::env::args().nth(1).as_deref() {
         Some("scan") => run_scan(),
+        // Hidden: the app's own Bluetooth reader child.
+        #[cfg(target_os = "macos")]
+        Some(bluetooth_child::SUBCOMMAND) => bluetooth_child::run_child(),
         Some("probe") => {
             attach_parent_console();
             probe::run_probe(std::env::args().skip(2).collect())
