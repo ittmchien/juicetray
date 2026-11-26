@@ -219,9 +219,21 @@ impl Config {
         table.to_string()
     }
 
-    /// The `allow` entries that are valid `VID:PID`; others stay in `allow` but are ignored.
+    /// The ids the worker may query unverified: valid `allow` entries plus valid custom device
+    /// ids (so one stays read if a later catalogue lists it unverified). Invalid ones are skipped.
     pub fn allowed(&self) -> Vec<(u16, u16)> {
-        valid_ids(&self.allow)
+        let mut ids = valid_ids(&self.allow);
+        for device in self
+            .custom_devices
+            .iter()
+            .filter_map(|entry| custom_device(entry).ok())
+        {
+            let id = (device.vid, device.pid);
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        ids
     }
 
     /// The `declined` entries that are valid `VID:PID`; others stay in the list but are ignored.
@@ -324,8 +336,8 @@ impl Config {
         self.add_id_and_save_to(&path, |config| &mut config.allow, vid, pid)
     }
 
-    /// Adds a device outside the catalogue the owner added in the Add window to
-    /// `custom_devices`, in memory and in the file; an entry with the same id is replaced.
+    /// Adds a custom device (Add window or popup catalogue row) in memory and in the file;
+    /// an entry with the same id is replaced.
     #[cfg_attr(
         not(windows),
         allow(dead_code, reason = "only Windows has the Add window")
@@ -628,7 +640,7 @@ fn custom_table(entry: &CustomEntry) -> Value {
 /// A checked custom device, or why the entry is ignored. ATK serial, RongYuan F7 and Driveall are
 /// refused because only catalogue PIDs tell them apart, Generic because its frame lives in the
 /// catalogue row; an empty name shows the id.
-fn custom_device(entry: &CustomEntry) -> Result<Device, String> {
+pub(crate) fn custom_device(entry: &CustomEntry) -> Result<Device, String> {
     let (vid, pid) = parse_vid_pid(&entry.id).map_err(|_| "id is not VID:PID".to_owned())?;
     if is_recovery(vid, pid) {
         return Err("recovery or bootloader id".to_owned());
@@ -969,6 +981,38 @@ mod tests {
             Config::parse("allow = [\"373b:1204\", 5, \"zzzz:1\", \"373B\", \"0001:ABCD\"]\n");
         assert_eq!(config.allow, ["373b:1204", "zzzz:1", "373B", "0001:ABCD"]);
         assert_eq!(config.allowed(), [(0x373B, 0x1204), (0x0001, 0xABCD)]);
+    }
+
+    #[test]
+    fn allowed_adds_valid_custom_ids_once() {
+        // A custom device whose id a later catalogue lists unverified still needs the query gate.
+        let config = Config::parse(
+            r#"
+allow = ["373B:1204"]
+
+[[custom_devices]]
+id = "373b:1204"
+family = "Compx"
+kind = "mouse"
+connection = "cable"
+
+[[custom_devices]]
+id = "3554:7777"
+family = "Report13"
+kind = "keyboard"
+connection = "receiver"
+
+[[custom_devices]]
+id = "3554:8888"
+family = "AtkSerial"
+kind = "mouse"
+connection = "cable"
+"#,
+        );
+        // The duplicate and the invalid entry add nothing; the file's lists stay as they were.
+        assert_eq!(config.allowed(), [(0x373B, 0x1204), (0x3554, 0x7777)]);
+        assert_eq!(config.allow, ["373B:1204"]);
+        assert_eq!(config.custom_devices.len(), 3);
     }
 
     #[test]

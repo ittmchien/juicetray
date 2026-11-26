@@ -109,3 +109,38 @@ jobs:
           # The release text comes from RELEASE_NOTES.md, written on dev before the release PR.
           body_path: RELEASE_NOTES.md
           files: dist/*
+      # Points the Homebrew formula at this release's zip. Runs even when the release already exists,
+      # so a re-run fixes a failed tap push; the tap deploy key is the only write access it gets.
+      - uses: actions/checkout@v7
+        with:
+          repository: ittmchien/homebrew-tap
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          path: tap
+      - name: Update the Homebrew formula
+        working-directory: tap
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          formula=Formula/juicetray.rb
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          # A hand-pushed older tag never moves the formula back.
+          current=$(grep -o 'releases/download/v[^/]*' "$formula" | cut -d/ -f3)
+          if [ "$(printf '%s\n' "$current" "$TAG" | sort -V | tail -1)" != "$TAG" ] \
+            || [ "$current" = "$TAG" ]; then
+            echo "Formula on $current; nothing to do for $TAG."
+            exit 0
+          fi
+          zip=juicetray-macos-universal.app.zip
+          sha=$(gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p SHA256SUMS.txt -O - \
+            | awk -v f="$zip" '$2 == f { print $1 }')
+          test -n "$sha"
+          sed -i -E \
+            -e "s|releases/download/v[^/]+/$zip|releases/download/$TAG/$zip|" \
+            -e "s|^  sha256 \"[0-9a-f]+\"|  sha256 \"$sha\"|" "$formula"
+          grep -q "releases/download/$TAG/" "$formula"
+          grep -q "sha256 \"$sha\"" "$formula"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "feat: juicetray ${TAG#v}"
+          git push

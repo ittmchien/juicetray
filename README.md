@@ -123,6 +123,12 @@ to [open an issue](https://github.com/ittmchien/juicetray/issues) with them fill
 device's name, USB ID and interfaces, the bytes sent and read during the try, the names of running
 vendor apps and the USB IDs of other devices of the same brand are sent — nothing personal.
 
+When the plugged-in device is not in the catalogue your version was built with, the popup first
+looks for it in the catalogue files on GitHub (see Updates). If a row there matches and its
+family works for an added device, the popup shows that row's name and **OK** adds the device at
+once, without the Add device window; otherwise **OK** opens the window as above. A device you
+were asked about before updating is not offered again: add it with **Add device…**.
+
 📋 **[Device list](https://docs.google.com/spreadsheets/d/e/2PACX-1vRTKUOHRmpLeXhjxL93T5HwuYsJKnzMHSUhN2AWslNCB938EpQH2YkMeNubTcpvdxpHC2o7Dw4OHfS7/pubhtml)**
 — every model Juicetray knows (**Supported**) and the devices users asked for, with their status
 (**Requested**).
@@ -146,6 +152,12 @@ Juicetray checks [GitHub Releases](https://github.com/ittmchien/juicetray/releas
 version at most once a day (restarting the app does not check again). Turn it off
 with **Check for updates automatically** under **Settings**, or check by hand with **Check for
 updates…**. The request sends nothing but the version in the User-Agent (`juicetray/<version>`).
+
+On Windows, while **Detect new devices** is on, the "New device found" popup for a device the
+built-in catalogue does not know first downloads the public catalogue files from the `main` branch
+on GitHub, until one lists it. The device ID is not sent; the request carries only
+`juicetray/<version>` in the User-Agent. Turning off **Detect new devices** stops it. A catalogue row reaches users once it is
+merged to `main`, without a new release.
 
 On Windows, **Update now** downloads the new exe, checks its SHA-256 against the release's
 `SHA256SUMS.txt`, swaps it in and restarts; if anything fails, the old exe stays in place. When
@@ -219,6 +231,10 @@ is one of `Compx`, `Report13`, `Mchose`, `AtkSerial`, `AtkBitmouse`, `VgnKc2`, `
 family or kind, bad hex, duplicate VID:PID) and fails with the file and entry named. Open the pull
 request against `dev` with `verified = false`; a model becomes `verified = true` only after a
 hardware check (`juicetray probe <VID:PID>` read the same level as the vendor app).
+
+Released apps fetch only the catalogue files they were built with when they look up an unknown
+device, so put a new brand on an existing family VID into that VID's existing file; a new file
+reaches only later releases.
 
 #### Generic rows
 

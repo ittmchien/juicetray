@@ -21,6 +21,9 @@ pub use self::common::{spawn_check, spawn_scheduler};
 pub use self::macos::{offer, offer_move_to_applications};
 #[cfg(windows)]
 pub use self::windows::{shell_open, spawn_cleanup, spawn_offer};
+// The remote catalogue lookup shares the GitHub-only HTTPS GET.
+#[cfg(windows)]
+pub(crate) use self::windows::get_within;
 
 /// The step an "Update now" install is on, carrying the version it installs; the menu shows it
 /// as a disabled top line. Steps only: neither brew nor the download reports a percentage.

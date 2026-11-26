@@ -1,6 +1,5 @@
-//! The device catalogue: every model juicetray knows, with the family that decides which frame
-//! it gets. The rows live in `crates/protocol/devices/*.toml` and build.rs compiles them into
-//! `KNOWN`; nothing is parsed at run time.
+//! The device catalogue: every known model and its family. `devices/*.toml` is compiled by
+//! build.rs into `KNOWN` and `CATALOGUE_FILES`; nothing is parsed at run time here.
 
 use crate::Family;
 

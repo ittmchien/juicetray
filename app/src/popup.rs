@@ -53,45 +53,74 @@ pub use win::show;
 
 #[cfg(windows)]
 mod win {
+    use std::sync::mpsc::{self, Sender};
+
     use tao::event_loop::EventLoopProxy;
 
+    use crate::add_device::AddRequest;
     use crate::app::UserEvent;
+    use crate::config::CustomEntry;
     use crate::dialog;
     use crate::log;
     use crate::plug::{Id, Offer};
+    use crate::remote_catalogue;
 
     const TITLE: &str = "New device";
 
-    /// The events for an answer: the id is recorded as asked whatever the answer (so it is never
-    /// offered again), and OK also opens the Add device window.
-    fn answer_events(ok: bool, id: Id) -> Vec<UserEvent> {
+    /// The events for an answer: the id is always recorded as asked; OK saves the catalogue
+    /// `row` (answered on `reply`) or else opens the Add device window.
+    fn answer_events(
+        ok: bool,
+        id: Id,
+        row: Option<CustomEntry>,
+        reply: Sender<Result<(), String>>,
+    ) -> Vec<UserEvent> {
         let mut events = vec![UserEvent::Asked(id)];
         if ok {
-            events.push(UserEvent::OpenAddDevice(id));
+            events.push(match row {
+                Some(entry) => UserEvent::AddDevice(AddRequest::Custom(entry), reply),
+                None => UserEvent::OpenAddDevice(id),
+            });
         }
         events
     }
 
-    /// Asks about `offer` on a `popup` thread, which answers with `Asked` (and `OpenAddDevice`
-    /// on OK) and then `OfferClosed`; false when the thread cannot start.
+    /// Asks about `offer` on a `popup` thread that sends `Asked`, on OK `AddDevice` or
+    /// `OpenAddDevice`, then `OfferClosed`; false when the thread cannot start.
     pub fn show(proxy: EventLoopProxy<UserEvent>, offer: Offer) -> bool {
         let spawned = std::thread::Builder::new()
             .name("popup".into())
             .spawn(move || {
+                let (vid, pid) = offer.id;
+                // Only ids the built-in catalogue lacks are looked up; this thread may block.
+                let row = if protocol::known(vid, pid).is_none() {
+                    remote_catalogue::lookup(offer.id)
+                } else {
+                    None
+                };
+                let name = row
+                    .as_ref()
+                    .map_or_else(|| offer.name.clone(), |entry| entry.name.clone());
                 // Main instruction, then content: the task dialog shows them in two sizes.
-                let message = format!("New device found: {}\n\nAdd it to Juicetray?", offer.name);
+                let message = format!("New device found: {name}\n\nAdd it to Juicetray?");
                 // Esc and the close box count as Not now.
                 let ok = {
                     let _span = log::span("dialog new device");
                     dialog::confirm(TITLE, &message, "OK", "Not now")
                 };
                 log::trace(format_args!(
-                    "new device {:04X}:{:04X} answered ok={ok}",
-                    offer.id.0, offer.id.1
+                    "new device {vid:04X}:{pid:04X} answered ok={ok} catalogue_row={}",
+                    row.is_some()
                 ));
+                let saves_row = ok && row.is_some();
+                let (reply, saved) = mpsc::channel();
                 // A closed event loop means the app is exiting.
-                for event in answer_events(ok, offer.id) {
+                for event in answer_events(ok, offer.id, row, reply) {
                     let _ = proxy.send_event(event);
+                }
+                // A dropped sender (the app exiting) ends the wait with no answer to show.
+                if saves_row && let Ok(Err(error)) = saved.recv() {
+                    dialog::notice(TITLE, &format!("Could not add {name}.\n\n{error}"));
                 }
                 let _ = proxy.send_event(UserEvent::OfferClosed);
             });
@@ -108,17 +137,41 @@ mod win {
     mod tests {
         use super::*;
 
+        fn entry() -> CustomEntry {
+            CustomEntry {
+                id: "3554:7777".into(),
+                name: "Board".into(),
+                family: "Report13".into(),
+                kind: "keyboard".into(),
+                connection: "receiver".into(),
+            }
+        }
+
         #[test]
         fn every_answer_records_the_id_and_only_ok_opens_the_add_window() {
             let id = (0x3554, 0xFA09);
             // OK: recorded first, then the Add device window.
-            let ok = answer_events(true, id);
+            let ok = answer_events(true, id, None, mpsc::channel().0);
             assert!(matches!(
                 ok.as_slice(),
                 [UserEvent::Asked(a), UserEvent::OpenAddDevice(b)] if *a == id && *b == id
             ));
             // Not now, Esc and the close box: recorded only.
-            let not_now = answer_events(false, id);
+            let not_now = answer_events(false, id, None, mpsc::channel().0);
+            assert!(matches!(not_now.as_slice(), [UserEvent::Asked(a)] if *a == id));
+        }
+
+        #[test]
+        fn ok_saves_a_catalogue_row_instead_of_opening_the_add_window() {
+            let id = (0x3554, 0x7777);
+            let ok = answer_events(true, id, Some(entry()), mpsc::channel().0);
+            assert!(matches!(
+                ok.as_slice(),
+                [UserEvent::Asked(a), UserEvent::AddDevice(AddRequest::Custom(saved), _)]
+                    if *a == id && *saved == entry()
+            ));
+            // Not now saves nothing, row or not.
+            let not_now = answer_events(false, id, Some(entry()), mpsc::channel().0);
             assert!(matches!(not_now.as_slice(), [UserEvent::Asked(a)] if *a == id));
         }
     }

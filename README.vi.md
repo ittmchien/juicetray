@@ -124,6 +124,12 @@ tin điền sẵn. Chỉ gửi tên thiết bị, USB ID và danh sách interfac
 trong lần thử, tên app hãng đang chạy và USB ID của các thiết bị khác cùng hãng — không có thông
 tin cá nhân.
 
+Nếu thiết bị vừa cắm không có trong danh mục có sẵn của phiên bản bạn đang dùng, popup sẽ tìm nó
+trước trong các file danh mục trên GitHub (xem phần Cập nhật). Nếu có dòng khớp và family của
+dòng đó dùng được cho thiết bị thêm tay, popup hiện tên trong dòng đó và **OK** thêm thiết bị
+ngay, không mở cửa sổ Add device; nếu không thì **OK** mở cửa sổ như trên. Thiết bị đã được hỏi
+trước khi bạn cập nhật sẽ không được hỏi lại: thêm nó bằng **Add device…**.
+
 📋 **[Danh sách thiết bị](https://docs.google.com/spreadsheets/d/e/2PACX-1vRTKUOHRmpLeXhjxL93T5HwuYsJKnzMHSUhN2AWslNCB938EpQH2YkMeNubTcpvdxpHC2o7Dw4OHfS7/pubhtml)**
 — mọi model Juicetray biết (**Supported**) và các thiết bị người dùng đã yêu cầu kèm trạng thái
 (**Requested**).
@@ -147,6 +153,12 @@ Juicetray kiểm tra [GitHub Releases](https://github.com/ittmchien/juicetray/re
 tối đa một lần (mở lại app cũng không kiểm thêm). Tắt bằng mục **Check for updates
 automatically** trong **Settings**, hoặc kiểm tay bằng **Check for updates…**. Yêu cầu chỉ gửi số
 phiên bản trong User-Agent (`juicetray/<version>`).
+
+Trên Windows, khi **Detect new devices** đang bật, trước khi popup "New device found" hỏi về một
+thiết bị mà danh mục có sẵn không biết, app tải các file danh mục công khai từ nhánh `main` trên
+GitHub, tới khi có file liệt kê nó. Không gửi ID thiết bị; yêu cầu chỉ mang
+`juicetray/<version>` trong User-Agent. Tắt **Detect new devices** thì việc này dừng. Một dòng danh mục tới người dùng ngay khi được merge vào `main`,
+không cần bản phát hành mới.
 
 Trên Windows, **Update now** tải exe mới, kiểm SHA-256 với `SHA256SUMS.txt` của bản phát hành,
 thay file rồi khởi động lại; lỗi ở bất kỳ bước nào thì exe cũ được giữ nguyên. Nếu thư mục chứa
@@ -224,6 +236,10 @@ kiểm từng dòng (family hoặc kind lạ, hex sai, VID:PID trùng) và báo 
 dòng. Mở pull request vào `dev` với `verified = false`; model chỉ được đổi thành
 `verified = true` sau khi kiểm trên thiết bị thật (`juicetray probe <VID:PID>` đọc ra cùng mức pin
 với app của hãng).
+
+Bản đã phát hành chỉ tải các file danh mục có lúc nó được build khi tra thiết bị lạ, nên hãng mới
+dùng VID của một family có sẵn thì thêm vào file có sẵn của VID đó; file mới chỉ tới được các bản
+phát hành sau.
 
 #### Dòng Generic
 

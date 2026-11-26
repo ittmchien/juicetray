@@ -23,7 +23,7 @@ mod vgn_kc2;
 
 use std::time::{Duration, SystemTime};
 
-pub use devices::{KNOWN, Kind, KnownDevice, known};
+pub use devices::{CATALOGUE_FILES, KNOWN, Kind, KnownDevice, known};
 pub use families::{families_for, family_vid};
 pub use generic::{GenericReport, GenericSpec};
 pub use hid::{HidShape, PickError, open_permission, pick_target};
