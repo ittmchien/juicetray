@@ -745,7 +745,8 @@ mod tests {
             ids(&queried(&present, &[f75], std::slice::from_ref(&mine))),
             [mchose, f75, (0x1234, 0x5678)]
         );
-        // An unverified model with no `allow` entry stays out, whatever a custom entry says.
+        // `queried` gates on the already-merged allow list it receives (`Config::allowed()`);
+        // a custom entry alone does not admit an unverified id.
         let shadow = custom(vgn.0, vgn.1, Family::Compx);
         assert!(queried(&[vgn], &[], &[shadow]).is_empty());
         // A custom device that is not plugged in gives no row.

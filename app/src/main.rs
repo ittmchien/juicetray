@@ -36,6 +36,9 @@ mod query;
 mod query_log;
 mod receivers;
 mod refresh;
+// The new-device popup's GitHub catalogue lookup (Windows); its row rules are also tested elsewhere.
+#[cfg(any(windows, test))]
+mod remote_catalogue;
 // GitHub reports come from Windows windows; the URL and redaction rules are also tested elsewhere.
 #[cfg(any(windows, test))]
 mod report;

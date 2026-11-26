@@ -1,6 +1,5 @@
-//! Compiles the device catalogue (`devices/*.toml`, one file per brand) into `KNOWN`
-//! (`$OUT_DIR/known.rs`, included by `src/devices.rs`). Every problem in the files fails the
-//! build with the file and entry named, so a bad line never reaches a release.
+//! Compiles `devices/*.toml` into `KNOWN` (`$OUT_DIR/known.rs`); any bad entry fails the
+//! build, naming the file and entry.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -95,9 +94,19 @@ fn main() {
     let mut errors = Vec::new();
     let mut rows = String::new();
     let mut seen: HashMap<(u16, u16), String> = HashMap::new();
-    for path in catalogue_files(dir, &mut errors) {
+    let files = catalogue_files(dir, &mut errors);
+    // The app builds GitHub raw URLs from these names, so only plain lower-case names pass.
+    for path in &files {
+        if !is_plain_name(&file_name(path)) {
+            errors.push(format!(
+                "{}: file name must be lower-case letters, digits and dashes",
+                path.display()
+            ));
+        }
+    }
+    for path in &files {
         let file = path.display().to_string();
-        let parsed = fs::read_to_string(&path)
+        let parsed = fs::read_to_string(path)
             .map_err(|error| error.to_string())
             .and_then(|text| toml::from_str::<File>(&text).map_err(|error| error.to_string()));
         let entries = match parsed {
@@ -135,7 +144,16 @@ fn main() {
         process::exit(1);
     }
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
-    let code = format!("pub const KNOWN: &[KnownDevice] = &[\n{rows}];\n");
+    let names: Vec<String> = files
+        .iter()
+        .map(|path| format!("{:?}", file_name(path)))
+        .collect();
+    let code = format!(
+        "pub const KNOWN: &[KnownDevice] = &[\n{rows}];\n\
+         /// The catalogue file names, sorted; the app fetches them from GitHub for unknown ids.\n\
+         pub const CATALOGUE_FILES: &[&str] = &[{}];\n",
+        names.join(", ")
+    );
     fs::write(out.join("known.rs"), code).expect("write known.rs");
 }
 
@@ -154,6 +172,23 @@ fn catalogue_files(dir: &Path, errors: &mut Vec<String>) -> Vec<PathBuf> {
         .collect();
     files.sort();
     files
+}
+
+/// The file name of a catalogue path (lossy, so an odd name still reaches `is_plain_name`).
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// `<lower-case letters, digits, dashes>.toml`.
+fn is_plain_name(name: &str) -> bool {
+    name.strip_suffix(".toml").is_some_and(|stem| {
+        !stem.is_empty()
+            && stem
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    })
 }
 
 /// One checked entry as its `VID:PID` and its `KnownDevice` literal.

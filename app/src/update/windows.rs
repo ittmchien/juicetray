@@ -226,16 +226,26 @@ pub(super) fn fetch_latest() -> Result<(u16, String), String> {
 }
 
 /// An HTTPS reply: its status and, for a 200, the body read up to the caller's cap.
-pub(super) struct Reply {
+pub(crate) struct Reply {
     pub status: u16,
     pub body: Vec<u8>,
     /// More bytes were on offer than the cap allowed.
     pub truncated: bool,
 }
 
-/// GETs `url` (HTTPS only), following redirects. The final URL must still be on a GitHub host,
-/// or the reply is refused; a non-200 status comes back with an empty body.
+/// GETs `url` (HTTPS only), following redirects, waiting `TIMEOUT_MS` per step. The final URL
+/// must still be on a GitHub host, or the reply is refused; a non-200 status has an empty body.
 pub(super) fn get(url: &str, accept: Option<&str>, max_bytes: usize) -> Result<Reply, String> {
+    get_within(url, accept, max_bytes, TIMEOUT_MS)
+}
+
+/// `get` with its own per-step timeout, for lookups that must give up quickly on a hung network.
+pub(crate) fn get_within(
+    url: &str,
+    accept: Option<&str>,
+    max_bytes: usize,
+    timeout_ms: i32,
+) -> Result<Reply, String> {
     let step =
         |step: &'static str| move |error: windows::core::Error| format!("{step} failed: {error}");
     if !is_github_url(url) {
@@ -267,7 +277,7 @@ pub(super) fn get(url: &str, accept: Option<&str>, max_bytes: usize) -> Result<R
         "WinHTTP open",
     )?;
     // SAFETY: `session` is a live session handle.
-    unsafe { WinHttpSetTimeouts(session.0, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS) }
+    unsafe { WinHttpSetTimeouts(session.0, timeout_ms, timeout_ms, timeout_ms, timeout_ms) }
         .map_err(step("setting the timeouts"))?;
     // SAFETY: `session` is live and `host` is a NUL-terminated string that outlives the call.
     let connection = Handle::new(
