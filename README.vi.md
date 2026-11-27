@@ -102,6 +102,8 @@ tới thiết bị.
 | 🎧 | ATK N9 Ultra | `373B:1204` | Đóng ATK HUB trước: nó giữ cổng của receiver |
 | 🖱️ | ATK X1 SE | `373B:1216` | |
 | 🖱️ | ATK X1 SE Nearlink | `373B:1299` | Chuột cắm dây USB, không qua receiver |
+| 🖱️ | Delux M500 | `249A:5C2F` | App M500 chỉ hiện vạch pin; mức pin được đối chiếu với code của app |
+| 🖱️ | Delux M500 | `248A:5D2E` | Chuột cắm dây USB: báo đang sạc (không có mức pin) |
 
 ### 🧪 Đã đọc được một lần, chưa đối chiếu với app của hãng
 
@@ -191,7 +193,7 @@ updates…** bị làm mờ tới khi xong.
   bị đó.
 - Thiết bị qua receiver hoặc cáp được hỏi tối đa 10 giây một lần (chuột) hoặc 5 phút một lần
   (tai nghe), bất kể cài đặt auto-refresh.
-- Khi app của một hãng đang mở (MCHOSE HUB, ATK HUB, VGN VHUB), Juicetray tạm dừng receiver và
+- Khi app của một hãng đang mở (MCHOSE HUB, ATK HUB, VGN VHUB, M500), Juicetray tạm dừng receiver và
   cáp của hãng đó: không mở, không gửi gì, menu giữ mức pin cuối kèm `paused (… open)`. Lần
   refresh đầu tiên sau khi app đóng sẽ đọc lại bình thường.
 
@@ -230,7 +232,7 @@ Mỗi model là một dòng trong file của hãng đó dưới `crates/protocol
 `atk.toml`), gồm `vid` và `pid` (4 chữ số hex), `name`, `family`, `kind` (`mouse`, `headset`,
 `keyboard`, `gamepad` hoặc `other`), `connection` (`receiver` hoặc `cable`) và `verified`.
 `family` là một trong `Compx`, `Report13`, `Mchose`, `AtkSerial`, `AtkBitmouse`, `VgnKc2`,
-`RongYuanF7`, `Driveall` hoặc `Generic`; model có giao thức không family nào ở trên hỗ trợ thường
+`RongYuanF7`, `Driveall`, `Xctech` hoặc `Generic`; model có giao thức không family nào ở trên hỗ trợ thường
 có thể là một dòng `Generic` (bên dưới), nếu không thì phải thêm family vào code trước. Bước build
 kiểm từng dòng (family hoặc kind lạ, hex sai, VID:PID trùng) và báo lỗi kèm tên file và vị trí
 dòng. Mở pull request vào `dev` với `verified = false`; model chỉ được đổi thành
@@ -264,17 +266,20 @@ Một dòng `Generic` tự mang lệnh hỏi của nó thay vì code của famil
 ```
 
 Ví dụ trên là bịa: mỗi lần hỏi nó gửi output report `05 01` (đệm đủ 33 byte) một lần và đọc
-byte 3 của input report bắt đầu bằng `05 81` làm phần trăm. Giống ATK serial, RongYuan F7 và
-Driveall, dòng Generic chỉ dùng cho đúng VID:PID của nó trong catalogue; thiết bị custom hay cửa
-sổ Add device không bao giờ dùng nó. Mỗi lần hỏi một frame cố định, không lặp lại, khoảng chờ
-10 giây.
+byte 3 của input report bắt đầu bằng `05 81` làm phần trăm. Giống ATK serial, RongYuan F7,
+Driveall và Xctech, dòng Generic chỉ dùng cho đúng VID:PID của nó trong catalogue; thiết bị custom
+hay cửa sổ Add device không bao giờ dùng nó. Mỗi lần hỏi một frame cố định, không lặp lại, khoảng
+chờ 10 giây.
 
 **Từ báo cáo thiết bị tới một dòng.** Báo cáo của Add device liệt kê mọi collection của thiết bị
 như `scan` in ra: `HID if 2 FF00:0001 vendor · Usb · in 05:33 out 05:33` cho ra `usage_page`,
 `usage`, `report` và `report_bytes`, còn đoạn hex descriptor bên dưới giúp người review kiểm lại
-kích thước. Lệnh hỏi và cấu trúc phản hồi lấy từ những gì app của hãng gửi và nhận (bắt gói
-USB); `level_byte` là byte phản hồi bằng đúng phần trăm app của hãng hiển thị. Chọn lệnh mà app
-của hãng chỉ gửi để đọc trạng thái, không bao giờ là lệnh ghi cài đặt.
+kích thước. Trên Windows mỗi dòng (trừ page 008C) kết thúc bằng `caps in N out N feat N` (hoặc
+`caps unknown (…)` khi Windows không đọc được), là báo cáo dài nhất của mỗi loại theo số Windows
+báo (đã gồm byte id, đọc mà không gửi gì), nên khi có nhiều report id thì nó không phải
+`report_bytes` hợp lệ. Lệnh hỏi và cấu trúc phản hồi lấy từ những gì app của hãng gửi và nhận (bắt
+gói USB); `level_byte` là byte phản hồi bằng đúng phần trăm app của hãng hiển thị. Chọn lệnh mà
+app của hãng chỉ gửi để đọc trạng thái, không bao giờ là lệnh ghi cài đặt.
 
 ## 📜 Giấy phép
 

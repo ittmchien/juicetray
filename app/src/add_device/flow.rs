@@ -955,13 +955,17 @@ fn siblings_text(siblings: &[Id]) -> String {
 
 /// The families offered for `id`: a catalogue model only as its own family (the worker queries
 /// it that way once allowed) and never when it needs a capture; ATK serial, RongYuan F7,
-/// Driveall and Generic only exist for catalogue models, so other ids never get them.
+/// Driveall, Xctech and Generic only exist for catalogue models, so other ids never get them.
 pub fn choices(id: Id, families: &[(Family, Option<Duration>)]) -> Vec<(Family, Option<Duration>)> {
     let keep = |family: Family| match known(id.0, id.1) {
         Some(device) => family == device.family && !device.needs_capture,
         None => !matches!(
             family,
-            Family::AtkSerial | Family::RongYuanF7 | Family::Driveall | Family::Generic(_)
+            Family::AtkSerial
+                | Family::RongYuanF7
+                | Family::Driveall
+                | Family::Xctech
+                | Family::Generic(_)
         ),
     };
     families
@@ -1294,6 +1298,7 @@ mod tests {
         assert!(choices(UNKNOWN, &[(Family::AtkSerial, None)]).is_empty());
         assert!(choices(UNKNOWN, &[(Family::RongYuanF7, None)]).is_empty());
         assert!(choices(UNKNOWN, &[(Family::Driveall, None)]).is_empty());
+        assert!(choices(UNKNOWN, &[(Family::Xctech, None)]).is_empty());
         static SPEC: protocol::GenericSpec = protocol::GenericSpec {
             usage_page: 0xFF60,
             usage: 0x0061,

@@ -102,6 +102,8 @@ Battery read correctly on the owner's devices; these are read automatically.
 | 🎧 | ATK N9 Ultra | `373B:1204` | Close ATK HUB first: it holds the receiver's port |
 | 🖱️ | ATK X1 SE | `373B:1216` | |
 | 🖱️ | ATK X1 SE Nearlink | `373B:1299` | The mouse on its USB cable, no receiver |
+| 🖱️ | Delux M500 | `249A:5C2F` | The M500 app shows battery bars only; the level was checked against its code |
+| 🖱️ | Delux M500 | `248A:5D2E` | The mouse on its USB cable: it reports charging (no level) |
 
 ### 🧪 Read once, not yet checked against the vendor app
 
@@ -188,7 +190,7 @@ current step (*Downloading…* or *Updating … via Homebrew…*, then *Installi
 - Bluetooth levels come from what Windows or macOS reports, so no query reaches those devices.
 - A receiver or cable device is queried at most once per 10 s (mice) or 5 min (headsets),
   whatever the auto-refresh setting.
-- While a brand's app is open (MCHOSE HUB, ATK HUB, VGN VHUB), Juicetray pauses that brand's
+- While a brand's app is open (MCHOSE HUB, ATK HUB, VGN VHUB, M500), Juicetray pauses that brand's
   receivers and cables: nothing is opened or sent, and the menu keeps the last level marked
   `paused (… open)`. Reading resumes on the next refresh after the app closes.
 
@@ -226,8 +228,8 @@ A model is one line in its brand's file under `crates/protocol/devices/` (for ex
 `atk.toml`), with `vid` and `pid` as 4 hex digits, `name`, `family`, `kind` (`mouse`, `headset`,
 `keyboard`, `gamepad` or `other`), `connection` (`receiver` or `cable`) and `verified`. `family`
 is one of `Compx`, `Report13`, `Mchose`, `AtkSerial`, `AtkBitmouse`, `VgnKc2`, `RongYuanF7`,
-`Driveall` or `Generic`; a model whose protocol none of them covers can often be a `Generic` row
-(below), otherwise it needs a new family in code first. The build checks every line (unknown
+`Driveall`, `Xctech` or `Generic`; a model whose protocol none of them covers can often be a `Generic`
+row (below), otherwise it needs a new family in code first. The build checks every line (unknown
 family or kind, bad hex, duplicate VID:PID) and fails with the file and entry named. Open the pull
 request against `dev` with `verified = false`; a model becomes `verified = true` only after a
 hardware check (`juicetray probe <VID:PID>` read the same level as the vendor app).
@@ -259,16 +261,19 @@ A `Generic` row carries its own query instead of family code. Its extra fields a
 ```
 
 The example is made up: it sends output report `05 01` (padded to 33 bytes) once per query and
-reads byte 3 of an input report starting `05 81` as the percent. Like ATK serial, RongYuan F7
-and Driveall, a Generic row is used only for its own catalogue VID:PID; a custom device or the
-Add device window never gets it. One fixed frame per query, no retries, 10 s query floor.
+reads byte 3 of an input report starting `05 81` as the percent. Like ATK serial, RongYuan F7,
+Driveall and Xctech, a Generic row is used only for its own catalogue VID:PID; a custom device or
+the Add device window never gets it. One fixed frame per query, no retries, 10 s query floor.
 
 **From a device report to a row.** The Add device report lists every collection of the device
 as `scan` prints it: `HID if 2 FF00:0001 vendor · Usb · in 05:33 out 05:33` gives `usage_page`,
 `usage`, `report` and `report_bytes`, and the descriptor hex below it lets a reviewer check the
-sizes. The request and the reply layout come from what the brand's app sends and receives (a
-USB capture); `level_byte` is the reply byte that equals the percent the brand's app shows.
-Pick a request the brand's app sends only to read status, never a setter.
+sizes. On Windows each line except page 008C ends with `caps in N out N feat N` (or
+`caps unknown (…)` when Windows cannot read them), the longest report of each kind as Windows
+reports it (id byte included, read without sending anything), so with several report ids it is
+not a valid `report_bytes`. The request and the reply layout come from what the brand's app sends
+and receives (a USB capture); `level_byte` is the reply byte that equals the percent the brand's
+app shows. Pick a request the brand's app sends only to read status, never a setter.
 
 ## 📜 License
 

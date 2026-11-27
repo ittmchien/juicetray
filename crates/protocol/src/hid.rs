@@ -1,18 +1,21 @@
 //! HID collection rules: which collections may be opened, and which one a family's query goes to.
 
 use crate::{
-    Family, GenericReport, GenericSpec, ReportKind, ReportSize, bitmouse, driveall, rongyuan,
-    vgn_kc2,
+    Family, GenericReport, GenericSpec, ReportKind, ReportSize, bitmouse, driveall, known,
+    rongyuan, vgn_kc2,
 };
 
 /// First usage page of the vendor-defined range.
 const VENDOR_PAGE_MIN: u16 = 0xFF00;
 /// Firmware-update (DFU) channel on VGN / GTAI 2.4 GHz chips; never opened or picked.
-const FIRMWARE_UPDATE_PAGE: u16 = 0x008C;
+pub const FIRMWARE_UPDATE_PAGE: u16 = 0x008C;
 const VGN_KC2_PAGE: (u16, u16) = (0xFFC1, 0x0001);
 const RONGYUAN_PAGE: (u16, u16) = (0xFFFF, 0x0002);
 /// The Driveall query channel; the dongle's FF70:0071 and system collections are never targets.
 const DRIVEALL_PAGE: (u16, u16) = (0xFF60, 0x0061);
+/// The Xctech query channel: generic-desktop usage 0 (Undefined), never a system mouse/keyboard;
+/// opened only on Xctech catalogue ids.
+const XCTECH_PAGE: (u16, u16) = (0x0001, 0x0000);
 
 const COMPX_REPORT_ID: u8 = 0x08;
 const COMPX_REPORT_LEN: usize = 17;
@@ -50,26 +53,33 @@ fn system_reason(usage_page: u16, usage: u16) -> Option<&'static str> {
     }
 }
 
-/// One verdict per `(path, usage page, usage)` entry: `Ok` only for a vendor collection that is
-/// not a system mouse/keyboard and whose path no mouse/keyboard or firmware-update collection
-/// shares.
-pub fn open_permission(entries: &[(&str, u16, u16)]) -> Vec<Result<(), &'static str>> {
+/// Whether `(usage_page, usage)` is the Xctech channel of an Xctech catalogue id; on any other id
+/// the generic-desktop usage 0 stays closed like every non-vendor collection.
+fn is_xctech_channel((vid, pid): (u16, u16), usage_page: u16, usage: u16) -> bool {
+    (usage_page, usage) == XCTECH_PAGE
+        && known(vid, pid).is_some_and(|device| device.family == Family::Xctech)
+}
+
+/// One verdict per `(path, (vid, pid), usage page, usage)` entry: `Ok` only for a vendor
+/// collection (or an Xctech model's 0001:0000 channel) that is not a system mouse/keyboard and
+/// whose path no mouse/keyboard or firmware-update collection shares.
+pub fn open_permission(entries: &[(&str, (u16, u16), u16, u16)]) -> Vec<Result<(), &'static str>> {
     // macOS lists every usage pair of an interface under one path, so opening one opens all.
     let shared_with = |path: &str, deny: &dyn Fn(u16, u16) -> bool| {
         entries
             .iter()
-            .any(|&(other, page, usage)| other == path && deny(page, usage))
+            .any(|&(other, _, page, usage)| other == path && deny(page, usage))
     };
     entries
         .iter()
-        .map(|&(path, usage_page, usage)| {
+        .map(|&(path, id, usage_page, usage)| {
             if usage_page == FIRMWARE_UPDATE_PAGE {
                 return Err("firmware-update channel");
             }
             if let Some(reason) = system_reason(usage_page, usage) {
                 return Err(reason);
             }
-            if usage_page < VENDOR_PAGE_MIN {
+            if usage_page < VENDOR_PAGE_MIN && !is_xctech_channel(id, usage_page, usage) {
                 return Err("not a vendor collection");
             }
             if shared_with(path, &|page, usage| system_reason(page, usage).is_some()) {
@@ -93,6 +103,7 @@ pub fn pick_target(family: Family, shapes: &[HidShape]) -> Result<usize, PickErr
         Family::VgnKc2 => pick_vgn_kc2(shapes),
         Family::RongYuanF7 => pick_rongyuan(shapes),
         Family::Driveall => pick_driveall(shapes),
+        Family::Xctech => pick_xctech(shapes),
         Family::Generic(spec) => pick_generic(spec, shapes),
         Family::AtkSerial => Err(PickError::NoMatch),
     }
@@ -222,6 +233,14 @@ fn pick_driveall(shapes: &[HidShape]) -> Result<usize, PickError> {
     }))
 }
 
+/// `0001/0000` by page and usage only: the descriptor hidapi rebuilds from preparsed data lists no
+/// reports (`05 01 09 00 a1 01 c0`); the open rule limits it to Xctech catalogue ids.
+fn pick_xctech(shapes: &[HidShape]) -> Result<usize, PickError> {
+    exactly_one(matching(shapes, |shape| {
+        (shape.usage_page, shape.usage) == XCTECH_PAGE
+    }))
+}
+
 /// The row's page:usage on a vendor page with the request's report (id and size as scan prints
 /// them); an output row also needs an input report with the reply's id.
 fn pick_generic(spec: &GenericSpec, shapes: &[HidShape]) -> Result<usize, PickError> {
@@ -270,14 +289,18 @@ mod tests {
     }
 
     const SHARED: &str = "shares its interface with a mouse or keyboard";
+    /// An id outside the catalogue, and the Delux M500 receiver and cable (Xctech rows).
+    const OTHER: (u16, u16) = (0x046D, 0xC52B);
+    const M500: (u16, u16) = (0x249A, 0x5C2F);
+    const M500_CABLE: (u16, u16) = (0x248A, 0x5D2E);
 
     #[test]
     fn open_permission_distinct_paths() {
         let verdicts = open_permission(&[
-            ("A", 0xFF02, 2),
-            ("B", 0x01, 2),
-            ("C", 0x01, 6),
-            ("D", 0x0C, 1),
+            ("A", OTHER, 0xFF02, 2),
+            ("B", OTHER, 0x01, 2),
+            ("C", OTHER, 0x01, 6),
+            ("D", OTHER, 0x0C, 1),
         ]);
         assert_eq!(
             verdicts,
@@ -292,15 +315,46 @@ mod tests {
 
     #[test]
     fn open_permission_shared_path() {
-        let verdicts = open_permission(&[("P", 0xFF00, 1), ("P", 0x01, 6)]);
+        let verdicts = open_permission(&[("P", OTHER, 0xFF00, 1), ("P", OTHER, 0x01, 6)]);
         assert_eq!(verdicts, vec![Err(SHARED), Err("system keyboard")]);
     }
 
     #[test]
     fn open_permission_shared_with_mouse_and_empty() {
-        let verdicts = open_permission(&[("P", 0xFF00, 1), ("P", 0x01, 2), ("Q", 0xFF00, 1)]);
+        let verdicts = open_permission(&[
+            ("P", OTHER, 0xFF00, 1),
+            ("P", OTHER, 0x01, 2),
+            ("Q", OTHER, 0xFF00, 1),
+        ]);
         assert_eq!(verdicts, vec![Err(SHARED), Err("system mouse"), Ok(())]);
         assert!(open_permission(&[]).is_empty());
+    }
+
+    /// The M500 receiver's interfaces: mouse, keyboard + consumer, and its own 0001:0000.
+    #[test]
+    fn open_permission_opens_0001_0000_only_on_xctech_catalogue_ids() {
+        let verdicts = open_permission(&[
+            ("M0", M500, 0x01, 2),
+            ("M1", M500, 0x01, 6),
+            ("M1", M500, 0x0C, 1),
+            ("M2", M500, 0x01, 0),
+            ("W2", M500_CABLE, 0x01, 0),
+            ("L", OTHER, 0x01, 0),
+        ]);
+        assert_eq!(
+            verdicts,
+            vec![
+                Err("system mouse"),
+                Err("system keyboard"),
+                Err("not a vendor collection"),
+                Ok(()),
+                Ok(()),
+                Err("not a vendor collection"),
+            ]
+        );
+        // Behind a path shared with a mouse (macOS), the Xctech channel stays closed.
+        let verdicts = open_permission(&[("P", M500, 0x01, 0), ("P", M500, 0x01, 2)]);
+        assert_eq!(verdicts, vec![Err(SHARED), Err("system mouse")]);
     }
 
     #[test]
@@ -478,7 +532,11 @@ mod tests {
 
     #[test]
     fn open_permission_never_opens_the_firmware_update_channel() {
-        let verdicts = open_permission(&[("A", 0x008C, 1), ("B", 0xFFC1, 1), ("P", 0x008C, 2)]);
+        let verdicts = open_permission(&[
+            ("A", OTHER, 0x008C, 1),
+            ("B", OTHER, 0xFFC1, 1),
+            ("P", OTHER, 0x008C, 2),
+        ]);
         assert_eq!(
             verdicts,
             vec![
@@ -488,7 +546,7 @@ mod tests {
             ]
         );
         // A vendor collection behind the same path (macOS) is refused too.
-        let verdicts = open_permission(&[("P", 0xFFC1, 1), ("P", 0x008C, 1)]);
+        let verdicts = open_permission(&[("P", OTHER, 0xFFC1, 1), ("P", OTHER, 0x008C, 1)]);
         assert_eq!(
             verdicts,
             vec![
@@ -507,6 +565,7 @@ mod tests {
         reports.extend(both(0x13, 20));
         reports.extend(both(0x55, 64));
         reports.extend(both(0, 64));
+        reports.extend(both(0, 32));
         reports.push(report(ReportKind::Output, 0x08, 64));
         reports.push(report(ReportKind::Input, 0x08, 127));
         let dfu = HidShape {
@@ -534,6 +593,7 @@ mod tests {
             Family::VgnKc2,
             Family::RongYuanF7,
             Family::Driveall,
+            Family::Xctech,
             Family::Generic(&crate::generic::tests::OUTPUT),
             Family::Generic(&ON_DFU),
         ] {
@@ -645,6 +705,47 @@ mod tests {
         for family in [Family::Compx, Family::Mchose, Family::VgnKc2] {
             assert_eq!(
                 pick_target(family, &[driveall_shape()]),
+                Err(PickError::NoMatch),
+                "{family:?}"
+            );
+        }
+    }
+
+    /// The M500's MI_02 as Juicetray reads it on Windows: 0001:0000 with no reports listed.
+    fn xctech_shape() -> HidShape {
+        HidShape {
+            interface: Some(2),
+            ..shape(0x0001, 0x0000, Vec::new())
+        }
+    }
+
+    #[test]
+    fn pick_xctech_takes_mi_02_among_the_m500_collections() {
+        let input = |id, bytes| vec![report(ReportKind::Input, id, bytes)];
+        let shapes = [
+            shape(0x0001, 0x0002, input(0, 8)),
+            shape(0x0001, 0x0006, input(1, 8)),
+            shape(0x000C, 0x0001, input(3, 3)),
+            shape(0xFFEF, 0x0000, both(5, 64)),
+            xctech_shape(),
+        ];
+        assert_eq!(pick_target(Family::Xctech, &shapes), Ok(4));
+        // A descriptor that does list the reports picks the same collection.
+        let listed = shape(0x0001, 0x0000, both(0, 32));
+        assert_eq!(pick_target(Family::Xctech, &[listed]), Ok(0));
+        let other_usage = shape(0x0001, 0x0001, input(0, 32));
+        assert_eq!(
+            pick_target(Family::Xctech, &[other_usage]),
+            Err(PickError::NoMatch)
+        );
+        assert_eq!(
+            pick_target(Family::Xctech, &[xctech_shape(), xctech_shape()]),
+            Err(PickError::Ambiguous(vec![0, 1]))
+        );
+        // Other families never take the Xctech collection.
+        for family in [Family::Compx, Family::Driveall, Family::VgnKc2] {
+            assert_eq!(
+                pick_target(family, &[xctech_shape()]),
                 Err(PickError::NoMatch),
                 "{family:?}"
             );
