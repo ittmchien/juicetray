@@ -22,6 +22,11 @@ pub const REFRESH_GAP: Duration = Duration::from_secs(10);
 /// A USB `(VID, PID)`.
 pub type Id = (u16, u16);
 
+/// An id as reports print it: `VID:PID` in upper-case hex.
+pub fn id_text((vid, pid): Id) -> String {
+    format!("{vid:04X}:{pid:04X}")
+}
+
 /// The VID:PID in a device interface path such as `\\?\HID#VID_373B&PID_1216&MI_01#…`, in any
 /// case; `None` for paths without both (Bluetooth paths spell them `VID&…`, so they never match).
 pub fn parse_interface_name(name: &str) -> Option<Id> {
@@ -213,8 +218,8 @@ pub fn offers<'a>(
 }
 
 /// The catalogue name, else a non-blank product string, else `VID:PID`.
-fn offer_name((vid, pid): Id, product: Option<&str>) -> String {
-    known(vid, pid)
+fn offer_name(id: Id, product: Option<&str>) -> String {
+    known(id.0, id.1)
         .map(|device| device.name.to_owned())
         .or_else(|| {
             product
@@ -222,7 +227,7 @@ fn offer_name((vid, pid): Id, product: Option<&str>) -> String {
                 .filter(|text| !text.is_empty())
                 .map(str::to_owned)
         })
-        .unwrap_or_else(|| format!("{vid:04X}:{pid:04X}"))
+        .unwrap_or_else(|| id_text(id))
 }
 
 #[cfg(windows)]

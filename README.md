@@ -121,8 +121,16 @@ while Juicetray runs, never at start-up, and only once per device whatever you a
 detects the device, sends one read-only battery query when you press **Try**, and adds it once
 you confirm the level. If it does not work, press **Send report** to send the details through a
 [Google Form](https://forms.gle/Qp5CeBGEiPg2UtkX6) (no account needed), or **Report on GitHub**
-to [open an issue](https://github.com/ittmchien/juicetray/issues) with them filled in. Only the
-device's name, USB ID and interfaces, the bytes sent and read during the try, the names of running
+to [open an issue](https://github.com/ittmchien/juicetray/issues) with them filled in. From the
+moment such a device is plugged in (or while the Add device window is detecting), Juicetray listens
+to it for 30 s, read-only (nothing is sent), and the report includes what the device sent on its
+own, often its level or link state. Do not type during those 30 s: for a device with a keyboard or
+keypad interface (most receivers have one), reports sent within half a second of a key press on any
+keyboard are dropped (only counted), so typed keys stay out of the report (keys typed into an
+administrator window or on the sign-in screen may not be seen, so do not type there either). A
+report button pressed before the end waits for it (**Stop** ends it early). Nothing is listened to
+while the brand's own app is open. Only the device's name, USB ID and interfaces, the bytes sent and
+read during the try, the reports the device sent by itself during that listen, the names of running
 vendor apps and the USB IDs of other devices of the same brand are sent — nothing personal.
 
 When the plugged-in device is not in the catalogue your version was built with, the popup first
@@ -273,7 +281,10 @@ sizes. On Windows each line except page 008C ends with `caps in N out N feat N` 
 reports it (id byte included, read without sending anything), so with several report ids it is
 not a valid `report_bytes`. The request and the reply layout come from what the brand's app sends
 and receives (a USB capture); `level_byte` is the reply byte that equals the percent the brand's
-app shows. Pick a request the brand's app sends only to read status, never a setter.
+app shows. Pick a request the brand's app sends only to read status, never a setter. The
+`Listen:` lines show the input reports the device sent by itself after plug-in (time, repeat
+count, first 32 bytes): a byte that tracks the level there often gives `level_byte` without a
+capture.
 
 ## 📜 License
 

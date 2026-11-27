@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use door::{Access, Connection, Exchange, HidCollection, SerialEntry, Source};
-use protocol::{FIRMWARE_UPDATE_PAGE, ReportKind, ReportSize, type_query};
+use protocol::{FIRMWARE_UPDATE_PAGE, HidShape, ReportKind, ReportSize, type_query};
 use ui_model::{DeviceView, EMPTY_MENU_TEXT, menu_line};
 
 use crate::device::{Device, connection_name, lookup};
@@ -160,7 +160,6 @@ pub(crate) fn mask_serial(port_name: &str, serial: Option<&str>) -> String {
 /// descriptor (only when it was read) and its path.
 fn hid_lines(collection: &HidCollection, caps_of: CapsOf) -> Vec<String> {
     let shape = &collection.shape;
-    let interface = shape.interface.map_or("?".to_owned(), |n| n.to_string());
     let usage = usage_name(shape.usage_page, shape.usage);
     let (status, descriptor) = match &collection.access {
         Access::Opened {
@@ -174,10 +173,7 @@ fn hid_lines(collection: &HidCollection, caps_of: CapsOf) -> Vec<String> {
         Access::Failed(text) => (format!("open failed: {text}"), None),
     };
 
-    let mut head = format!(
-        "  HID if {interface} {:04X}:{:04X}",
-        shape.usage_page, shape.usage
-    );
+    let mut head = format!("  HID {}", interface_label(shape));
     if !usage.is_empty() {
         head.push(' ');
         head.push_str(usage);
@@ -194,6 +190,15 @@ fn hid_lines(collection: &HidCollection, caps_of: CapsOf) -> Vec<String> {
     }
     lines.push(format!("    path {}", redact_path(&collection.path)));
     lines
+}
+
+/// A collection's interface and usage: `if 2 FF00:0001`, `if ? …` without an interface number.
+pub(crate) fn interface_label(shape: &HidShape) -> String {
+    let interface = shape.interface.map_or("?".to_owned(), |n| n.to_string());
+    format!(
+        "if {interface} {:04X}:{:04X}",
+        shape.usage_page, shape.usage
+    )
 }
 
 /// Report sizes of an opened collection, or the reason there are none.
@@ -225,11 +230,16 @@ pub(crate) fn bytes_line(label: &str, bytes: &[u8]) -> String {
 
 /// `bytes_line` cut to the first `max` bytes, labelled `(<max> of <n> B)` when cut.
 pub(crate) fn bytes_line_capped(label: &str, bytes: &[u8], max: usize) -> String {
-    if bytes.len() <= max {
-        return bytes_line(label, bytes);
+    head_line(label, &bytes[..bytes.len().min(max)], bytes.len())
+}
+
+/// `bytes_line` of `head`, labelled `(<head> of <total> B)` when `total` is longer, for reports
+/// whose first bytes are all that was kept.
+pub(crate) fn head_line(label: &str, head: &[u8], total: usize) -> String {
+    if head.len() >= total {
+        return bytes_line(label, head);
     }
-    let total = bytes.len();
-    format!("{label} ({max} of {total} B):{}", hex(&bytes[..max]))
+    format!("{label} ({} of {total} B):{}", head.len(), hex(head))
 }
 
 /// Each byte as ` <2 lower-case hex digits>`.
@@ -344,7 +354,6 @@ fn usage_name(page: u16, usage: u16) -> &'static str {
 mod tests {
     use std::time::Duration;
 
-    use protocol::HidShape;
     use ui_model::{DeviceKind, Level, Path};
 
     use super::*;
@@ -541,6 +550,21 @@ mod tests {
         assert!(!report.contains("ABC123"), "{report}");
         assert!(report.contains("/dev/cu.usbmodem<serial>"));
         assert!(report.contains("serial number redacted"));
+    }
+
+    #[test]
+    fn interface_label_names_interface_and_usage() {
+        let mut shape = HidShape {
+            interface: Some(2),
+            usage_page: 0xFF00,
+            usage: 0x0001,
+            reports: Vec::new(),
+        };
+        assert_eq!(interface_label(&shape), "if 2 FF00:0001");
+        shape.interface = None;
+        shape.usage_page = 0xFF02;
+        shape.usage = 0x0002;
+        assert_eq!(interface_label(&shape), "if ? FF02:0002");
     }
 
     #[test]

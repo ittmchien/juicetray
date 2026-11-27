@@ -1,5 +1,5 @@
-//! Read-only listening: input reports or serial bytes for a fixed time. This file never calls
-//! `Transport::write`, so listening cannot send anything to the device.
+//! Read-only listening: input reports or serial bytes for a fixed time, or one read at a time.
+//! This file never calls `Transport::write`, so listening cannot send anything to the device.
 
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,13 @@ impl Target {
             }
         }
         Ok(())
+    }
+
+    /// One read of at most `timeout`; `None` when nothing arrived. Never writes.
+    pub fn read_once(&mut self, timeout: Duration) -> anyhow::Result<Option<Vec<u8>>> {
+        let mut buf = [0u8; HID_READ_LEN];
+        let len = self.transport.read(&mut buf, timeout)?;
+        Ok((len > 0).then(|| buf[..len].to_vec()))
     }
 }
 
@@ -84,6 +91,18 @@ mod tests {
             assert_eq!(payloads, [&[1u8, 2, 3][..], &[4][..]]);
             assert!(seen[0].0 <= seen[1].0);
         }
+    }
+
+    // A single read returns the next report, then `None` once nothing is buffered; never writes.
+    #[test]
+    fn read_once_reads_without_writing() {
+        let mut target = target(Link::Hid, vec![vec![0xc0, 1, 0x52]]);
+        let timeout = Duration::from_millis(5);
+        assert_eq!(
+            target.read_once(timeout).expect("read"),
+            Some(vec![0xc0, 1, 0x52])
+        );
+        assert_eq!(target.read_once(timeout).expect("read"), None);
     }
 
     #[test]

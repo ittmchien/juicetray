@@ -22,6 +22,8 @@ use ui_model::{
 #[cfg(windows)]
 use crate::add_device;
 use crate::alerts::{AlertState, notify_low_battery, notify_update_available};
+#[cfg(windows)]
+use crate::capture;
 use crate::config::{Config, parse_hide_offline_minutes, parse_low_percent};
 #[cfg(any(target_os = "macos", windows))]
 use crate::connections;
@@ -509,6 +511,14 @@ impl App {
             // New-device events change nothing on screen, so no `apply`.
             #[cfg(windows)]
             UserEvent::Plugged(id) => {
+                // A popup candidate is heard from its first arrival; the capture opens nothing
+                // until the device lists offer it.
+                let settings = Settings::from_config(&self.config);
+                if plug::plan(id, &settings) == Plan::Offer {
+                    capture::start(id, capture::Origin::Popup(settings));
+                } else {
+                    capture::nudge(id);
+                }
                 let now = Instant::now();
                 self.arrivals.arrived(id, now);
                 self.settle_arrivals(now);
