@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use door::{Access, Connection, Exchange, HidCollection, SerialEntry, Source};
-use protocol::{ReportKind, ReportSize, type_query};
+use protocol::{FIRMWARE_UPDATE_PAGE, HidShape, ReportKind, ReportSize, type_query};
 use ui_model::{DeviceView, EMPTY_MENU_TEXT, menu_line};
 
 use crate::device::{Device, connection_name, lookup};
@@ -21,6 +21,10 @@ pub fn scan_report(devices: &[DeviceView], now: SystemTime) -> String {
 /// The HID collections and serial ports sharing one VID:PID.
 type Group<'a> = (Vec<&'a HidCollection>, Vec<&'a SerialEntry>);
 
+/// Reads the report-length text of the collection at a path (`hid_caps::line`); injected so the
+/// formatting never touches a device.
+pub type CapsOf = fn(&str) -> Option<String>;
+
 /// Plain-text USB section: HID collections and serial ports grouped by VID:PID, labelled from
 /// the catalogue, then `custom` devices. Serial numbers and device instance ids never appear.
 pub fn usb_report(
@@ -28,6 +32,7 @@ pub fn usb_report(
     serial: &[SerialEntry],
     errors: &[String],
     custom: &[Device],
+    caps_of: CapsOf,
 ) -> String {
     let mut lines = vec!["USB devices (HID collections and serial ports)".to_owned()];
     if hid.is_empty() && serial.is_empty() {
@@ -50,7 +55,7 @@ pub fn usb_report(
                 .push(entry);
         }
         for (&(vid, pid), (collections, ports)) in &groups {
-            lines.extend(group_lines(vid, pid, collections, ports, custom));
+            lines.extend(group_lines(vid, pid, collections, ports, custom, caps_of));
         }
     }
     lines.extend(errors.iter().map(|text| format!("error: {text}")));
@@ -65,6 +70,7 @@ pub(crate) fn device_lines(
     pid: u16,
     hid: &[HidCollection],
     serial: &[SerialEntry],
+    caps_of: CapsOf,
 ) -> Vec<String> {
     let collections: Vec<&HidCollection> = hid
         .iter()
@@ -75,12 +81,12 @@ pub(crate) fn device_lines(
         .filter(|entry| (entry.vid, entry.pid) == (vid, pid))
         .collect();
     let mut lines = vec![REPORTS_LEGEND.to_owned()];
-    lines.extend(group_lines(vid, pid, &collections, &ports, &[]));
+    lines.extend(group_lines(vid, pid, &collections, &ports, &[], caps_of));
     lines
 }
 
-/// How `reports_text` writes report sizes.
-const REPORTS_LEGEND: &str = "Reports: in/out/feat <report id>:<bytes incl. id byte>";
+/// How `reports_text` writes report sizes, and the `caps` figures that end a collection line.
+const REPORTS_LEGEND: &str = "Reports: in/out/feat <report id>:<bytes incl. id byte>; caps (Windows) = longest report per kind";
 
 /// Header, identity line and one entry per collection / port of one VID:PID.
 fn group_lines(
@@ -89,6 +95,7 @@ fn group_lines(
     collections: &[&HidCollection],
     ports: &[&SerialEntry],
     custom: &[Device],
+    caps_of: CapsOf,
 ) -> Vec<String> {
     let label = lookup(vid, pid, custom).map_or("unknown device".to_owned(), |device| {
         let origin = if device.custom { " · custom" } else { "" };
@@ -105,7 +112,7 @@ fn group_lines(
         lines.push(format!("  {}", identity.join(" · ")));
     }
     for collection in collections {
-        lines.extend(hid_lines(collection));
+        lines.extend(hid_lines(collection, caps_of));
     }
     lines.extend(ports.iter().map(|entry| serial_line(entry)));
     lines
@@ -149,10 +156,10 @@ pub(crate) fn mask_serial(port_name: &str, serial: Option<&str>) -> String {
     }
 }
 
-/// One collection line, its descriptor (only when it was read) and its path.
-fn hid_lines(collection: &HidCollection) -> Vec<String> {
+/// One collection line (ending in the OS-read caps, never for the firmware-update page), its
+/// descriptor (only when it was read) and its path.
+fn hid_lines(collection: &HidCollection, caps_of: CapsOf) -> Vec<String> {
     let shape = &collection.shape;
-    let interface = shape.interface.map_or("?".to_owned(), |n| n.to_string());
     let usage = usage_name(shape.usage_page, shape.usage);
     let (status, descriptor) = match &collection.access {
         Access::Opened {
@@ -166,20 +173,32 @@ fn hid_lines(collection: &HidCollection) -> Vec<String> {
         Access::Failed(text) => (format!("open failed: {text}"), None),
     };
 
-    let mut head = format!(
-        "  HID if {interface} {:04X}:{:04X}",
-        shape.usage_page, shape.usage
-    );
+    let mut head = format!("  HID {}", interface_label(shape));
     if !usage.is_empty() {
         head.push(' ');
         head.push_str(usage);
     }
-    let mut lines = vec![format!("{head} · {} · {status}", collection.bus)];
+    head.push_str(&format!(" · {} · {status}", collection.bus));
+    if shape.usage_page != FIRMWARE_UPDATE_PAGE
+        && let Some(caps) = caps_of(&collection.path)
+    {
+        head.push_str(&format!(" · {caps}"));
+    }
+    let mut lines = vec![head];
     if let Some(bytes) = descriptor {
         lines.push(format!("    {}", bytes_line("descriptor", bytes)));
     }
     lines.push(format!("    path {}", redact_path(&collection.path)));
     lines
+}
+
+/// A collection's interface and usage: `if 2 FF00:0001`, `if ? …` without an interface number.
+pub(crate) fn interface_label(shape: &HidShape) -> String {
+    let interface = shape.interface.map_or("?".to_owned(), |n| n.to_string());
+    format!(
+        "if {interface} {:04X}:{:04X}",
+        shape.usage_page, shape.usage
+    )
 }
 
 /// Report sizes of an opened collection, or the reason there are none.
@@ -211,11 +230,16 @@ pub(crate) fn bytes_line(label: &str, bytes: &[u8]) -> String {
 
 /// `bytes_line` cut to the first `max` bytes, labelled `(<max> of <n> B)` when cut.
 pub(crate) fn bytes_line_capped(label: &str, bytes: &[u8], max: usize) -> String {
-    if bytes.len() <= max {
-        return bytes_line(label, bytes);
+    head_line(label, &bytes[..bytes.len().min(max)], bytes.len())
+}
+
+/// `bytes_line` of `head`, labelled `(<head> of <total> B)` when `total` is longer, for reports
+/// whose first bytes are all that was kept.
+pub(crate) fn head_line(label: &str, head: &[u8], total: usize) -> String {
+    if head.len() >= total {
+        return bytes_line(label, head);
     }
-    let total = bytes.len();
-    format!("{label} ({max} of {total} B):{}", hex(&bytes[..max]))
+    format!("{label} ({} of {total} B):{}", head.len(), hex(head))
 }
 
 /// Each byte as ` <2 lower-case hex digits>`.
@@ -330,7 +354,6 @@ fn usage_name(page: u16, usage: u16) -> &'static str {
 mod tests {
     use std::time::Duration;
 
-    use protocol::HidShape;
     use ui_model::{DeviceKind, Level, Path};
 
     use super::*;
@@ -454,7 +477,7 @@ mod tests {
         let hids = [mouse, vendor, compx_collection()];
         let ports = [port("COM3", 0x373B, 0x1204, None)];
 
-        let report = usb_report(&hids, &ports, &[], &[]);
+        let report = usb_report(&hids, &ports, &[], &[], |_| None);
         let lines: Vec<&str> = report.lines().collect();
 
         let header = lines
@@ -498,7 +521,7 @@ mod tests {
             hid(0x046D, 0xC52B, 0xFF00, 0x0001, Access::Skipped("x")),
         ];
 
-        let report = usb_report(&hids, &[], &[], &[]);
+        let report = usb_report(&hids, &[], &[], &[], |_| None);
 
         assert!(report.contains("3837:6011  MCHOSE V9 Pro 2 · MCHOSE"));
         assert!(report.contains("046D:C52B  unknown device"));
@@ -506,7 +529,7 @@ mod tests {
         // A custom device labels an id outside the catalogue; the catalogue still wins.
         let mine = crate::device::tests::custom(0x046D, 0xC52B, protocol::Family::Compx);
         let shadow = crate::device::tests::custom(0x3837, 0x6011, protocol::Family::Compx);
-        let report = usb_report(&hids, &[], &[], &[mine, shadow]);
+        let report = usb_report(&hids, &[], &[], &[mine, shadow], |_| None);
         assert!(report.contains("046D:C52B  My mouse · Compx report 8 · custom"));
         assert!(report.contains("3837:6011  MCHOSE V9 Pro 2 · MCHOSE\n"));
     }
@@ -522,11 +545,26 @@ mod tests {
             Some("ABC123"),
         )];
 
-        let report = usb_report(&[collection], &ports, &[], &[]);
+        let report = usb_report(&[collection], &ports, &[], &[], |_| None);
 
         assert!(!report.contains("ABC123"), "{report}");
         assert!(report.contains("/dev/cu.usbmodem<serial>"));
         assert!(report.contains("serial number redacted"));
+    }
+
+    #[test]
+    fn interface_label_names_interface_and_usage() {
+        let mut shape = HidShape {
+            interface: Some(2),
+            usage_page: 0xFF00,
+            usage: 0x0001,
+            reports: Vec::new(),
+        };
+        assert_eq!(interface_label(&shape), "if 2 FF00:0001");
+        shape.interface = None;
+        shape.usage_page = 0xFF02;
+        shape.usage = 0x0002;
+        assert_eq!(interface_label(&shape), "if ? FF02:0002");
     }
 
     #[test]
@@ -569,7 +607,7 @@ mod tests {
 
     #[test]
     fn usb_report_shows_reports_and_descriptor() {
-        let report = usb_report(&[compx_collection()], &[], &[], &[]);
+        let report = usb_report(&[compx_collection()], &[], &[], &[], |_| None);
 
         assert!(report.contains("HID if 1 FF02:0002 vendor · Usb · in 08:17 out 08:17"));
         assert!(report.lines().any(|line| line.trim()
@@ -616,7 +654,7 @@ mod tests {
             },
         );
 
-        let report = usb_report(&[mouse, failed, bad, empty], &[], &[], &[]);
+        let report = usb_report(&[mouse, failed, bad, empty], &[], &[], &[], |_| None);
 
         assert!(report.contains("HID if ? 0001:0002 mouse · Usb · not opened (system mouse)"));
         assert!(report.contains("HID if 1 FF00:0001 vendor · Usb · open failed: denied"));
@@ -650,7 +688,7 @@ mod tests {
         ];
         let ports = [port("COM3", 0x373B, 0x1204, None)];
 
-        let lines = device_lines(0x3554, 0xFA09, &hids, &ports).join("\n");
+        let lines = device_lines(0x3554, 0xFA09, &hids, &ports, |_| None).join("\n");
 
         assert!(lines.starts_with("Reports: in/out/feat"), "{lines}");
         assert!(lines.contains("3554:FA09  AULA F75"), "{lines}");
@@ -674,6 +712,7 @@ mod tests {
             &[],
             &["serial ports could not be listed: boom".into()],
             &[],
+            |_| None,
         );
 
         assert!(report.contains("No USB HID devices or serial ports found"));
@@ -682,6 +721,40 @@ mod tests {
                 .lines()
                 .any(|line| line == "error: serial ports could not be listed: boom")
         );
+    }
+
+    #[test]
+    fn hid_lines_end_the_head_with_caps_before_descriptor_and_path() {
+        let lines = hid_lines(&compx_collection(), |path| {
+            assert_eq!(path, WIN_PATH);
+            Some("caps in 33 out 33 feat 0".to_owned())
+        });
+
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(
+            lines[0],
+            "  HID if 1 FF02:0002 vendor · Usb · in 08:17 out 08:17 · caps in 33 out 33 feat 0"
+        );
+        assert!(
+            lines[1].trim_start().starts_with("descriptor ("),
+            "{lines:?}"
+        );
+        assert!(lines[2].trim_start().starts_with("path "), "{lines:?}");
+    }
+
+    #[test]
+    fn hid_lines_never_read_caps_of_the_firmware_update_page() {
+        let dfu = hid(
+            0x3554,
+            0xFA09,
+            FIRMWARE_UPDATE_PAGE,
+            0x0001,
+            Access::Skipped("firmware-update channel"),
+        );
+
+        let lines = hid_lines(&dfu, |_| panic!("caps read for the firmware-update page"));
+
+        assert!(!lines[0].contains("caps"), "{lines:?}");
     }
 
     #[test]

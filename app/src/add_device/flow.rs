@@ -7,11 +7,12 @@ use std::time::{Duration, Instant};
 use door::{Connection, Source};
 use protocol::{Family, HidShape, Reading, is_recovery, known};
 
+use crate::capture::{Listen, report_lines};
 use crate::config::CustomEntry;
 use crate::device::{Device, connection_name, lookup};
-use crate::plug::{Arrivals, Id};
+use crate::plug::{Arrivals, Id, id_text};
 use crate::report::{self, Identity};
-use crate::scan::reports_text;
+use crate::scan::{interface_label, reports_text};
 use crate::vendor_apps::shown_name;
 
 /// Detection gives up after this long without a new device.
@@ -31,6 +32,10 @@ const WARNING: &str = "This device is not officially supported yet. Reading its 
                        work. If it does not, please report an issue at \
                        https://github.com/ittmchien/juicetray/issues";
 const DETECTING: &str = "Detecting… Plug the device in, or unplug it and plug it back in.";
+/// What to do during the plug-in listen; it gives way to `BLUETOOTH_HINT`, so the message box
+/// never holds more than the Bluetooth text.
+const LISTEN_HINT: &str = "Then switch it on and move it for 30 s, without typing: Juicetray \
+                           listens, read-only, for the report.";
 const BLUETOOTH_HINT: &str = "A Bluetooth device connected. Juicetray reads Bluetooth batteries \
                               on its own; this window adds USB receivers and cables only.";
 const RECOVERY: &str = "The device is in recovery or update mode; Juicetray never talks to it.";
@@ -138,6 +143,10 @@ pub enum Effect {
     /// Copy the shown details to the clipboard.
     Copy,
     OpenUrl(String),
+    /// Start (or nudge) the plug-in listen of the id.
+    Listen(Id),
+    /// [Stop]: end the listen of the id with what it has.
+    StopListen(Id),
 }
 
 /// The fields the window reads when the owner presses the main button.
@@ -169,7 +178,17 @@ pub enum Event {
     Tried(Tried),
     /// The UI thread's answer to `Effect::Add`: the config was written, or why not.
     Saved(Result<(), String>),
+    /// The shown id's plug-in listen as it stands, read by the window before each event.
+    Listen(Option<Listen>),
     Tick,
+}
+
+/// The report button that was pressed while the listen ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Press {
+    Copy,
+    Send,
+    GitHub,
 }
 
 /// The custom-device fields: the connection choices and the name to start from.
@@ -240,6 +259,13 @@ enum Step {
     SaveFailed(Id, String),
     Unplugged(Id),
     Unsupported(Id),
+    /// A report button was pressed while the listen ran: the report waits for its end.
+    /// [Stop] sits where the pressed button was, so it waits `ADD_GUARD` from `since`.
+    Waiting {
+        id: Id,
+        press: Press,
+        since: Instant,
+    },
 }
 
 /// What the report says about the current device.
@@ -251,6 +277,12 @@ struct Facts {
     /// The worker's trace of the try, printed under the `Tried:` line.
     trace: Vec<String>,
     reason: String,
+    /// The shown id's plug-in listen.
+    listen: Option<Listen>,
+    /// When [Try] sent its query, so the report marks it inside the listen.
+    tried_at: Option<Instant>,
+    /// When a wait for the listen ended; presses right after it do nothing.
+    waited: Option<Instant>,
 }
 
 pub struct Flow {
@@ -292,20 +324,14 @@ impl Flow {
                 self.removed(id);
                 None
             }
-            Event::Arrived(id) => {
-                if let Step::Detecting { arrivals, .. } = &mut self.step
-                    && !is_recovery(id.0, id.1)
-                {
-                    arrivals.arrived(id, now);
-                }
-                None
-            }
+            Event::Arrived(id) => self.arrived(id, now),
             Event::BluetoothArrived => {
                 if let Step::Detecting { bluetooth, .. } = &mut self.step {
                     *bluetooth = true;
                 }
                 None
             }
+            Event::Listen(listen) => self.listen_changed(listen, now),
             Event::Tick => self.tick(now),
             Event::Inspected(inspection) => self.inspected(inspection, now),
             Event::Tried(tried) => {
@@ -334,7 +360,20 @@ impl Flow {
             }
             Event::Primary(input) => self.primary(input, now),
             Event::Alt => self.alt(now),
-            Event::Extra => self.extra(),
+            Event::Extra => self.extra(now),
+        }
+    }
+
+    /// The id whose plug-in listen the window shows: the device being looked at or reported.
+    pub fn listen_id(&self) -> Option<Id> {
+        match self.step {
+            Step::Inspecting { id, .. }
+            | Step::Choose { id, .. }
+            | Step::Trying { id, .. }
+            | Step::Found { id, .. }
+            | Step::Unsupported(id)
+            | Step::Waiting { id, .. } => Some(id),
+            _ => None,
         }
     }
 
@@ -349,7 +388,7 @@ impl Flow {
     /// When the window must send `Event::Tick` next; `None` while only the owner acts.
     pub fn next_tick(&self, now: Instant) -> Option<Duration> {
         let until = |at: Instant| at.saturating_duration_since(now);
-        match &self.step {
+        let tick = match &self.step {
             Step::Detecting {
                 since, arrivals, ..
             } => Some(until(arrivals.quiet_at().unwrap_or(*since + DETECT_LIMIT))),
@@ -357,6 +396,7 @@ impl Flow {
                 again_at: Some(at), ..
             } => Some(until(*at)),
             Step::Inspecting { .. } | Step::Trying { .. } | Step::Saving(_) => Some(REPLY_POLL),
+            Step::Waiting { .. } => Some(SECOND),
             Step::Choose {
                 choices, picked, ..
             } => choices[*picked]
@@ -364,7 +404,12 @@ impl Flow {
                 .filter(|ready| *ready > now)
                 .map(|ready| until(ready).min(SECOND)),
             _ => None,
+        };
+        // A running listen refreshes the shown details (and the wait) every second.
+        if self.listen_id().is_some() && self.listen_left(now).is_some() {
+            return Some(tick.map_or(SECOND, |tick| tick.min(SECOND)));
         }
+        tick
     }
 
     pub fn view(&self, now: Instant) -> View {
@@ -386,11 +431,12 @@ impl Flow {
                 view.close = "Cancel";
             }
             Step::Detecting { bluetooth, .. } => {
-                view.text = DETECTING.to_owned();
-                if *bluetooth {
-                    view.text.push_str("\n\n");
-                    view.text.push_str(BLUETOOTH_HINT);
-                }
+                let hint = if *bluetooth {
+                    BLUETOOTH_HINT
+                } else {
+                    LISTEN_HINT
+                };
+                view.text = format!("{DETECTING}\n\n{hint}");
                 view.close = "Cancel";
             }
             Step::TimedOut => {
@@ -481,10 +527,22 @@ impl Flow {
                     self.facts.reason
                 );
                 // Two report channels: the account-free form first, then a GitHub issue.
-                view.details = Some(self.details(*id));
+                view.details = Some(self.details(*id, now));
                 view.primary = Some("Copy".to_owned());
                 view.alt = Some("Send report");
                 view.extra = Some("Report on GitHub");
+            }
+            // A lone [Stop]: it lands where [Report on GitHub] was, so it waits `ADD_GUARD`.
+            Step::Waiting { id, .. } => {
+                let left = self.listen_left(now).unwrap_or_default();
+                // Whole seconds, rounded up, so it never shows 0 while waiting.
+                let seconds = left.as_millis().div_ceil(1000).max(1);
+                view.text = format!(
+                    "Listening to the device, read-only: {seconds} s left. The report waits for \
+                     it.\n\nKeep the device on and move it, or press Stop to finish now."
+                );
+                view.details = Some(self.details(*id, now));
+                view.primary = Some("Stop".to_owned());
             }
         }
         view
@@ -547,6 +605,81 @@ impl Flow {
             again_at: None,
         };
         Some(Effect::Inspect(id))
+    }
+
+    /// An arrival: recorded while detecting (an unknown id starts its listen at once); a re-plug
+    /// of the shown device restarts its listen, or nudges the one still running.
+    fn arrived(&mut self, id: Id, now: Instant) -> Option<Effect> {
+        if is_recovery(id.0, id.1) {
+            return None;
+        }
+        if let Step::Detecting { arrivals, .. } = &mut self.step {
+            arrivals.arrived(id, now);
+            return (!self.is_supported(id)).then_some(Effect::Listen(id));
+        }
+        let replug = self.listen_id() == Some(id)
+            || matches!(self.step, Step::Unplugged(gone) if gone == id);
+        replug.then_some(Effect::Listen(id))
+    }
+
+    /// The shown id's listen as it stands; a wait for it ends once it no longer runs, and the
+    /// pressed button's report goes out then.
+    fn listen_changed(&mut self, listen: Option<Listen>, now: Instant) -> Option<Effect> {
+        // An entry the store evicted keeps its last snapshot; `begin` clears it for a new id.
+        if listen.is_some() {
+            self.facts.listen = listen;
+        }
+        let Step::Waiting { id, press, .. } = self.step else {
+            return None;
+        };
+        if self.listen_left(now).is_some() {
+            return None;
+        }
+        self.facts.waited = Some(now);
+        self.step = Step::Unsupported(id);
+        Some(self.report_effect(id, press, now))
+    }
+
+    /// Time left of the shown id's listen; `None` once it no longer runs.
+    fn listen_left(&self, now: Instant) -> Option<Duration> {
+        self.facts
+            .listen
+            .as_ref()
+            .and_then(|listen| listen.left(now))
+    }
+
+    /// A report button on an unsupported device: waits while the listen runs, else goes now.
+    fn report(&mut self, id: Id, press: Press, now: Instant) -> Option<Effect> {
+        // The press that met the wait's end, or a repeat on the spot [Stop] had, does nothing.
+        if self.facts.waited.is_some_and(|at| now < at + ADD_GUARD) {
+            return None;
+        }
+        if self.listen_left(now).is_some() {
+            self.step = Step::Waiting {
+                id,
+                press,
+                since: now,
+            };
+            return None;
+        }
+        Some(self.report_effect(id, press, now))
+    }
+
+    /// What a report button does: copy the details, the account-free form, or a GitHub issue.
+    fn report_effect(&self, id: Id, press: Press, now: Instant) -> Effect {
+        match press {
+            Press::Copy => Effect::Copy,
+            // The redacted details fill the request form; its first line names the device.
+            Press::Send => Effect::OpenUrl(report::report_url(&self.details(id, now))),
+            Press::GitHub => {
+                // The title carries the USB product string, so it is redacted like the body.
+                let title = report::redact(
+                    &format!("Device report: {}", self.labelled(id)),
+                    &self.identity,
+                );
+                Effect::OpenUrl(report::issue_url(&title, &self.details(id, now)))
+            }
+        }
     }
 
     fn detect(&mut self, now: Instant) {
@@ -746,6 +879,8 @@ impl Flow {
                 }
                 let id = *id;
                 self.step = Step::Trying { id, family };
+                // The report marks the try inside the plug-in listen.
+                self.facts.tried_at = Some(now);
                 Some(Effect::TryAs(id, family))
             }
             // A press right after the reading is the [Try] press repeating, not a confirmation.
@@ -757,7 +892,13 @@ impl Flow {
                 Some(Effect::Add(request))
             }
             Step::Unplugged(id) => self.begin(*id),
-            Step::Unsupported(_) => Some(Effect::Copy),
+            Step::Unsupported(id) => {
+                let id = *id;
+                self.report(id, Press::Copy, now)
+            }
+            // [Stop] sits where the pressed report button was: a repeated press must not end it.
+            Step::Waiting { since, .. } if now < *since + ADD_GUARD => None,
+            Step::Waiting { id, .. } => Some(Effect::StopListen(*id)),
             _ => None,
         }
     }
@@ -777,27 +918,18 @@ impl Flow {
                 );
                 None
             }
-            // The redacted details fill the request form; its first line names the device.
-            Step::Unsupported(id) => Some(Effect::OpenUrl(report::report_url(&self.details(id)))),
+            Step::Unsupported(id) => self.report(id, Press::Send, now),
             _ => None,
         }
     }
 
     /// [Report on GitHub]: a new-issue page with the redacted details; other steps show no
     /// third button, so the event does nothing there.
-    fn extra(&self) -> Option<Effect> {
+    fn extra(&mut self, now: Instant) -> Option<Effect> {
         let Step::Unsupported(id) = self.step else {
             return None;
         };
-        // The title carries the USB product string, so it is redacted like the body.
-        let title = report::redact(
-            &format!("Device report: {}", self.labelled(id)),
-            &self.identity,
-        );
-        Some(Effect::OpenUrl(report::issue_url(
-            &title,
-            &self.details(id),
-        )))
+        self.report(id, Press::GitHub, now)
     }
 
     fn unsupported(&mut self, id: Id, reason: String) {
@@ -837,8 +969,9 @@ impl Flow {
         }
     }
 
-    /// The report text, redacted: what the device is, what matched, what the try gave.
-    fn details(&self, id: Id) -> String {
+    /// The report text, redacted: what the device is, what matched, what the try gave, what the
+    /// device sent on its own after plug-in.
+    fn details(&self, id: Id, now: Instant) -> String {
         let (vid, pid) = id;
         // The environment leads, so a cut issue URL loses interface lines, not the app version.
         let mut lines = vec![
@@ -875,13 +1008,14 @@ impl Flow {
         lines.extend(self.facts.trace.iter().cloned());
         lines.push(format!("Result: {}", self.facts.reason));
         // The scan listing carries every fact a catalogue row needs; bare shapes are the fallback.
-        // Apps and same-brand ids come first, since a long issue URL loses the last lines.
+        // Apps, same-brand ids and the listen come first, since a long issue URL loses the end.
         if let Some(found) = interfaces {
             lines.push(format!("Vendor apps: {}", apps_text(&found.vendor_apps)));
             lines.push(format!(
                 "Same vendor plugged in: {}",
                 siblings_text(&found.siblings)
             ));
+            lines.extend(self.listen_lines(id, now));
             lines.push("Interfaces:".to_owned());
             if found.scan_lines.is_empty() {
                 lines.extend(found.shapes.iter().map(shape_line));
@@ -891,8 +1025,18 @@ impl Flow {
             } else {
                 lines.extend(found.scan_lines.iter().cloned());
             }
+        } else {
+            lines.extend(self.listen_lines(id, now));
         }
         report::redact(&lines.join("\n"), &self.identity)
+    }
+
+    /// The report's `Listen:` lines; a recovery id is never listened to.
+    fn listen_lines(&self, (vid, pid): Id, now: Instant) -> Vec<String> {
+        if is_recovery(vid, pid) {
+            return vec!["Listen: not run (recovery mode)".to_owned()];
+        }
+        report_lines(self.facts.listen.as_ref(), now, self.facts.tried_at)
     }
 }
 
@@ -955,13 +1099,17 @@ fn siblings_text(siblings: &[Id]) -> String {
 
 /// The families offered for `id`: a catalogue model only as its own family (the worker queries
 /// it that way once allowed) and never when it needs a capture; ATK serial, RongYuan F7,
-/// Driveall and Generic only exist for catalogue models, so other ids never get them.
+/// Driveall, Xctech and Generic only exist for catalogue models, so other ids never get them.
 pub fn choices(id: Id, families: &[(Family, Option<Duration>)]) -> Vec<(Family, Option<Duration>)> {
     let keep = |family: Family| match known(id.0, id.1) {
         Some(device) => family == device.family && !device.needs_capture,
         None => !matches!(
             family,
-            Family::AtkSerial | Family::RongYuanF7 | Family::Driveall | Family::Generic(_)
+            Family::AtkSerial
+                | Family::RongYuanF7
+                | Family::Driveall
+                | Family::Xctech
+                | Family::Generic(_)
         ),
     };
     families
@@ -1006,22 +1154,14 @@ fn ready_times(
         .collect()
 }
 
-fn id_text((vid, pid): Id) -> String {
-    format!("{vid:04X}:{pid:04X}")
-}
-
 /// One interface line of the report: interface, usage page:usage and report sizes.
 fn shape_line(shape: &HidShape) -> String {
-    let interface = shape.interface.map_or("?".to_owned(), |n| n.to_string());
     let reports = if shape.reports.is_empty() {
         "not read".to_owned()
     } else {
         reports_text(&shape.reports, None)
     };
-    format!(
-        "  if {interface} {:04X}:{:04X} {reports}",
-        shape.usage_page, shape.usage
-    )
+    format!("  {} {reports}", interface_label(shape))
 }
 
 #[cfg(test)]
@@ -1029,6 +1169,8 @@ mod tests {
     use protocol::{ReportKind, ReportSize};
 
     use super::*;
+    use crate::capture::GRACE;
+    use crate::capture::tests::{done, listening, long_listen};
     use crate::device::tests::custom;
 
     /// MCHOSE V9 Pro 2, a verified catalogue row.
@@ -1294,6 +1436,7 @@ mod tests {
         assert!(choices(UNKNOWN, &[(Family::AtkSerial, None)]).is_empty());
         assert!(choices(UNKNOWN, &[(Family::RongYuanF7, None)]).is_empty());
         assert!(choices(UNKNOWN, &[(Family::Driveall, None)]).is_empty());
+        assert!(choices(UNKNOWN, &[(Family::Xctech, None)]).is_empty());
         static SPEC: protocol::GenericSpec = protocol::GenericSpec {
             usage_page: 0xFF60,
             usage: 0x0061,
@@ -1869,5 +2012,230 @@ mod tests {
             flow.on(Event::Handover(OTHER), now),
             Some(Effect::Inspect(OTHER))
         );
+    }
+
+    /// Interfaces read with one scan line and no family, so the device ends unsupported.
+    fn scanned() -> Event {
+        Event::Inspected(Inspection::Ready(Interfaces {
+            scan_lines: vec!["3554:7777  unknown device".to_owned()],
+            ..Interfaces::default()
+        }))
+    }
+
+    /// A flow showing `UNKNOWN` as unsupported, started by a handover.
+    fn unsupported(now: Instant) -> Flow {
+        let mut flow = new_flow();
+        flow.on(Event::Handover(UNKNOWN), now);
+        flow.on(Event::Inspected(Inspection::Failed("x".into())), now);
+        flow
+    }
+
+    fn url(effect: Option<Effect>) -> String {
+        match effect {
+            Some(Effect::OpenUrl(url)) => url,
+            other => panic!("not a url: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detection_arrival_starts_a_listen_for_unknown_ids_only() {
+        let now = Instant::now();
+        let mut flow = new_flow();
+        assert_eq!(flow.on(Event::Arrived(UNKNOWN), now), None);
+        assert_eq!(flow.listen_id(), None);
+        press(&mut flow, now);
+        assert_eq!(flow.listen_id(), None);
+        assert_eq!(
+            flow.on(Event::Arrived(UNKNOWN), now),
+            Some(Effect::Listen(UNKNOWN))
+        );
+        assert_eq!(flow.on(Event::Arrived(VERIFIED), now), None);
+        assert_eq!(flow.on(Event::Arrived((0x3554, 0xF2FF)), now), None);
+    }
+
+    #[test]
+    fn detection_text_fits_with_or_without_the_bluetooth_hint() {
+        let now = Instant::now();
+        let mut flow = new_flow();
+        press(&mut flow, now);
+        let text = flow.view(now).text;
+        assert!(text.starts_with("Detecting…"), "{text}");
+        assert!(text.contains("move it"), "{text}");
+        assert!(text.contains("without typing"), "{text}");
+        assert!(text.len() <= DETECTING.len() + 2 + BLUETOOTH_HINT.len());
+        flow.on(Event::BluetoothArrived, now);
+        assert_eq!(
+            flow.view(now).text,
+            format!("{DETECTING}\n\n{BLUETOOTH_HINT}")
+        );
+    }
+
+    #[test]
+    fn replug_of_the_shown_device_restarts_the_listen() {
+        let now = Instant::now();
+        let mut flow = new_flow();
+        flow.on(Event::Handover(UNKNOWN), now);
+        assert_eq!(flow.listen_id(), Some(UNKNOWN));
+        assert_eq!(
+            flow.on(Event::Arrived(UNKNOWN), now),
+            Some(Effect::Listen(UNKNOWN))
+        );
+        assert_eq!(flow.on(Event::Arrived(OTHER), now), None);
+        flow.on(Event::Removed(UNKNOWN), now);
+        assert!(flow.view(now).text.contains("was unplugged"));
+        assert_eq!(flow.listen_id(), None);
+        assert_eq!(
+            flow.on(Event::Arrived(UNKNOWN), now),
+            Some(Effect::Listen(UNKNOWN))
+        );
+    }
+
+    #[test]
+    fn report_press_waits_for_the_listen_then_sends() {
+        let now = Instant::now();
+        let mut flow = unsupported(now);
+        assert_eq!(flow.listen_id(), Some(UNKNOWN));
+        let running = listening(now, now + Duration::from_secs(10));
+        assert_eq!(flow.on(Event::Listen(Some(running)), now), None);
+        let details = flow.view(now).details.unwrap();
+        assert!(details.contains("Listen: still listening"), "{details}");
+        assert_eq!(flow.next_tick(now), Some(SECOND));
+
+        assert_eq!(flow.on(Event::Extra, now), None);
+        let view = flow.view(now);
+        assert!(view.text.contains("10 s left"), "{}", view.text);
+        assert_eq!(view.primary.as_deref(), Some("Stop"));
+        assert_eq!((view.alt, view.extra), (None, None));
+        assert_eq!(flow.listen_id(), Some(UNKNOWN));
+        assert!(view.details.is_some());
+        assert_eq!(flow.next_tick(now), Some(SECOND));
+        // A double-click on [Report on GitHub] lands on [Stop].
+        assert_eq!(press(&mut flow, now), None);
+        assert_eq!(
+            press(&mut flow, now + ADD_GUARD),
+            Some(Effect::StopListen(UNKNOWN))
+        );
+
+        let t2 = now + Duration::from_secs(12);
+        let ended = done(now, 12, Some("stopped"), Vec::new());
+        let url = url(flow.on(Event::Listen(Some(ended)), t2));
+        assert!(
+            url.starts_with("https://github.com/ittmchien/juicetray/issues/new"),
+            "{url}"
+        );
+        assert!(
+            url.contains("Listen%3A%2012%20s%20after%20plug-in"),
+            "{url}"
+        );
+        assert_eq!(flow.view(t2).primary.as_deref(), Some("Copy"));
+    }
+
+    #[test]
+    fn presses_right_after_the_wait_are_ignored() {
+        let now = Instant::now();
+        let mut flow = unsupported(now);
+        let running = listening(now, now + Duration::from_secs(10));
+        flow.on(Event::Listen(Some(running)), now);
+        assert_eq!(flow.on(Event::Alt, now), None);
+        let t2 = now + Duration::from_secs(1);
+        url(flow.on(Event::Listen(Some(done(now, 1, None, Vec::new()))), t2));
+        assert_eq!(press(&mut flow, t2), None);
+        assert_eq!(flow.on(Event::Alt, t2), None);
+        assert_eq!(flow.on(Event::Extra, t2), None);
+        assert_eq!(press(&mut flow, t2 + ADD_GUARD), Some(Effect::Copy));
+    }
+
+    #[test]
+    fn copy_and_send_wait_too() {
+        let now = Instant::now();
+        let until = now + Duration::from_secs(10);
+        let t2 = now + Duration::from_secs(2);
+        let finished = || Event::Listen(Some(done(now, 2, None, Vec::new())));
+
+        let mut flow = unsupported(now);
+        flow.on(Event::Listen(Some(listening(now, until))), now);
+        assert_eq!(press(&mut flow, now), None);
+        assert_eq!(flow.on(finished(), t2), Some(Effect::Copy));
+
+        let mut flow = unsupported(now);
+        flow.on(Event::Listen(Some(listening(now, until))), now);
+        assert_eq!(flow.on(Event::Alt, now), None);
+        let url = url(flow.on(finished(), t2));
+        assert!(url.starts_with("https://docs.google.com/forms/"), "{url}");
+    }
+
+    #[test]
+    fn stale_listen_never_holds_a_report() {
+        let now = Instant::now();
+        let mut flow = unsupported(now);
+        flow.on(Event::Listen(Some(listening(now, now))), now);
+        let late = now + GRACE;
+        url(flow.on(Event::Alt, late));
+        let details = flow.view(late).details.unwrap();
+        assert!(details.contains("Listen: did not finish"), "{details}");
+    }
+
+    #[test]
+    fn evicted_listen_keeps_its_last_snapshot() {
+        let now = Instant::now();
+        let mut flow = unsupported(now);
+        flow.on(Event::Listen(Some(done(now, 30, None, Vec::new()))), now);
+        flow.on(Event::Listen(None), now);
+        let details = flow.view(now).details.unwrap();
+        assert!(
+            details.contains("Listen: 30 s after plug-in, read-only"),
+            "{details}"
+        );
+    }
+
+    #[test]
+    fn details_put_listen_before_interfaces() {
+        let t = Instant::now();
+        let mut flow = new_flow();
+        flow.on(Event::Handover(UNKNOWN), t);
+        flow.on(scanned(), t);
+        let details = flow.view(t).details.unwrap();
+        assert!(
+            details.contains("Listen: not run (no plug-in seen)"),
+            "{details}"
+        );
+        flow.on(Event::Listen(Some(done(t, 30, None, Vec::new()))), t);
+        let details = flow.view(t).details.unwrap();
+        assert!(
+            details.contains(
+                "Same vendor plugged in: none\nListen: 30 s after plug-in, read-only\n  \
+                 nothing allowed to open\nInterfaces:\n"
+            ),
+            "{details}"
+        );
+
+        let mut flow = choosing(UNKNOWN, &[(Family::Compx, None)], t);
+        press(&mut flow, t + Duration::from_secs(4));
+        flow.on(Event::Tried(TryOutcome::NoReply.into()), t);
+        flow.on(Event::Listen(Some(done(t, 30, None, Vec::new()))), t);
+        let details = flow.view(t).details.unwrap();
+        assert!(details.contains("; Try sent at +4000 ms"), "{details}");
+
+        let mut flow = new_flow();
+        flow.on(Event::Handover((0x3554, 0xF2FF)), t);
+        let details = flow.view(t).details.unwrap();
+        assert!(
+            details.contains("Listen: not run (recovery mode)"),
+            "{details}"
+        );
+    }
+
+    #[test]
+    fn long_listen_is_cut_and_keeps_interfaces() {
+        let t = Instant::now();
+        let mut flow = new_flow();
+        flow.on(Event::Handover(UNKNOWN), t);
+        flow.on(scanned(), t);
+        flow.on(Event::Listen(Some(long_listen(t))), t);
+        let url = url(flow.on(Event::Alt, t));
+        assert!(url.contains("Listen%3A"), "{url}");
+        assert!(url.contains("%E2%80%A6%20cut"), "{url}");
+        assert!(url.contains("Interfaces%3A"), "{url}");
+        assert!(url.len() <= report::MAX_URL_LEN);
     }
 }

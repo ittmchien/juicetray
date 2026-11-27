@@ -7,7 +7,7 @@ use door::{Access, HidCollection, Inventory, SerialEntry, Target};
 use protocol::{Family, HidShape, Link, PickError, floor_wait, pick_target};
 
 use crate::query_log::QueryLog;
-use crate::scan::{mask_serial, redact_path};
+use crate::scan::{interface_label, mask_serial, redact_path};
 
 pub(crate) const USAGE: &str =
     "usage: juicetray probe [--online] <VID:PID>, e.g. juicetray probe 3837:6011";
@@ -282,13 +282,10 @@ pub(crate) fn open_hid_target(
     let target = inventory
         .open_hid(collection)
         .map_err(|error| open_failed(&error))?;
-    let interface = collection
-        .shape
-        .interface
-        .map_or("?".to_owned(), |n| n.to_string());
+    // The report's target line names the collection like `scan` does; the path is redacted.
     let line = format!(
-        "target HID if {interface} {} · path {}",
-        usage_pair(&collection.shape),
+        "target HID {} · path {}",
+        interface_label(&collection.shape),
         redact_path(&collection.path)
     );
     Ok((target, line))

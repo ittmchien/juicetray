@@ -89,7 +89,8 @@ pub struct Presence {
     pub pid: u16,
     /// HID collections listed (Windows lists one per top-level collection of each interface).
     pub hid: usize,
-    /// Of those, the vendor collections the open rule allows opening.
+    /// Of those, the collections the open rule allows opening (vendor pages, and an Xctech
+    /// catalogue model's 0001:0000 channel).
     pub openable: usize,
     /// USB serial ports.
     pub serial: usize,
@@ -316,10 +317,14 @@ fn open_verdicts(infos: &[&DeviceInfo]) -> (Vec<String>, Vec<Result<(), &'static
         .iter()
         .map(|info| info.path().to_string_lossy().into_owned())
         .collect();
-    let keys: Vec<(&str, u16, u16)> = infos
+    // The id lets the rule open an Xctech catalogue model's 0001:0000 channel.
+    let keys: Vec<(&str, (u16, u16), u16, u16)> = infos
         .iter()
         .zip(&paths)
-        .map(|(info, path)| (path.as_str(), info.usage_page(), info.usage()))
+        .map(|(info, path)| {
+            let id = (info.vendor_id(), info.product_id());
+            (path.as_str(), id, info.usage_page(), info.usage())
+        })
         .collect();
     let verdicts = open_permission(&keys);
     (paths, verdicts)

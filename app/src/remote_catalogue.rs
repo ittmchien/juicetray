@@ -6,7 +6,7 @@ use toml::{Table, Value};
 
 use crate::config::{CustomEntry, custom_device};
 use crate::log;
-use crate::plug::Id;
+use crate::plug::{Id, id_text};
 use crate::query::parse_vid_pid;
 
 /// Where the catalogue files are served raw; a file name from `protocol::CATALOGUE_FILES` follows.
@@ -201,7 +201,7 @@ fn usable(row: &Row, (vid, pid): Id) -> Result<CustomEntry, String> {
         return Err("id outside every family VID".to_owned());
     }
     let entry = CustomEntry {
-        id: format!("{vid:04X}:{pid:04X}"),
+        id: id_text((vid, pid)),
         name: name.to_owned(),
         family: row.family.clone(),
         kind: row.kind.clone(),
@@ -290,7 +290,14 @@ mod tests {
         }
         assert!(usable(&row(&longest, "Report13"), ID).is_ok());
         // Families only the built-in catalogue can use, and unknown ones.
-        for family in ["AtkSerial", "RongYuanF7", "Driveall", "Generic", "Future"] {
+        for family in [
+            "AtkSerial",
+            "RongYuanF7",
+            "Driveall",
+            "Xctech",
+            "Generic",
+            "Future",
+        ] {
             assert!(usable(&row("Board", family), ID).is_err(), "{family}");
         }
         // An id off every family VID, and a recovery id on one.

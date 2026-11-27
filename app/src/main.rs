@@ -5,6 +5,9 @@
 mod add_device;
 mod alerts;
 mod app;
+// Plug-in listening runs on Windows; its pure parts are also tested elsewhere.
+#[cfg(any(windows, test))]
+mod capture;
 // macOS reads Bluetooth in a child process.
 #[cfg(target_os = "macos")]
 mod bluetooth_child;
@@ -18,6 +21,7 @@ mod context_menu;
 mod device;
 mod dialog;
 mod efficiency;
+mod hid_caps;
 mod instance;
 mod interval;
 mod licenses;
@@ -120,7 +124,8 @@ fn run_scan() -> ExitCode {
             &inventory.hid,
             &inventory.serial,
             &inventory.errors,
-            &config::Config::load().custom()
+            &config::Config::load().custom(),
+            hid_caps::line
         )
     );
     // Layout data for diagnosing the taskbar strip on a machine nobody can inspect.

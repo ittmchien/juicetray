@@ -20,13 +20,14 @@ mod report;
 mod report13;
 mod rongyuan;
 mod vgn_kc2;
+mod xctech;
 
 use std::time::{Duration, SystemTime};
 
 pub use devices::{CATALOGUE_FILES, KNOWN, Kind, KnownDevice, known};
 pub use families::{families_for, family_vid};
 pub use generic::{GenericReport, GenericSpec};
-pub use hid::{HidShape, PickError, open_permission, pick_target};
+pub use hid::{FIRMWARE_UPDATE_PAGE, HidShape, PickError, open_permission, pick_target};
 pub use recovery::is_recovery;
 pub use report::{ReportKind, ReportSize, TopCollection, parse_descriptor, reports_of};
 pub use report13::ON_CABLE_TEXT;
@@ -44,6 +45,7 @@ pub enum Family {
     VgnKc2,
     RongYuanF7,
     Driveall,
+    Xctech,
     /// A catalogue row's own query and reply layout (catalogue ids only, never custom devices).
     Generic(&'static GenericSpec),
 }
@@ -99,6 +101,7 @@ impl Family {
             | Family::VgnKc2
             | Family::RongYuanF7
             | Family::Driveall
+            | Family::Xctech
             | Family::Generic(_) => Link::Hid,
             Family::AtkSerial => Link::Serial,
         }
@@ -114,6 +117,7 @@ impl Family {
             Family::VgnKc2 => "VGN kc2",
             Family::RongYuanF7 => "RongYuan F7",
             Family::Driveall => "Driveall",
+            Family::Xctech => "XCTECH",
             Family::Generic(_) => "Generic",
         }
     }
@@ -130,6 +134,7 @@ impl Family {
             | Family::VgnKc2
             | Family::RongYuanF7
             | Family::Driveall
+            | Family::Xctech
             | Family::Generic(_) => Duration::from_secs(10),
             Family::Mchose | Family::AtkSerial => Duration::from_secs(300),
         }
@@ -146,6 +151,8 @@ impl Family {
                 Duration::from_millis(500)
             }
             Family::AtkSerial => Duration::from_millis(1000),
+            // Xctech: the M500 app reads up to 50 times with a 30 ms timeout each.
+            Family::Xctech => Duration::from_millis(1500),
             // Vendor tools read ~20 ms after SetFeature and retry 100 ms apart on an unfilled
             // reply; one read after 100 ms stands in for those retries.
             Family::RongYuanF7 => Duration::from_millis(100),
@@ -179,6 +186,7 @@ pub fn battery_query(family: Family) -> &'static [u8] {
         Family::VgnKc2 => &vgn_kc2::QUERY,
         Family::RongYuanF7 => &rongyuan::QUERY,
         Family::Driveall => &driveall::QUERY,
+        Family::Xctech => &xctech::QUERY,
         Family::Generic(spec) => spec.request,
     }
 }
@@ -204,6 +212,7 @@ pub fn online_query(family: Family) -> Option<&'static [u8]> {
         | Family::VgnKc2
         | Family::RongYuanF7
         | Family::Driveall
+        | Family::Xctech
         | Family::Generic(_) => None,
     }
 }
@@ -219,6 +228,7 @@ pub fn decode_online(family: Family, bytes: &[u8]) -> Decoded {
         | Family::VgnKc2
         | Family::RongYuanF7
         | Family::Driveall
+        | Family::Xctech
         | Family::Generic(_) => Decoded::NotTheReply,
     }
 }
@@ -261,6 +271,7 @@ pub fn decode(family: Family, bytes: &[u8]) -> Decoded {
         Family::VgnKc2 => vgn_kc2::decode(bytes),
         Family::RongYuanF7 => rongyuan::decode(bytes),
         Family::Driveall => driveall::decode(bytes),
+        Family::Xctech => xctech::decode(bytes),
         Family::Generic(spec) => generic::decode(spec, bytes),
     }
 }
@@ -319,6 +330,7 @@ mod tests {
         assert_eq!(ms(Family::VgnKc2), 500);
         assert_eq!(ms(Family::RongYuanF7), 100);
         assert_eq!(ms(Family::Driveall), 500);
+        assert_eq!(ms(Family::Xctech), 1500);
         assert_eq!(ms(Family::Generic(&generic::tests::OUTPUT)), 500);
     }
 
@@ -332,6 +344,7 @@ mod tests {
         assert_eq!(Family::VgnKc2.query_floor(), Duration::from_secs(10));
         assert_eq!(Family::RongYuanF7.query_floor(), Duration::from_secs(10));
         assert_eq!(Family::Driveall.query_floor(), Duration::from_secs(10));
+        assert_eq!(Family::Xctech.query_floor(), Duration::from_secs(10));
         let generic = Family::Generic(&generic::tests::OUTPUT);
         assert_eq!(generic.query_floor(), Duration::from_secs(10));
     }
@@ -370,12 +383,14 @@ mod tests {
         assert_eq!(Family::RongYuanF7.name(), "RongYuan F7");
         assert_eq!(Family::Driveall.link(), Link::Hid);
         assert_eq!(Family::Driveall.name(), "Driveall");
+        assert_eq!(Family::Xctech.link(), Link::Hid);
+        assert_eq!(Family::Xctech.name(), "XCTECH");
         let generic = Family::Generic(&generic::tests::OUTPUT);
         assert_eq!((generic.link(), generic.name()), (Link::Hid, "Generic"));
     }
 
     /// Every variant; the match makes a new variant fail to compile here until it is listed.
-    fn all_families() -> [Family; 9] {
+    fn all_families() -> [Family; 10] {
         let all = [
             Family::Compx,
             Family::Report13,
@@ -385,6 +400,7 @@ mod tests {
             Family::VgnKc2,
             Family::RongYuanF7,
             Family::Driveall,
+            Family::Xctech,
             Family::Generic(&generic::tests::OUTPUT),
         ];
         for family in all {
@@ -397,6 +413,7 @@ mod tests {
                 | Family::VgnKc2
                 | Family::RongYuanF7
                 | Family::Driveall
+                | Family::Xctech
                 | Family::Generic(_) => {}
             }
         }

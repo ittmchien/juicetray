@@ -27,6 +27,7 @@ use windows::core::HSTRING;
 
 use super::flow::{Effect, Event, Flow, Input, Inspection, KINDS, Tried, TryOutcome, View};
 use crate::app::UserEvent;
+use crate::capture;
 use crate::config::Config;
 use crate::dialog::{
     self, BUTTON_CLASS, COMBO_BOX_CLASS, EDIT_CLASS, STATIC_CLASS, TemplateWords, dialog_style,
@@ -224,17 +225,24 @@ fn run(proxy: EventLoopProxy<UserEvent>, worker: Sender<Command>) {
 }
 
 impl Session {
-    /// Feeds `event` to the flow, performs its effect and shows the result.
+    /// Feeds `event` to the flow, after the shown id's listen so a press knows whether it still
+    /// runs; shows the result, then performs the effects.
     fn handle(&mut self, dialog: HWND, event: Event) {
-        let effect = self.flow.on(event, Instant::now());
+        let now = Instant::now();
+        let synced = self
+            .flow
+            .listen_id()
+            .and_then(|id| self.flow.on(Event::Listen(capture::snapshot(id)), now));
+        let effect = self.flow.on(event, now);
         // A reply for a step the flow left is ignored; the worker's send then fails quietly.
         if !self.flow.awaits_worker() {
             self.pending = None;
         }
-        if let Some(effect) = effect {
+        // Rendered first, so [Copy] after a wait copies the final details.
+        self.update(dialog);
+        for effect in [synced, effect].into_iter().flatten() {
             self.perform(dialog, effect);
         }
-        self.update(dialog);
     }
 
     fn perform(&mut self, dialog: HWND, effect: Effect) {
@@ -283,6 +291,8 @@ impl Session {
                     log::line(&format!("add device: opening the report failed: {error}"));
                 }
             }
+            Effect::Listen(id) => capture::start(id, capture::Origin::Window),
+            Effect::StopListen(id) => capture::stop(id),
         }
     }
 
@@ -354,6 +364,8 @@ impl Session {
             let Some(id) = plug::parse_interface_name(&name) else {
                 return;
             };
+            // A running capture of the id lists the devices again, so it sees what changed.
+            capture::nudge(id);
             if arrived {
                 Event::Arrived(id)
             } else {
