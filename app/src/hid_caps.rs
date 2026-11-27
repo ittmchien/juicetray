@@ -7,6 +7,8 @@ use windows::Win32::Devices::HumanInterfaceDevice::{
     PHIDP_PREPARSED_DATA,
 };
 #[cfg(windows)]
+use windows::Win32::Foundation::E_FAIL;
+#[cfg(windows)]
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
@@ -42,6 +44,7 @@ fn caps_text(input: u16, output: u16, feature: u16) -> String {
     format!("caps in {input} out {output} feat {feature}")
 }
 
+/// Printed instead of the lengths when the collection's caps cannot be read.
 #[cfg(any(windows, test))]
 fn unknown_text(error: &str) -> String {
     format!("caps unknown ({error})")
@@ -77,15 +80,13 @@ fn read(path: &str) -> windows::core::Result<HIDP_CAPS> {
     let mut data = PHIDP_PREPARSED_DATA::default();
     // SAFETY: `handle` is open; on success `data` is owned by the guard below.
     if !unsafe { HidD_GetPreparsedData(*handle, &mut data) } {
-        return Err(Error::from_thread());
+        // HidD_GetPreparsedData is not documented to set the last error, so the text is fixed.
+        return Err(Error::new(E_FAIL, "no preparsed data"));
     }
     let data = Preparsed(data);
-    // SAFETY: HIDP_CAPS holds only integers (all-zero is valid); `data` is live preparsed data.
-    let (caps, status) = unsafe {
-        let mut caps: HIDP_CAPS = std::mem::zeroed();
-        let status = HidP_GetCaps(data.0, &mut caps);
-        (caps, status)
-    };
+    let mut caps = HIDP_CAPS::default();
+    // SAFETY: `data` is live preparsed data and `caps` a writable HIDP_CAPS.
+    let status = unsafe { HidP_GetCaps(data.0, &mut caps) };
     if status != HIDP_STATUS_SUCCESS {
         return Err(status.into());
     }

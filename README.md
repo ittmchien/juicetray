@@ -262,17 +262,18 @@ A `Generic` row carries its own query instead of family code. Its extra fields a
 
 The example is made up: it sends output report `05 01` (padded to 33 bytes) once per query and
 reads byte 3 of an input report starting `05 81` as the percent. Like ATK serial, RongYuan F7,
-Driveall and Xctech, a Generic row is used only for its own catalogue VID:PID; a custom device or the
-Add device window never gets it. One fixed frame per query, no retries, 10 s query floor.
+Driveall and Xctech, a Generic row is used only for its own catalogue VID:PID; a custom device or
+the Add device window never gets it. One fixed frame per query, no retries, 10 s query floor.
 
 **From a device report to a row.** The Add device report lists every collection of the device
 as `scan` prints it: `HID if 2 FF00:0001 vendor · Usb · in 05:33 out 05:33` gives `usage_page`,
 `usage`, `report` and `report_bytes`, and the descriptor hex below it lets a reviewer check the
-sizes. On Windows each line ends with `caps in N out N feat N`, the longest report of each kind
-as Windows reports it (id byte included, read without sending anything), so with several report
-ids it is not a valid `report_bytes`. The request and the reply layout come from what the
-brand's app sends and receives (a USB capture); `level_byte` is the reply byte that equals the percent the brand's app shows.
-Pick a request the brand's app sends only to read status, never a setter.
+sizes. On Windows each line except page 008C ends with `caps in N out N feat N` (or
+`caps unknown (…)` when Windows cannot read them), the longest report of each kind as Windows
+reports it (id byte included, read without sending anything), so with several report ids it is
+not a valid `report_bytes`. The request and the reply layout come from what the brand's app sends
+and receives (a USB capture); `level_byte` is the reply byte that equals the percent the brand's
+app shows. Pick a request the brand's app sends only to read status, never a setter.
 
 ## 📜 License
 

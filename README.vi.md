@@ -267,18 +267,19 @@ Một dòng `Generic` tự mang lệnh hỏi của nó thay vì code của famil
 
 Ví dụ trên là bịa: mỗi lần hỏi nó gửi output report `05 01` (đệm đủ 33 byte) một lần và đọc
 byte 3 của input report bắt đầu bằng `05 81` làm phần trăm. Giống ATK serial, RongYuan F7,
-Driveall và Xctech, dòng Generic chỉ dùng cho đúng VID:PID của nó trong catalogue; thiết bị custom hay cửa
-sổ Add device không bao giờ dùng nó. Mỗi lần hỏi một frame cố định, không lặp lại, khoảng chờ
-10 giây.
+Driveall và Xctech, dòng Generic chỉ dùng cho đúng VID:PID của nó trong catalogue; thiết bị custom
+hay cửa sổ Add device không bao giờ dùng nó. Mỗi lần hỏi một frame cố định, không lặp lại, khoảng
+chờ 10 giây.
 
 **Từ báo cáo thiết bị tới một dòng.** Báo cáo của Add device liệt kê mọi collection của thiết bị
 như `scan` in ra: `HID if 2 FF00:0001 vendor · Usb · in 05:33 out 05:33` cho ra `usage_page`,
 `usage`, `report` và `report_bytes`, còn đoạn hex descriptor bên dưới giúp người review kiểm lại
-kích thước. Trên Windows mỗi dòng kết thúc bằng `caps in N out N feat N`, là báo cáo dài nhất của
-mỗi loại theo số Windows báo (đã gồm byte id, đọc mà không gửi gì), nên khi có nhiều report id thì
-nó không phải `report_bytes` hợp lệ. Lệnh hỏi và cấu trúc phản hồi lấy từ những gì app của hãng
-gửi và nhận (bắt gói USB); `level_byte` là byte phản hồi bằng đúng phần trăm app của hãng hiển thị. Chọn lệnh mà app
-của hãng chỉ gửi để đọc trạng thái, không bao giờ là lệnh ghi cài đặt.
+kích thước. Trên Windows mỗi dòng (trừ page 008C) kết thúc bằng `caps in N out N feat N` (hoặc
+`caps unknown (…)` khi Windows không đọc được), là báo cáo dài nhất của mỗi loại theo số Windows
+báo (đã gồm byte id, đọc mà không gửi gì), nên khi có nhiều report id thì nó không phải
+`report_bytes` hợp lệ. Lệnh hỏi và cấu trúc phản hồi lấy từ những gì app của hãng gửi và nhận (bắt
+gói USB); `level_byte` là byte phản hồi bằng đúng phần trăm app của hãng hiển thị. Chọn lệnh mà
+app của hãng chỉ gửi để đọc trạng thái, không bao giờ là lệnh ghi cài đặt.
 
 ## 📜 Giấy phép
 

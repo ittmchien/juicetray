@@ -233,8 +233,8 @@ fn pick_driveall(shapes: &[HidShape]) -> Result<usize, PickError> {
     }))
 }
 
-/// `0001/0000` by page and usage only: the descriptor Windows rebuilds for it lists no reports
-/// (hidapi's rebuild is `05 01 09 00 a1 01 c0`); the open rule limits it to Xctech catalogue ids.
+/// `0001/0000` by page and usage only: the descriptor hidapi rebuilds from preparsed data lists no
+/// reports (`05 01 09 00 a1 01 c0`); the open rule limits it to Xctech catalogue ids.
 fn pick_xctech(shapes: &[HidShape]) -> Result<usize, PickError> {
     exactly_one(matching(shapes, |shape| {
         (shape.usage_page, shape.usage) == XCTECH_PAGE
