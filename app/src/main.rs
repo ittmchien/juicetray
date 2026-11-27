@@ -5,6 +5,9 @@
 mod add_device;
 mod alerts;
 mod app;
+// Plug-in listening runs on Windows; its pure parts are also tested elsewhere.
+#[cfg(any(windows, test))]
+mod capture;
 // macOS reads Bluetooth in a child process.
 #[cfg(target_os = "macos")]
 mod bluetooth_child;
