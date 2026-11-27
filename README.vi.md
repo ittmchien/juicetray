@@ -121,10 +121,17 @@ dây bất kỳ lúc Juicetray đang chạy, không bao giờ hiện lúc khởi
 thiết bị dù bạn trả lời gì): app nhận ra thiết bị, gửi một lệnh hỏi pin chỉ-đọc khi bạn bấm
 **Try**, và thêm thiết bị khi bạn xác nhận mức pin đúng. Nếu không được, bấm **Send report** để
 gửi thông tin qua [Google Form](https://forms.gle/Qp5CeBGEiPg2UtkX6) (không cần tài khoản),
-hoặc **Report on GitHub** để [mở issue](https://github.com/ittmchien/juicetray/issues) với thông
-tin điền sẵn. Chỉ gửi tên thiết bị, USB ID và danh sách interface, các byte đã gửi và đọc được
-trong lần thử, tên app hãng đang chạy và USB ID của các thiết bị khác cùng hãng — không có thông
-tin cá nhân.
+hoặc **Report on GitHub** để [mở issue](https://github.com/ittmchien/juicetray/issues) với thông tin
+điền sẵn. Ngay khi thiết bị như vậy được cắm vào (hoặc khi cửa sổ Add device đang dò), Juicetray
+nghe nó trong 30 s, chỉ đọc (không gửi gì), và báo cáo có kèm những gì thiết bị tự gửi, thường là
+mức pin hoặc trạng thái kết nối. Đừng gõ phím trong 30 s đó: với thiết bị có interface bàn phím hoặc
+keypad (hầu hết receiver đều có), report nào đến trong vòng nửa giây quanh một lần gõ phím trên bất
+kỳ bàn phím nào bị bỏ (chỉ đếm), nên phím đã gõ không vào báo cáo (phím gõ vào cửa sổ chạy quyền
+administrator hoặc ở màn hình đăng nhập có thể không được thấy, nên cũng đừng gõ ở đó). Bấm nút gửi
+báo cáo trước khi hết 30 s thì báo cáo chờ tới lúc hết (**Stop** để dừng sớm). Không nghe gì khi app
+của hãng đang mở. Chỉ gửi tên thiết bị, USB ID và danh sách interface, các byte đã gửi và đọc được
+trong lần thử, các report thiết bị tự gửi trong lúc nghe đó, tên app hãng đang chạy và USB ID của
+các thiết bị khác cùng hãng — không có thông tin cá nhân.
 
 Nếu thiết bị vừa cắm không có trong danh mục có sẵn của phiên bản bạn đang dùng, popup sẽ tìm nó
 trước trong các file danh mục trên GitHub (xem phần Cập nhật). Nếu có dòng khớp và family của
@@ -279,7 +286,9 @@ kích thước. Trên Windows mỗi dòng (trừ page 008C) kết thúc bằng `
 báo (đã gồm byte id, đọc mà không gửi gì), nên khi có nhiều report id thì nó không phải
 `report_bytes` hợp lệ. Lệnh hỏi và cấu trúc phản hồi lấy từ những gì app của hãng gửi và nhận (bắt
 gói USB); `level_byte` là byte phản hồi bằng đúng phần trăm app của hãng hiển thị. Chọn lệnh mà
-app của hãng chỉ gửi để đọc trạng thái, không bao giờ là lệnh ghi cài đặt.
+app của hãng chỉ gửi để đọc trạng thái, không bao giờ là lệnh ghi cài đặt. Các dòng `Listen:` là
+các input report thiết bị tự gửi sau khi cắm (thời điểm, số lần lặp, 32 byte đầu): byte nào chạy
+theo mức pin ở đó thường cho luôn `level_byte` mà không cần bắt gói.
 
 ## 📜 Giấy phép
 
