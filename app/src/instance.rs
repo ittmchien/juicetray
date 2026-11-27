@@ -6,9 +6,18 @@ pub fn is_bundled() -> bool {
     bundle_identifier().is_some()
 }
 
+/// The real bundle id, read once: mac-notification-sys later swaps `bundleIdentifier` for the
+/// whole process (to `com.apple.Finder` or `com.apple.Terminal` in a bare binary).
 #[cfg(target_os = "macos")]
-fn bundle_identifier() -> Option<objc2::rc::Retained<objc2_foundation::NSString>> {
-    objc2_foundation::NSBundle::mainBundle().bundleIdentifier()
+pub(crate) fn bundle_identifier() -> Option<&'static str> {
+    static IDENTIFIER: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    IDENTIFIER
+        .get_or_init(|| {
+            objc2_foundation::NSBundle::mainBundle()
+                .bundleIdentifier()
+                .map(|id| id.to_string())
+        })
+        .as_deref()
 }
 
 /// Only macOS has app bundles.
@@ -54,9 +63,11 @@ fn other_copy_running() -> bool {
         return false;
     };
     let own_pid = std::process::id();
-    NSRunningApplication::runningApplicationsWithBundleIdentifier(&identifier)
-        .iter()
-        .any(|app| u32::try_from(app.processIdentifier()).is_ok_and(|pid| pid != own_pid))
+    NSRunningApplication::runningApplicationsWithBundleIdentifier(
+        &objc2_foundation::NSString::from_str(identifier),
+    )
+    .iter()
+    .any(|app| u32::try_from(app.processIdentifier()).is_ok_and(|pid| pid != own_pid))
 }
 
 /// How long an update's restart waits for the exiting process to release the lock; the old

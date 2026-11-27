@@ -77,6 +77,8 @@ fn post(summary: String, body: String) {
         .name("notify".into())
         .spawn(move || {
             let _span = log::span("notification show");
+            #[cfg(target_os = "macos")]
+            set_notification_sender();
             let shown = Notification::new().summary(&summary).body(&body).show();
             if let Err(error) = shown {
                 eprintln!("notification failed: {error}");
@@ -85,6 +87,20 @@ fn post(summary: String, body: String) {
     if let Err(error) = spawned {
         eprintln!("notification thread failed: {error}");
     }
+}
+
+/// Without a sender, mac-notification-sys asks AppleScript for an app named "use_default", and
+/// macOS opens a "Where is use_default?" picker; the app's own bundle id skips that lookup.
+#[cfg(target_os = "macos")]
+fn set_notification_sender() {
+    static SENDER: std::sync::Once = std::sync::Once::new();
+    SENDER.call_once(|| {
+        // An unbundled dev build has no bundle id; Finder is the library's own fallback.
+        let bundle = crate::instance::bundle_identifier().unwrap_or("com.apple.Finder");
+        if let Err(error) = notify_rust::set_application(bundle) {
+            eprintln!("notification sender {bundle} not set: {error}");
+        }
+    });
 }
 
 #[cfg(test)]
