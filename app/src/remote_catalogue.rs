@@ -290,7 +290,14 @@ mod tests {
         }
         assert!(usable(&row(&longest, "Report13"), ID).is_ok());
         // Families only the built-in catalogue can use, and unknown ones.
-        for family in ["AtkSerial", "RongYuanF7", "Driveall", "Generic", "Future"] {
+        for family in [
+            "AtkSerial",
+            "RongYuanF7",
+            "Driveall",
+            "Xctech",
+            "Generic",
+            "Future",
+        ] {
             assert!(usable(&row("Board", family), ID).is_err(), "{family}");
         }
         // An id off every family VID, and a recovery id on one.

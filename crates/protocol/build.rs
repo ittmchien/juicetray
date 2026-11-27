@@ -15,7 +15,7 @@ mod recovery;
 mod generic_row;
 
 /// The `Family` variants a catalogue line may name; keep in step with `protocol::Family`.
-const FAMILIES: [&str; 9] = [
+const FAMILIES: [&str; 10] = [
     "Compx",
     "Report13",
     "Mchose",
@@ -24,6 +24,7 @@ const FAMILIES: [&str; 9] = [
     "VgnKc2",
     "RongYuanF7",
     "Driveall",
+    "Xctech",
     "Generic",
 ];
 

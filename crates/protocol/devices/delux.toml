@@ -1,0 +1,10 @@
+# Device models juicetray knows, one line per VID:PID. Fields: vid, pid (4 hex digits),
+# name, family (protocol family in code), kind (mouse|headset|keyboard|gamepad|other),
+# connection (receiver|cable), verified (read on real hardware), optional needs_capture.
+
+# Delux mice on XCTECH chips (M500 app): device info 0x10 on the 0001:0000 collection of
+# interface 2. The M500 app shows battery bars only, so the level is checked against its code.
+devices = [
+  { vid = "249A", pid = "5C2F", name = "Delux M500 (receiver)", family = "Xctech", kind = "mouse", connection = "receiver", verified = true },
+  { vid = "248A", pid = "5D2E", name = "Delux M500", family = "Xctech", kind = "mouse", connection = "cable", verified = true },
+]

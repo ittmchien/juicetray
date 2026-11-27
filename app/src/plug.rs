@@ -167,8 +167,8 @@ fn is_receiver(product: Option<&str>) -> bool {
     })
 }
 
-/// Whether the lists show something a family could query: a vendor collection the open rule
-/// allows, or the serial port of a catalogue ATK serial model.
+/// Whether the lists show something a family could query: a collection the open rule allows
+/// (vendor pages, an Xctech model's 0001:0000), or the serial port of a catalogue ATK serial model.
 pub fn has_query_channel(presence: &Presence) -> bool {
     let atk_serial =
         known(presence.vid, presence.pid).is_some_and(|device| device.family == Family::AtkSerial);
@@ -542,7 +542,7 @@ mod tests {
 
     #[test]
     fn wireless_receivers_are_offered_by_name_other_usb_gear_is_not() {
-        let receiver = (0x249A, 0x5C2F);
+        let receiver = (0x25A7, 0xFA61);
         let webcam = (0x046D, 0x0825);
         let present = [
             presence(receiver, 0, 0),
@@ -553,7 +553,7 @@ mod tests {
             presence((0x3554, 0xF2FF), 0, 0),
         ];
         let product = |id: Id| match id {
-            (0x249A, 0x5C2F) => Some("Wireless-Receiver"),
+            (0x25A7, 0xFA61) => Some("Wireless-Receiver"),
             (0x1234, 0x0001) => Some("USB DONGLE"),
             (0x1234, 0x0002) => Some("2.4G Mouse"),
             (0x1234, 0x0003) => Some("USB Keyboard"),

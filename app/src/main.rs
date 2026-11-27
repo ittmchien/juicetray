@@ -18,6 +18,7 @@ mod context_menu;
 mod device;
 mod dialog;
 mod efficiency;
+mod hid_caps;
 mod instance;
 mod interval;
 mod licenses;
@@ -120,7 +121,8 @@ fn run_scan() -> ExitCode {
             &inventory.hid,
             &inventory.serial,
             &inventory.errors,
-            &config::Config::load().custom()
+            &config::Config::load().custom(),
+            hid_caps::line
         )
     );
     // Layout data for diagnosing the taskbar strip on a machine nobody can inspect.

@@ -8,6 +8,7 @@ use door::{Door, Exchange, Presence, STABLE_GAP, ShapeCache, first_battery_query
 use protocol::{Decoded, Family, Link, families_for};
 
 use super::flow::{Inspection, Interfaces, Tried, TryOutcome};
+use crate::hid_caps;
 use crate::log;
 use crate::plug::Id;
 use crate::query::{
@@ -46,7 +47,8 @@ pub fn inspect((vid, pid): Id, cache: &mut ShapeCache) -> Inspection {
         return Inspection::Gone;
     };
     // Both paths read this device's descriptors once (the open rule applies) for the report's
-    // scan listing; cached shapes still decide the families.
+    // scan listing; cached shapes still decide the families. The caps read there is a
+    // zero-access open outside that rule.
     let (shapes, inventory) = match cache.get(vid, pid) {
         Some(shapes) => (shapes.to_vec(), listing.into_inventory(&[(vid, pid)])),
         None => {
@@ -59,7 +61,7 @@ pub fn inspect((vid, pid): Id, cache: &mut ShapeCache) -> Inspection {
                 Some(now) if now != counts => return Inspection::Settling,
                 Some(_) => {}
             }
-            // Opens only this device's vendor collections, for their descriptors.
+            // Opens only this device's collections the open rule allows, for their descriptors.
             let inventory = listing.into_inventory(&[(vid, pid)]);
             let shapes = inventory.shapes(vid, pid);
             // No shapes because HID could not be listed is a failure, not "no protocol".
@@ -72,7 +74,8 @@ pub fn inspect((vid, pid): Id, cache: &mut ShapeCache) -> Inspection {
             (shapes, inventory)
         }
     };
-    let scan_lines = scan::device_lines(vid, pid, &inventory.hid, &inventory.serial);
+    let scan_lines =
+        scan::device_lines(vid, pid, &inventory.hid, &inventory.serial, hid_caps::line);
     let serial = counts.serial > 0;
     let log = query_log::path()
         .map(|path| QueryLog::load_from(&path))

@@ -5,11 +5,14 @@ use crate::log;
 
 /// USB vendor id and the vendor app's UI process name. Only the UI exe counts: the background
 /// helpers (`MCHOSE HUB Agent/Watcher/Notifier.exe`, `atk-hub-service.exe`) run while it is closed.
-const VENDOR_APPS: [(u16, &str); 4] = [
+const VENDOR_APPS: [(u16, &str); 6] = [
     (0x3837, "MCHOSE HUB.exe"),
     (0x373B, "ATK HUB.exe"),
     (0x3554, "ATK HUB.exe"),
     (0x391D, "VGN VHUB.exe"),
+    // The Delux M500 app reads the receiver (249A) and the mouse on its cable (248A).
+    (0x249A, "M500.exe"),
+    (0x248A, "M500.exe"),
 ];
 
 /// The shown name of the open vendor app that owns `vid`'s devices; `running` comes from `running`.
@@ -105,6 +108,10 @@ mod tests {
         assert_eq!(paused_by(0x3554, &atk), Some("ATK HUB"));
         assert_eq!(paused_by(0x3837, &atk), None);
         assert_eq!(paused_by(0x391D, &["VGN VHUB.exe"]), Some("VGN VHUB"));
+        let m500 = ["M500.exe"];
+        assert_eq!(paused_by(0x249A, &m500), Some("M500"));
+        assert_eq!(paused_by(0x248A, &m500), Some("M500"));
+        assert_eq!(paused_by(0x373B, &m500), None);
         // A brand without a listed app is never paused.
         assert_eq!(paused_by(0x046D, &["ATK HUB.exe", "MCHOSE HUB.exe"]), None);
         assert_eq!(paused_by(0x3837, &[]), None);

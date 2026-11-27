@@ -91,6 +91,8 @@ mod tests {
         assert_eq!(
             ids(|d| d.verified),
             [
+                (0x248A, 0x5D2E),
+                (0x249A, 0x5C2F),
                 (0x373B, 0x1204),
                 (0x373B, 0x1216),
                 (0x373B, 0x1299),
@@ -104,6 +106,7 @@ mod tests {
             (0x373B, 0x11CA),
             (0x373B, 0x1299),
             (0x373B, 0x130E),
+            (0x248A, 0x5D2E),
         ];
         for id in cables {
             assert!(cable.contains(&id), "{id:04X?}");
@@ -116,6 +119,7 @@ mod tests {
             (0x391D, 0x1A05),
             (0x373B, 0x11CB),
             (0x373B, 0x1204),
+            (0x249A, 0x5C2F),
         ];
         for id in receivers {
             assert!(!cable.contains(&id), "{id:04X?}");
@@ -167,6 +171,16 @@ mod tests {
         // 3151:5038 reports itself as a MonsGeek dongle; the NUT75 dongle is 0C45:FEF9.
         let monsgeek = known(0x3151, 0x5038).expect("row is in the catalogue");
         assert_eq!(monsgeek.name, "MonsGeek 2.4G dongle");
+    }
+
+    /// The Delux M500 receiver and the mouse on its cable both speak Xctech.
+    #[test]
+    fn delux_m500_rows_are_xctech_mice() {
+        for (vid, pid) in [(0x249A, 0x5C2F), (0x248A, 0x5D2E)] {
+            let device = known(vid, pid).expect("row is in the catalogue");
+            assert_eq!((device.family, device.kind), (Family::Xctech, Kind::Mouse));
+            assert!(device.verified && !device.needs_capture);
+        }
     }
 
     #[test]
