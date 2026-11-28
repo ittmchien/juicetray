@@ -21,7 +21,7 @@ use ui_model::{
 
 #[cfg(windows)]
 use crate::add_device;
-use crate::alerts::{AlertState, notify_low_battery, notify_update_available};
+use crate::alerts::{AlertState, notify_low_battery};
 #[cfg(windows)]
 use crate::capture;
 use crate::config::{Config, parse_hide_offline_minutes, parse_low_percent};
@@ -106,6 +106,8 @@ pub enum UserEvent {
         manual: bool,
         outcome: Result<UpdateCheck, String>,
     },
+    /// The owner chose "Later" on an update offer: automatic offers wait until tomorrow.
+    UpdateLater,
     /// The new version is installed and starts once this one exits: this instance quits through
     /// the normal exit path.
     UpdateRestart,
@@ -167,6 +169,7 @@ impl UserEvent {
             Self::Action(_) => "Action",
             Self::UpdateDue => "UpdateDue",
             Self::UpdateChecked { .. } => "UpdateChecked",
+            Self::UpdateLater => "UpdateLater",
             Self::UpdateRestart => "UpdateRestart",
             Self::UpdateProgress(_) => "UpdateProgress",
             #[cfg(target_os = "macos")]
@@ -482,6 +485,12 @@ impl App {
                 #[cfg(windows)]
                 return ControlFlow::Wait;
             }
+            // Only the config changes, so no `apply`.
+            UserEvent::UpdateLater => {
+                self.config.update_later = update::today();
+                self.save_config();
+                return ControlFlow::Wait;
+            }
             // Same exit as Quit, so the tray icon and strip are removed first.
             UserEvent::UpdateRestart => {
                 #[cfg(windows)]
@@ -647,6 +656,7 @@ impl App {
                 self.save_config();
             }
             MenuAction::OpenUpdate => self.open_update(),
+            MenuAction::OpenHelp(link) => crate::help::open(link),
         }
     }
 
@@ -1175,23 +1185,24 @@ impl App {
         update::spawn_check(self.proxy.clone(), false);
     }
 
-    /// Remembers the newest release for the menu line. The owner is told once per version: by a
-    /// notification after an automatic check, silently after a manual one (its dialog already did).
+    /// Remembers the newest release for the menu line. An automatic check asks with the update
+    /// dialog unless the owner chose "Later" today; a manual check's own dialog already asks.
     fn on_update_checked(&mut self, manual: bool, outcome: Result<UpdateCheck, String>) {
         match &outcome {
             Ok(UpdateCheck::Available(info)) => {
-                let is_new = update::check::should_notify(
-                    self.config.notified_update.as_deref(),
-                    &info.version,
-                );
-                if is_new {
-                    self.config.notified_update = Some(info.version.clone());
-                    self.save_config();
-                    if !manual {
-                        notify_update_available(&info.version);
-                    }
-                }
                 self.update = Some(info.clone());
+                let should_offer = !manual
+                    && update::check::should_offer(
+                        self.config.update_later.as_deref(),
+                        update::today().as_deref(),
+                    );
+                if should_offer {
+                    #[cfg(windows)]
+                    update::spawn_offer(self.proxy.clone(), info.clone());
+                    // NSAlert needs the main thread, as for a manual check's answer.
+                    #[cfg(target_os = "macos")]
+                    update::offer(info, &self.proxy);
+                }
             }
             Ok(UpdateCheck::UpToDate) => self.update = None,
             // The owner sees a manual check's error in its dialog; an automatic one retries tomorrow.

@@ -56,11 +56,13 @@ fn is_stable_build() -> bool {
     !cfg!(debug_assertions) && option_env!("JUICETRAY_CHANNEL") == Some("stable")
 }
 
-/// `juicetray.log` next to `query-log.toml`.
+/// `juicetray.log` next to `query-log.toml`; `None` when the OS has no data folder.
+pub fn path() -> Option<std::path::PathBuf> {
+    Some(query_log::path()?.with_file_name("juicetray.log"))
+}
+
 fn open() -> Result<Sink> {
-    let path = query_log::path()
-        .context("no data directory")?
-        .with_file_name("juicetray.log");
+    let path = path().context("no data directory")?;
     let dir = path.parent().context("path has no parent folder")?;
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     // Not `append`: Windows append handles cannot truncate, and one process writes the file.

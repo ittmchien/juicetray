@@ -14,6 +14,7 @@ use ui_model::{
 };
 
 use crate::config::{Config, HIDE_OFFLINE_CHOICES, LOW_CHOICES, REFRESH_CHOICES, hex, parse_color};
+use crate::help::HelpLink;
 use crate::interval::format_interval;
 use crate::login::LoginState;
 use crate::symbols::symbol_for_device;
@@ -31,6 +32,17 @@ const CUSTOM_OFFLINE_ID: &str = "offline:custom";
 const REFRESH_ON_BATTERY_ID: &str = "refresh-battery";
 const DETECT_NEW_DEVICES_ID: &str = "detect-new";
 const ADD_DEVICE_ID: &str = "add-device";
+/// The submenu of project links, the problem report and the log folder.
+const HELP_LABEL: &str = "Help";
+/// Help entries in menu order (id, action); `None` marks a separator.
+const HELP_ITEMS: [Option<(&str, HelpLink)>; 6] = [
+    Some(("help:github", HelpLink::GitHub)),
+    Some(("help:whats-new", HelpLink::WhatsNew)),
+    Some(("help:devices", HelpLink::Devices)),
+    None,
+    Some(("help:report", HelpLink::Report)),
+    Some(("help:logs", HelpLink::Logs)),
+];
 /// Only Windows watches for new devices and has the Add device window, so only it offers them.
 const DETECT_NEW_AVAILABLE: bool = cfg!(windows);
 const ICON_AUTO: &str = "auto";
@@ -140,6 +152,8 @@ pub enum MenuAction {
     ToggleCheckUpdates,
     /// Offer the update the menu announces: install it, open its download page or leave it.
     OpenUpdate,
+    /// Open a Help submenu link or the log folder.
+    OpenHelp(HelpLink),
     Quit,
 }
 
@@ -216,6 +230,9 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         CUSTOM_LOW_ID => return Some(MenuAction::CustomLow),
         CUSTOM_OFFLINE_ID => return Some(MenuAction::CustomHideOffline),
         _ => {}
+    }
+    if let Some((_, link)) = HELP_ITEMS.iter().flatten().find(|(help, _)| *help == id) {
+        return Some(MenuAction::OpenHelp(*link));
     }
     let (action, rest) = id.split_once(':')?;
     let device = rest.to_owned();
@@ -311,6 +328,7 @@ pub fn menu_entries(
     // The main menu keeps the devices and everyday commands; every option lives under Settings.
     entries.extend([
         MenuEntry::submenu(SETTINGS_LABEL, settings_entries(config, login, has_battery)),
+        MenuEntry::submenu(HELP_LABEL, help_entries()),
         MenuEntry::separator(),
         // The running version sits on the update line; a second check waits for the install.
         MenuEntry {
@@ -381,6 +399,27 @@ fn settings_entries(config: &Config, login: LoginState, has_battery: bool) -> Ve
         ),
     ]);
     entries
+}
+
+/// The Help submenu: project pages, then the problem report and the log folder.
+fn help_entries() -> Vec<MenuEntry> {
+    HELP_ITEMS
+        .iter()
+        .map(|item| match item {
+            Some((id, link)) => MenuEntry::item(id, help_text(*link)),
+            None => MenuEntry::separator(),
+        })
+        .collect()
+}
+
+fn help_text(link: HelpLink) -> String {
+    match link {
+        HelpLink::GitHub => "Juicetray on GitHub".to_owned(),
+        HelpLink::WhatsNew => format!("What's new in v{}", env!("CARGO_PKG_VERSION")),
+        HelpLink::Devices => "Supported devices".to_owned(),
+        HelpLink::Report => "Report a problem…".to_owned(),
+        HelpLink::Logs => "Open log folder".to_owned(),
+    }
 }
 
 /// The line that announces a newer release; the caller puts it at the top of the menu.
@@ -853,12 +892,37 @@ mod tests {
         }
         expected.extend([
             (None, SETTINGS_LABEL),
+            (None, HELP_LABEL),
             (None, ""),
             (Some(CHECK_UPDATES_ID), check.as_str()),
             (Some("quit"), "Quit"),
         ]);
         assert_eq!(shape(&all), expected);
         assert!(all.iter().all(|e| e.enabled || e.id.is_none()));
+
+        // Help lists the project links, a separator, then the report and the log folder.
+        let help = all.iter().find(|e| e.text == HELP_LABEL).unwrap();
+        let whats_new = format!("What's new in v{}", env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            shape(&help.children),
+            [
+                (Some("help:github"), "Juicetray on GitHub"),
+                (Some("help:whats-new"), whats_new.as_str()),
+                (Some("help:devices"), "Supported devices"),
+                (None, ""),
+                (Some("help:report"), "Report a problem…"),
+                (Some("help:logs"), "Open log folder"),
+            ]
+        );
+        assert_eq!(
+            action_for("help:logs"),
+            Some(MenuAction::OpenHelp(HelpLink::Logs))
+        );
+        assert_eq!(
+            action_for("help:github"),
+            Some(MenuAction::OpenHelp(HelpLink::GitHub))
+        );
+        assert_eq!(action_for("help:nope"), None);
 
         // With no device the empty label takes the devices' place.
         let empty = menu_entries(

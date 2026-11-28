@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use objc2_foundation::{NSDate, NSDateFormatter, NSString};
 use tao::event_loop::EventLoopProxy;
 
 use super::check::UpdateInfo;
@@ -102,6 +103,8 @@ pub fn offer(info: &UpdateInfo, proxy: &EventLoopProxy<UserEvent>) {
             );
             if dialog::confirm(DIALOG_TITLE, &message, "Update now", "Later") {
                 spawn_install(homebrew, info.version.clone(), proxy.clone());
+            } else {
+                later(proxy);
             }
         }
         None => {
@@ -111,9 +114,24 @@ pub fn offer(info: &UpdateInfo, proxy: &EventLoopProxy<UserEvent>) {
             );
             if dialog::confirm(DIALOG_TITLE, &message, "Open download page", "Later") {
                 super::open_url(&info.url);
+            } else {
+                later(proxy);
             }
         }
     }
+}
+
+/// "Later" holds automatic offers until tomorrow; the event loop stores the date.
+fn later(proxy: &EventLoopProxy<UserEvent>) {
+    // A closed event loop means the app is exiting.
+    let _ = proxy.send_event(UserEvent::UpdateLater);
+}
+
+/// Today's local date as `yyyy-MM-dd`, the day a "Later" holds offers for.
+pub fn today() -> Option<String> {
+    let formatter = NSDateFormatter::new();
+    formatter.setDateFormat(Some(&NSString::from_str("yyyy-MM-dd")));
+    Some(formatter.stringFromDate(&NSDate::now()).to_string())
 }
 
 /// Offers to copy a bundle running outside Applications into /Applications; true when the copy
