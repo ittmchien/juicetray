@@ -33,7 +33,8 @@ tray — right next to the clock, without each vendor's software.
 - 🔔 **Low-battery alert** at the level you pick.
 - 🛠️ **Per-device options** — hide a device, its percentage or name; pick its icon and colours.
 - 🪶 **Featherweight** — about 10 MB of RAM, ~0.05 % CPU at idle, a 2 MB portable exe.
-- 🔄 **One-click updates** — checked once a day, verified before install.
+- 🔄 **One-click updates** — checked at every start, verified before install; **Later** quiets
+  it for the day.
 
 ## ⬇️ Install
 

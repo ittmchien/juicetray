@@ -1,9 +1,9 @@
-//! The platform-neutral half of the update flow: the once-a-day schedule, the check thread and a
-//! manual check's answer. Fetching and offering are the platform module's.
+//! The platform-neutral half of the update flow: the launch and daily schedule, the check thread
+//! and a manual check's answer. Fetching and offering are the platform module's.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use tao::event_loop::EventLoopProxy;
 
@@ -28,66 +28,24 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 /// One check at a time; a click or tick meanwhile is dropped.
 static CHECKING: AtomicBool = AtomicBool::new(false);
 
-/// Sends `UserEvent::UpdateDue` at most once a day from one sleeping thread, counting from the
-/// last check stored on disk; the sleep clock stops while the machine sleeps (awake time only).
+/// Sends `UserEvent::UpdateDue` a minute after every launch (so a login start checks too), then
+/// once a day from one sleeping thread; the sleep clock stops while the machine sleeps.
 pub fn spawn_scheduler(proxy: EventLoopProxy<UserEvent>) {
     let spawned = thread::Builder::new()
         .name("update-schedule".into())
         .spawn(move || {
-            let mut wait = check::next_check_wait(
-                last_check(),
-                SystemTime::now(),
-                CHECK_INTERVAL,
-                FIRST_CHECK_DELAY,
-            );
+            let mut wait = FIRST_CHECK_DELAY;
             loop {
                 thread::sleep(wait);
                 // A closed event loop means the app is exiting.
                 if proxy.send_event(UserEvent::UpdateDue).is_err() {
                     return;
                 }
-                save_last_check(SystemTime::now());
                 wait = CHECK_INTERVAL;
             }
         });
     if let Err(error) = spawned {
         eprintln!("update scheduler thread failed: {error}");
-    }
-}
-
-/// File holding the time of the last automatic check, in whole seconds since the Unix epoch.
-fn last_check_path() -> Option<std::path::PathBuf> {
-    Some(
-        crate::config::project_dirs()?
-            .data_local_dir()
-            .join("last-update-check"),
-    )
-}
-
-/// The stored last-check time; a missing or unreadable file means "never".
-fn last_check() -> Option<SystemTime> {
-    let text = std::fs::read_to_string(last_check_path()?).ok()?;
-    let secs: u64 = text.trim().parse().ok()?;
-    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
-}
-
-/// Stores the last-check time; failing only means the next start may check a day early.
-fn save_last_check(at: SystemTime) {
-    let Some(path) = last_check_path() else {
-        return;
-    };
-    let secs = at
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let saved = path
-        .parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| std::fs::write(&path, secs.to_string()));
-    if let Err(error) = saved {
-        log::line(&format!(
-            "saving the last update check failed: {}",
-            error.kind()
-        ));
     }
 }
 

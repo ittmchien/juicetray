@@ -3,9 +3,11 @@
 Back to the [README](../README.md).
 
 Juicetray checks [GitHub Releases](https://github.com/ittmchien/juicetray/releases) for a newer
-version at most once a day (restarting the app does not check again). Turn it off
-with **Check for updates automatically** under **Settings**, or check by hand with **Check for
-updates…**. The request sends nothing but the version in the User-Agent (`juicetray/<version>`).
+version a minute after every start (so also when the computer starts with Juicetray), then
+once a day while it runs. A newer version opens the update dialog; choose **Later** and
+Juicetray stops asking until the next day, while the menu still shows the update line. Turn
+checks off with **Check for updates automatically** under **Settings**, or check by hand with
+**Check for updates…**. The request sends nothing but the version in the User-Agent (`juicetray/<version>`).
 
 On Windows, while **Detect new devices** is on, the "New device found" popup for a device the
 built-in catalogue does not know first downloads the public catalogue files from the `main` branch

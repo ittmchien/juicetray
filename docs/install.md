@@ -38,6 +38,7 @@ General › Login Items). Settings live in
   earbuds show Apple's own symbol.
 - 🪶 **Featherweight** — about 10 MB of RAM, ~0.05 % CPU at idle, a 2 MB portable exe on Windows;
   it pauses auto-refresh on laptop battery unless you turn on **Refresh on battery power**.
-- 🔄 **Updates in one click** — checks GitHub Releases once a day; **Update now** verifies the
+- 🔄 **Updates in one click** — checks GitHub Releases at every start and once a day, and asks
+  at most once a day after **Later**; **Update now** verifies the
   download's SHA-256 before swapping the exe on Windows, and runs `brew upgrade` on macOS.
 - 🛡️ **Read-only and gentle** — never changes a device setting; see Safety in the [README](../README.md#%EF%B8%8F-safety).

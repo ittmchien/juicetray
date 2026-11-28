@@ -1,5 +1,5 @@
-//! Update checks against this project's GitHub Releases: once a day (and on request) from
-//! short-lived threads. Windows can replace its own exe with the release's (checked against the
+//! Update checks against this project's GitHub Releases: at launch, then once a day (and on
+//! request) from short-lived threads. Windows can replace its own exe with the release's (checked against the
 //! release's SHA256SUMS.txt); macOS upgrades a Homebrew install with `brew upgrade` and otherwise
 //! opens the download page.
 
@@ -18,9 +18,9 @@ mod windows;
 pub use self::common::show_outcome;
 pub use self::common::{spawn_check, spawn_scheduler};
 #[cfg(target_os = "macos")]
-pub use self::macos::{offer, offer_move_to_applications};
+pub use self::macos::{offer, offer_move_to_applications, today};
 #[cfg(windows)]
-pub use self::windows::{shell_open, spawn_cleanup, spawn_offer};
+pub use self::windows::{shell_open, spawn_cleanup, spawn_offer, today};
 // The remote catalogue lookup shares the GitHub-only HTTPS GET.
 #[cfg(windows)]
 pub(crate) use self::windows::get_within;

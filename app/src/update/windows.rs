@@ -15,6 +15,7 @@ use windows::Win32::Networking::WinHttp::{
     WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders, WinHttpQueryOption,
     WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
 };
+use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, PCWSTR, w};
@@ -114,16 +115,34 @@ pub(super) fn offer(info: &UpdateInfo, proxy: &EventLoopProxy<UserEvent>) {
             match answer {
                 Answer::Ok => update_now(info, assets, proxy),
                 Answer::Alt => open_page(&info.url),
-                Answer::Cancel => {}
+                Answer::Cancel => later(proxy),
             }
         }
         None => {
             if dialog::confirm(DIALOG_TITLE, &message, "Open download page", "Later") {
                 open_page(&info.url);
+            } else {
+                later(proxy);
             }
         }
     }
     OFFERING.store(false, Ordering::Relaxed);
+}
+
+/// "Later" holds automatic offers until tomorrow; the UI thread stores the date.
+fn later(proxy: &EventLoopProxy<UserEvent>) {
+    // A closed event loop means the app is exiting.
+    let _ = proxy.send_event(UserEvent::UpdateLater);
+}
+
+/// Today's local date as `YYYY-MM-DD`, the day a "Later" holds offers for.
+pub fn today() -> Option<String> {
+    // SAFETY: GetLocalTime only fills the returned struct.
+    let now = unsafe { GetLocalTime() };
+    Some(format!(
+        "{:04}-{:02}-{:02}",
+        now.wYear, now.wMonth, now.wDay
+    ))
 }
 
 /// Installs the release, reporting each step to the menu, and asks the UI thread to exit once

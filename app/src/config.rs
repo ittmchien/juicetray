@@ -88,10 +88,11 @@ pub struct Config {
     pub detect_new_devices: bool,
     /// Keep auto-refreshing while a laptop runs on battery; off by default.
     pub refresh_on_battery: bool,
-    /// Ask GitHub Releases for a newer version once a day (Windows); on by default.
+    /// Ask GitHub Releases for a newer version at launch and once a day; on by default.
     pub check_updates: bool,
-    /// The newest version already announced, so one release is never announced twice.
-    pub notified_update: Option<String>,
+    /// The local date (`YYYY-MM-DD`) the owner last chose "Later" on an update offer; automatic
+    /// checks stay silent for the rest of that day.
+    pub update_later: Option<String>,
     /// Offer to move a copy running outside Applications there (macOS); off once the owner
     /// declined with "Not now".
     pub ask_move_to_applications: bool,
@@ -112,7 +113,7 @@ impl Default for Config {
             detect_new_devices: true,
             refresh_on_battery: false,
             check_updates: true,
-            notified_update: None,
+            update_later: None,
             ask_move_to_applications: true,
         }
     }
@@ -155,10 +156,11 @@ impl Config {
                 .get("check_updates")
                 .and_then(Value::as_bool)
                 .unwrap_or(defaults.check_updates),
-            notified_update: table
-                .get("notified_update")
+            // An old `notified_update` line is ignored and dropped on the next save.
+            update_later: table
+                .get("update_later")
                 .and_then(Value::as_str)
-                .filter(|version| !version.is_empty())
+                .filter(|day| !day.is_empty())
                 .map(str::to_owned),
             ask_move_to_applications: table
                 .get("ask_move_to_applications")
@@ -191,8 +193,8 @@ impl Config {
             "detect_new_devices".into(),
             Value::Boolean(self.detect_new_devices),
         );
-        if let Some(version) = &self.notified_update {
-            table.insert("notified_update".into(), Value::String(version.clone()));
+        if let Some(day) = &self.update_later {
+            table.insert("update_later".into(), Value::String(day.clone()));
         }
         table.insert("hidden".into(), string_array(&self.hidden));
         table.insert("hidden_ids".into(), string_array(&self.hidden_ids));
@@ -804,7 +806,7 @@ mod tests {
             detect_new_devices: false,
             refresh_on_battery: true,
             check_updates: false,
-            notified_update: Some("0.2.0".into()),
+            update_later: Some("2026-11-28".into()),
             ask_move_to_applications: false,
         };
         assert_eq!(Config::parse(&config.to_toml()), config);
@@ -832,32 +834,30 @@ mod tests {
         // An old file without the keys, or with wrongly typed ones, keeps the defaults.
         for text in [
             "refresh_seconds = 300",
-            "check_updates = \"no\"\nnotified_update = 3",
+            "check_updates = \"no\"\nupdate_later = 3",
+            "notified_update = \"0.3.1\"",
         ] {
             let config = Config::parse(text);
             assert!(config.check_updates, "{text}");
-            assert_eq!(config.notified_update, None, "{text}");
+            assert_eq!(config.update_later, None, "{text}");
         }
         assert!(!Config::parse("check_updates = false").check_updates);
         // The move prompt defaults on and only an explicit false turns it off.
         assert!(Config::default().ask_move_to_applications);
         assert!(Config::parse("ask_move_to_applications = \"no\"").ask_move_to_applications);
         assert!(!Config::parse("ask_move_to_applications = false").ask_move_to_applications);
-        assert_eq!(
-            Config::parse("notified_update = \"\"").notified_update,
-            None
-        );
+        assert_eq!(Config::parse("update_later = \"\"").update_later, None);
 
-        // Nothing announced yet writes no `notified_update` line.
+        // No "Later" yet writes no `update_later` line.
         let written = Config::default().to_toml();
         assert!(written.contains("check_updates = true"));
-        assert!(!written.contains("notified_update"));
-        let announced = Config {
-            notified_update: Some("0.3.1".into()),
+        assert!(!written.contains("update_later"));
+        let held = Config {
+            update_later: Some("2026-11-28".into()),
             ..Config::default()
         };
-        assert!(announced.to_toml().contains("notified_update = \"0.3.1\""));
-        assert_eq!(Config::parse(&announced.to_toml()), announced);
+        assert!(held.to_toml().contains("update_later = \"2026-11-28\""));
+        assert_eq!(Config::parse(&held.to_toml()), held);
     }
 
     #[test]

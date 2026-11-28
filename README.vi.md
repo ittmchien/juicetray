@@ -33,7 +33,8 @@ cạnh đồng hồ, không cần cài phần mềm của từng hãng.
 - 🔔 **Cảnh báo pin yếu** theo ngưỡng bạn chọn.
 - 🛠️ **Tuỳ chỉnh từng thiết bị** — ẩn thiết bị, phần trăm hoặc tên; chọn icon và màu.
 - 🪶 **Siêu nhẹ** — khoảng 10 MB RAM, ~0,05 % CPU lúc rảnh, file exe portable 2 MB.
-- 🔄 **Cập nhật một chạm** — kiểm mỗi ngày một lần, xác thực trước khi cài.
+- 🔄 **Cập nhật một chạm** — kiểm mỗi lần khởi động, xác thực trước khi cài; bấm **Later** thì
+  không hỏi lại trong ngày.
 
 ## ⬇️ Cài đặt
 

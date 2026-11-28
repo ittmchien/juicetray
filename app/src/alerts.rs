@@ -53,15 +53,6 @@ pub fn notify_low_battery(device: &DeviceView) {
     post(format!("{name} battery low"), format!("{percent}% left"));
 }
 
-/// Tells the owner a newer release exists; the tray menu line offers it.
-pub fn notify_update_available(version: &str) {
-    log::trace(format_args!("notification spawn update {version}"));
-    post(
-        format!("Juicetray v{version} is available"),
-        "Open the tray menu to download it.".to_owned(),
-    );
-}
-
 /// Tells the owner "Update now" started; the tray menu shows each step until the restart.
 pub fn notify_update_started(version: &str) {
     log::trace(format_args!("notification spawn updating {version}"));
