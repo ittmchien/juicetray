@@ -21,6 +21,7 @@ mod context_menu;
 mod device;
 mod dialog;
 mod efficiency;
+mod help;
 mod hid_caps;
 mod instance;
 mod interval;

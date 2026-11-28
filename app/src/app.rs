@@ -647,6 +647,7 @@ impl App {
                 self.save_config();
             }
             MenuAction::OpenUpdate => self.open_update(),
+            MenuAction::OpenHelp(link) => crate::help::open(link),
         }
     }
 
